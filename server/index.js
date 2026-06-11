@@ -8,6 +8,7 @@ const PORT = Number(process.env.PORT || 5173);
 const ROOT = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT, "public");
 const sessions = new Map();
+const TOKEN_SECRET = process.env.AUTH_SECRET || "smart-campus-public-demo-v1";
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -62,8 +63,28 @@ function parseBody(req) {
 function getCurrentUser(req) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  const userId = sessions.get(token);
+  const userId = verifyToken(token) || sessions.get(token);
   return data.users.find((user) => user.id === userId) || null;
+}
+
+function createToken(userId) {
+  const payload = Buffer.from(userId, "utf8").toString("base64url");
+  const signature = crypto.createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifyToken(token) {
+  const [payload, signature] = String(token || "").split(".");
+  if (!payload || !signature) return "";
+  const expected = crypto.createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return "";
+  try {
+    return Buffer.from(payload, "base64url").toString("utf8");
+  } catch {
+    return "";
+  }
 }
 
 function requireUser(req, res) {
@@ -128,8 +149,7 @@ async function handleApi(req, res) {
       sendError(res, 401, "手机号或验证码错误");
       return;
     }
-    const token = crypto.randomBytes(24).toString("hex");
-    sessions.set(token, user.id);
+    const token = createToken(user.id);
     sendJson(res, 200, { token, user: publicUser(user) });
     return;
   }
