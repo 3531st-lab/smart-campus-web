@@ -655,6 +655,10 @@ async function api(path, options = {}) {
       ...(options.headers || {})
     }
   });
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(response.ok ? "服务返回格式异常，请稍后重试" : "服务暂不可用，请稍后重试");
+  }
   const payload = await response.json();
   if (!response.ok) {
     throw new Error(payload.error || "请求失败");
