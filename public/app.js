@@ -21,11 +21,12 @@ const state = {
   route: routeFromLocation()
 };
 
-const APP_BUILD = "login-particles-v29-20260609";
+const APP_BUILD = "campus-intro-v48-20260611";
 window.__SMART_CAMPUS_BUILD__ = APP_BUILD;
 let renderShellVersion = 0;
 let dashboardGreetingTimer = null;
 let loginParticleCleanup = null;
+let authView = "intro";
 
 const moduleGroups = [
   {
@@ -839,6 +840,7 @@ function renderLogin() {
   app.innerHTML = `
     <main class="login-wrap">
       <canvas class="login-particles" id="loginParticles" aria-hidden="true"></canvas>
+      <button class="login-back-btn" id="loginBackBtn" type="button">返回浏览页</button>
       <button class="login-theme-toggle" id="loginThemeToggle" type="button" aria-label="切换白天与夜晚主题">
         <span aria-hidden="true">${document.documentElement.dataset.theme === "day" ? "☀" : "☾"}</span>
         <strong>${document.documentElement.dataset.theme === "day" ? "白天" : "夜晚"}</strong>
@@ -877,6 +879,10 @@ function renderLogin() {
   `;
 
   initLoginParticles();
+  document.querySelector("#loginBackBtn")?.addEventListener("click", () => {
+    authView = "intro";
+    renderIntro();
+  });
   document.querySelector("#loginThemeToggle")?.addEventListener("click", () => {
     const nextTheme = document.documentElement.dataset.theme === "day" ? "night" : "day";
     applyTheme(nextTheme, true);
@@ -900,6 +906,112 @@ function renderLogin() {
     } catch (error) {
       toast(error.message);
     }
+  });
+}
+
+function renderIntro() {
+  stopLoginParticles();
+  const isDay = document.documentElement.dataset.theme === "day";
+  app.innerHTML = `
+    <main class="campus-intro">
+      <canvas class="login-particles" id="loginParticles" aria-hidden="true"></canvas>
+      <header class="intro-nav">
+        <a class="intro-brand" href="#introTop" aria-label="智慧校园首页">
+          <img src="/assets/campus-mark.png" alt="智慧校园标识" />
+          <span><strong>智慧校园</strong><small>SMART CAMPUS</small></span>
+        </a>
+        <nav aria-label="浏览页导航">
+          <a href="#introServices">校园服务</a>
+          <a href="#introExperience">产品体验</a>
+        </nav>
+        <div class="intro-nav-actions">
+          <button class="intro-theme-btn" id="introThemeBtn" type="button" aria-label="切换白天与夜晚主题">${isDay ? "白天" : "夜晚"}</button>
+          <button class="intro-login-btn" data-enter-login type="button">进入登录</button>
+        </div>
+      </header>
+
+      <section class="intro-hero" id="introTop">
+        <div class="intro-hero-copy">
+          <p class="intro-eyebrow"><span></span> 泰州学院一站式校园生活入口</p>
+          <h1>把校园装进口袋，<br /><em>让青春更从容。</em></h1>
+          <p class="intro-summary">从今天的课程，到下一场考试；从实验室预约，到灵感迸发的 AI 助手。智慧校园把学习与生活连接成一条轻松的路径。</p>
+          <div class="intro-hero-actions">
+            <button class="intro-primary" data-enter-login type="button">开始体验 <span>→</span></button>
+            <a class="intro-secondary" href="#introServices">浏览校园服务</a>
+          </div>
+          <dl class="intro-metrics" aria-label="产品概览">
+            <div><dt>15+</dt><dd>校园服务入口</dd></div>
+            <div><dt>197</dt><dd>考试报名项目</dd></div>
+            <div><dt>123</dt><dd>学习工作软件</dd></div>
+          </dl>
+        </div>
+
+        <div class="intro-orbit" aria-label="智慧校园核心能力">
+          <div class="intro-orbit-ring intro-orbit-ring-one"></div>
+          <div class="intro-orbit-ring intro-orbit-ring-two"></div>
+          <div class="intro-orbit-core">
+            <img src="/assets/campus-mark.png" alt="" />
+            <strong>校园生活</strong>
+            <span>一站连接</span>
+          </div>
+          <article class="intro-orbit-card orbit-course"><small>今日安排</small><strong>我的课表</strong><span>实时同步课程变化</span></article>
+          <article class="intro-orbit-card orbit-lab"><small>校园空间</small><strong>实验室预约</strong><span>查空闲 · 快速预约</span></article>
+          <article class="intro-orbit-card orbit-ai"><small>学习搭档</small><strong>AI 助手</strong><span>问答 · 写作 · 分析</span></article>
+          <article class="intro-orbit-card orbit-software"><small>学习与工作</small><strong>软件库</strong><span>专业工具轻松获取</span></article>
+        </div>
+      </section>
+
+      <section class="intro-service-band" id="introServices">
+        <div class="intro-section-heading">
+          <p>从清晨第一节课，到夜晚最后一次灵感记录</p>
+          <h2>校园每一刻，都有顺手的服务</h2>
+        </div>
+        <div class="intro-service-grid">
+          <article><span>01</span><strong>学习安排</strong><p>课表、成绩、考试报名与空教室查询集中呈现，重要节点不错过。</p></article>
+          <article><span>02</span><strong>校园生活</strong><p>实验室、图书馆、食堂与校园活动随时可查，安排更有把握。</p></article>
+          <article><span>03</span><strong>成长工具</strong><p>AI 助手、软件库和学习工具，让课堂之外的创造更自由。</p></article>
+        </div>
+      </section>
+
+      <section class="intro-experience" id="introExperience">
+        <div class="intro-experience-media">
+          <img src="/assets/campus-card-youth-v1.png" alt="青春校园生活场景" />
+          <div><span>青春校园</span><strong>不仅是办事，更是探索与成长。</strong></div>
+        </div>
+        <div class="intro-experience-copy">
+          <p class="intro-eyebrow"><span></span> 为同学而设计</p>
+          <h2>信息更清晰，行动更轻松</h2>
+          <p>白天明快、夜晚沉静，两种主题随系统时间切换。常用服务保持在触手可及的位置，让每一次查询、预约和学习都少一点等待。</p>
+          <ul>
+            <li><strong>实时同步</strong><span>课程安排与首页课表保持一致</span></li>
+            <li><strong>移动优先</strong><span>手机上也能快速完成常用操作</span></li>
+            <li><strong>持续生长</strong><span>更多校园服务将不断加入</span></li>
+          </ul>
+          <button class="intro-primary" data-enter-login type="button">进入智慧校园 <span>→</span></button>
+        </div>
+      </section>
+
+      <footer class="intro-footer">
+        <div class="intro-brand">
+          <img src="/assets/campus-mark.png" alt="" />
+          <span><strong>智慧校园</strong><small>泰州学院统一服务平台</small></span>
+        </div>
+        <button data-enter-login type="button">开始我的校园旅程 →</button>
+      </footer>
+    </main>
+  `;
+
+  initLoginParticles();
+  document.querySelector("#introThemeBtn")?.addEventListener("click", () => {
+    const nextTheme = document.documentElement.dataset.theme === "day" ? "night" : "day";
+    applyTheme(nextTheme, true);
+    renderIntro();
+  });
+  document.querySelectorAll("[data-enter-login]").forEach((button) => {
+    button.addEventListener("click", () => {
+      authView = "login";
+      renderLogin();
+    });
   });
 }
 
@@ -1155,7 +1267,8 @@ async function renderShell() {
   }
 
   if (!state.token) {
-    renderLogin();
+    if (authView === "login") renderLogin();
+    else renderIntro();
     return;
   }
 
@@ -1168,7 +1281,8 @@ async function renderShell() {
       if (renderVersion !== renderShellVersion) return;
       state.token = "";
       localStorage.removeItem("smart_taiyuan_token");
-      renderLogin();
+      authView = "intro";
+      renderIntro();
       return;
     }
   }
@@ -3350,7 +3464,8 @@ const routes = {
           state.token = "";
           state.user = null;
           localStorage.removeItem("smart_taiyuan_token");
-          renderLogin();
+          authView = "intro";
+          renderIntro();
         });
       }
     };
