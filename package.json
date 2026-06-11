@@ -1,0 +1,13 @@
+{
+  "name": "smart-taiyuan-campus-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "智慧校园网页版框架：Web 单页应用 + App 互通 REST API 骨架",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
