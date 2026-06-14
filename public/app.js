@@ -21,12 +21,91 @@ const state = {
   route: routeFromLocation()
 };
 
-const APP_BUILD = "campus-intro-v48-20260611";
+const APP_BUILD = "real-ai-api-v73-20260614";
 window.__SMART_CAMPUS_BUILD__ = APP_BUILD;
 let renderShellVersion = 0;
 let dashboardGreetingTimer = null;
 let loginParticleCleanup = null;
 let authView = "intro";
+const YOUTH_THEME_STORAGE_KEY = "smart_campus_youth_theme_v1";
+const YOUTH_MUSIC_STORAGE_KEY = "smart_campus_youth_music_v1";
+let youthAudio = null;
+
+const youthThemes = {
+  spring: {
+    label: "春", icon: "✿", track: "春日来信", accent: "#ff8fb5",
+    eyebrow: "SPRING · 花开有信",
+    title: "花开正好，<br /><em>去遇见新的故事。</em>",
+    summary: "春风翻开新一页，课程、朋友和期待都在慢慢发芽。",
+    particle: "petal"
+  },
+  summer: {
+    label: "夏", icon: "☀", track: "盛夏微风", accent: "#b9dc39",
+    eyebrow: "SUMMER · 蝉鸣与风",
+    title: "蝉鸣越过树梢，<br /><em>青春正好。</em>",
+    summary: "学习、成长、朋友与热爱，都在这个夏天发生。",
+    particle: "leaf"
+  },
+  autumn: {
+    label: "秋", icon: "◆", track: "银杏小路", accent: "#f3aa37",
+    eyebrow: "AUTUMN · 风有回信",
+    title: "落叶写下秋天，<br /><em>收获正在发生。</em>",
+    summary: "把认真收藏进每一页，也把温暖留在并肩走过的路上。",
+    particle: "leaf"
+  },
+  winter: {
+    label: "冬", icon: "❄", track: "初雪晚灯", accent: "#a7d8ff",
+    eyebrow: "WINTER · 初雪如约",
+    title: "雪落在肩头，<br /><em>灯火照亮归途。</em>",
+    summary: "冬日很长，但教室的灯、朋友的笑和新的目标一直温暖。",
+    particle: "snow"
+  },
+  sunset: {
+    label: "夕阳", icon: "◒", track: "橘色晚风", accent: "#ff8a55",
+    eyebrow: "SUNSET · 今日高光",
+    title: "奔跑吧，<br /><em>趁晚霞还在。</em>",
+    summary: "课程结束以后，操场、社团和热爱让今天继续闪光。",
+    particle: "petal"
+  },
+  starry: {
+    label: "星空", icon: "✦", track: "星河入梦", accent: "#9ca8ff",
+    eyebrow: "STARRY · 梦在发光",
+    title: "抬头看，<br /><em>梦正在发光。</em>",
+    summary: "在星空下许下愿望，在每一次学习与探索里靠近未来。",
+    particle: "star"
+  }
+};
+
+function automaticYouthTheme(now = new Date()) {
+  const hour = now.getHours();
+  if (hour >= 18 || hour < 5) return "starry";
+  if (hour >= 16) return "sunset";
+  const month = now.getMonth() + 1;
+  if (month >= 3 && month <= 5) return "spring";
+  if (month >= 6 && month <= 8) return "summer";
+  if (month >= 9 && month <= 11) return "autumn";
+  return "winter";
+}
+
+function youthThemePreference() {
+  const stored = localStorage.getItem(YOUTH_THEME_STORAGE_KEY) || "auto";
+  return stored === "auto" || youthThemes[stored] ? stored : "auto";
+}
+
+function activeYouthTheme() {
+  const preference = youthThemePreference();
+  return preference === "auto" ? automaticYouthTheme() : preference;
+}
+
+function setYouthTheme(preference) {
+  const wasPlaying = Boolean(youthAudio);
+  localStorage.setItem(YOUTH_THEME_STORAGE_KEY, preference);
+  renderIntro();
+  if (wasPlaying) {
+    startYouthAudio(activeYouthTheme());
+    updateYouthRadio(activeYouthTheme());
+  }
+}
 
 const moduleGroups = [
   {
@@ -62,11 +141,23 @@ const moduleGroups = [
   },
   {
     title: "个人服务",
-    items: [{ id: "profile", label: "个人中心", icon: "○", desc: "账号、认证、支付绑定" }]
+    items: [
+      { id: "profile", label: "个人中心", icon: "○", desc: "账号、认证、支付绑定" },
+      { id: "student-admin", label: "学生身份库", icon: "▦", desc: "学生、老师与管理员账号管理", adminOnly: true }
+    ]
   }
 ];
 
 const navItems = moduleGroups.flatMap((group) => group.items);
+function canAccessStudentAdmin() {
+  return ["admin", "super_admin"].includes(state.user?.role);
+}
+
+function visibleModuleGroups() {
+  return moduleGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => !item.adminOnly || canAccessStudentAdmin()) }))
+    .filter((group) => group.items.length);
+}
 function routeFromLocation() {
   if (location.hash) return location.hash.slice(1);
   const path = location.pathname.replace(/^\/+|\/+$/g, "");
@@ -103,7 +194,7 @@ const aiProviderPresets = [
   { id: "openrouter", name: "OpenRouter / 聚合", region: "全球", protocol: "OpenAI 兼容", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-5.2", doc: "https://openrouter.ai/docs" },
   { id: "custom", name: "自定义 OpenAI 兼容", region: "自定义", protocol: "OpenAI 兼容", baseUrl: "https://your-endpoint.example/v1", model: "your-model", doc: "" }
 ];
-const AI_PANEL_SCHEMA = "timetable-import-modal-v24-20260602";
+const AI_PANEL_SCHEMA = "real-server-ai-v25-20260614";
 const AI_CONFIG_KEY = "smart_campus_ai_config_panel_v2";
 const AI_MESSAGES_KEY = "smart_campus_ai_messages_panel_v2";
 const app = document.querySelector("#app");
@@ -278,6 +369,243 @@ function initLoginParticles() {
     window.removeEventListener("pointermove", movePointer);
     window.removeEventListener("pointerleave", leavePointer);
   };
+}
+
+function initYouthAtmosphere(themeId) {
+  stopLoginParticles();
+  const canvas = document.querySelector("#youthAtmosphere");
+  if (!canvas) return;
+  const context = canvas.getContext("2d");
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const kind = youthThemes[themeId].particle;
+  const palette = {
+    spring: ["#ffd1e2", "#ff9fc4", "#fff0f7"],
+    summer: ["#ffffff", "#d7f5d0", "#f4ffdc"],
+    autumn: ["#f6b43b", "#e8712c", "#ffd56b"],
+    winter: ["#ffffff", "#dff4ff", "#bfe4ff"],
+    sunset: ["#ffc2b4", "#ff8b83", "#ffe0c7"],
+    starry: ["#eef1ff", "#aebdff", "#fff2b9"]
+  }[themeId];
+  const pointer = { x: innerWidth / 2, y: innerHeight / 2 };
+  const pointerMotion = { x: 0, y: 0, lastX: innerWidth / 2, lastY: innerHeight / 2 };
+  let width = 0;
+  let height = 0;
+  let frame = 0;
+  let motes = [];
+
+  const resize = () => {
+    const ratio = Math.min(devicePixelRatio || 1, 2);
+    width = canvas.clientWidth;
+    height = canvas.clientHeight;
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const count = reducedMotion ? 18 : Math.min(64, Math.max(30, Math.round(width / 24)));
+    motes = Array.from({ length: count }, (_, index) => ({
+      x: Math.random() * width,
+      y: Math.random() * height,
+      size: 1.5 + Math.random() * (kind === "snow" ? 4 : 7),
+      speed: (themeId === "autumn" ? 0.4 : 0.18) + Math.random() * (themeId === "winter" ? 0.7 : 0.58),
+      drift: (themeId === "summer" ? 0.18 : -0.15) + (Math.random() - 0.5) * 0.7,
+      spin: Math.random() * Math.PI * 2,
+      alpha: 0.25 + Math.random() * 0.6,
+      depth: 0.45 + Math.random() * 1.1,
+      color: palette[index % palette.length],
+      phase: Math.random() * Math.PI * 2
+    }));
+  };
+
+  const drawMote = (mote) => {
+    context.save();
+    context.translate(mote.x, mote.y);
+    context.rotate(mote.spin);
+    context.globalAlpha = mote.alpha;
+    if (themeId === "starry") {
+      context.fillStyle = mote.color;
+      context.shadowColor = mote.color;
+      context.shadowBlur = 12;
+      context.beginPath();
+      context.arc(0, 0, Math.max(0.8, mote.size / 4), 0, Math.PI * 2);
+      context.fill();
+      context.fillRect(-mote.size, -0.35, mote.size * 2, 0.7);
+      context.fillRect(-0.35, -mote.size, 0.7, mote.size * 2);
+    } else if (themeId === "winter") {
+      context.fillStyle = mote.color;
+      context.shadowColor = "#d8efff";
+      context.shadowBlur = 8;
+      context.beginPath();
+      context.arc(0, 0, Math.max(1, mote.size / 3), 0, Math.PI * 2);
+      context.fill();
+    } else if (themeId === "summer") {
+      context.strokeStyle = mote.color;
+      context.lineWidth = 0.7;
+      context.beginPath();
+      context.moveTo(0, 0);
+      context.lineTo(mote.size * 1.35, mote.size * 1.35);
+      context.stroke();
+      context.fillStyle = mote.color;
+      for (let index = 0; index < 6; index += 1) {
+        const angle = (Math.PI * 2 * index) / 6;
+        context.beginPath();
+        context.arc(Math.cos(angle) * mote.size * .55, Math.sin(angle) * mote.size * .55, .65, 0, Math.PI * 2);
+        context.fill();
+      }
+    } else if (themeId === "autumn") {
+      context.fillStyle = mote.color;
+      context.beginPath();
+      for (let index = 0; index < 8; index += 1) {
+        const angle = (Math.PI * 2 * index) / 8;
+        const radius = index % 2 ? mote.size * .45 : mote.size;
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        if (index === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      }
+      context.closePath();
+      context.fill();
+    } else {
+      context.fillStyle = mote.color;
+      context.beginPath();
+      context.ellipse(0, 0, mote.size, mote.size * 0.38, 0, 0, Math.PI * 2);
+      context.fill();
+    }
+    context.restore();
+  };
+
+  const draw = () => {
+    context.clearRect(0, 0, width, height);
+    motes.forEach((mote) => {
+      if (!reducedMotion) {
+        const dx = mote.x - pointer.x;
+        const dy = mote.y - pointer.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance < 150 && distance > 0) {
+          const force = (1 - distance / 150) * .028;
+          mote.x += pointerMotion.x * force + (dx / distance) * force * 8;
+          mote.y += pointerMotion.y * force * .35;
+        }
+        mote.y += mote.speed * mote.depth;
+        mote.x += mote.drift * mote.depth + Math.sin(mote.y * 0.008 + mote.phase) * (themeId === "summer" ? 0.42 : 0.25);
+        mote.spin += themeId === "autumn" ? 0.025 : 0.009;
+        if (mote.y > height + 20) {
+          mote.y = -20;
+          mote.x = Math.random() * width;
+        }
+      }
+      drawMote(mote);
+    });
+    const glow = context.createRadialGradient(pointer.x, pointer.y, 0, pointer.x, pointer.y, 230);
+    glow.addColorStop(0, "rgba(255,255,255,.11)");
+    glow.addColorStop(1, "rgba(255,255,255,0)");
+    context.fillStyle = glow;
+    context.fillRect(0, 0, width, height);
+    if (!reducedMotion && canvas.isConnected) frame = requestAnimationFrame(draw);
+  };
+
+  const move = (event) => {
+    pointerMotion.x = event.clientX - pointerMotion.lastX;
+    pointerMotion.y = event.clientY - pointerMotion.lastY;
+    pointerMotion.lastX = event.clientX;
+    pointerMotion.lastY = event.clientY;
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+    const hero = document.querySelector(".youth-hero");
+    if (hero) {
+      hero.style.setProperty("--scene-x", `${((event.clientX / innerWidth) - .5) * -12}px`);
+      hero.style.setProperty("--scene-y", `${((event.clientY / innerHeight) - .5) * -8}px`);
+      hero.style.setProperty("--pointer-x", `${event.clientX}px`);
+      hero.style.setProperty("--pointer-y", `${event.clientY}px`);
+    }
+  };
+  resize();
+  draw();
+  window.addEventListener("resize", resize);
+  window.addEventListener("pointermove", move, { passive: true });
+  loginParticleCleanup = () => {
+    cancelAnimationFrame(frame);
+    window.removeEventListener("resize", resize);
+    window.removeEventListener("pointermove", move);
+  };
+}
+
+function stopYouthAudio() {
+  if (!youthAudio) return;
+  const current = youthAudio;
+  youthAudio = null;
+  document.documentElement.dataset.youthMusic = "off";
+  delete document.documentElement.dataset.youthTrack;
+  const startVolume = current.element.volume;
+  const startedAt = performance.now();
+  const fade = () => {
+    const progress = Math.min(1, (performance.now() - startedAt) / 420);
+    current.element.volume = startVolume * (1 - progress);
+    if (progress < 1) current.fadeFrame = requestAnimationFrame(fade);
+    else {
+      current.element.pause();
+      current.element.src = "";
+    }
+  };
+  fade();
+}
+
+function startYouthAudio(themeId) {
+  const previous = youthAudio;
+  if (previous?.themeId === themeId && !previous.element.paused) return;
+  const element = new Audio(`/assets/music/${themeId}.wav`);
+  element.loop = true;
+  element.preload = "auto";
+  element.volume = 0;
+  youthAudio = { element, themeId, fadeFrame: 0 };
+  element.play().then(() => {
+    document.documentElement.dataset.youthMusic = "playing";
+    document.documentElement.dataset.youthTrack = themeId;
+    const startedAt = performance.now();
+    const fadeIn = () => {
+      const progress = Math.min(1, (performance.now() - startedAt) / 1100);
+      element.volume = .34 * progress;
+      if (progress < 1 && youthAudio?.element === element) youthAudio.fadeFrame = requestAnimationFrame(fadeIn);
+    };
+    fadeIn();
+  }).catch(() => {
+    if (youthAudio?.element === element) youthAudio = null;
+    document.documentElement.dataset.youthMusic = "blocked";
+    delete document.documentElement.dataset.youthTrack;
+    updateYouthRadio(themeId);
+  });
+  if (previous) {
+    const previousVolume = previous.element.volume;
+    const startedAt = performance.now();
+    const fadeOut = () => {
+      const progress = Math.min(1, (performance.now() - startedAt) / 900);
+      previous.element.volume = previousVolume * (1 - progress);
+      if (progress < 1) previous.fadeFrame = requestAnimationFrame(fadeOut);
+      else {
+        previous.element.pause();
+        previous.element.src = "";
+      }
+    };
+    fadeOut();
+  }
+  localStorage.setItem(YOUTH_MUSIC_STORAGE_KEY, "on");
+}
+
+function toggleYouthAudio(themeId) {
+  if (youthAudio) {
+    stopYouthAudio();
+    localStorage.setItem(YOUTH_MUSIC_STORAGE_KEY, "off");
+  } else {
+    startYouthAudio(themeId);
+  }
+  updateYouthRadio(themeId);
+}
+
+function updateYouthRadio(themeId) {
+  const button = document.querySelector("#youthRadioToggle");
+  if (!button) return;
+  button.closest(".youth-radio")?.classList.toggle("playing", Boolean(youthAudio));
+  button.setAttribute("aria-label", youthAudio ? "暂停青春电台" : "播放青春电台");
+  const icon = button.querySelector("[data-radio-icon]");
+  if (icon) icon.textContent = youthAudio ? "Ⅱ" : "▶";
 }
 
 async function getUnifiedTimetable() {
@@ -667,6 +995,70 @@ async function api(path, options = {}) {
   return payload;
 }
 
+function showRequiredPasswordSetup() {
+  if (!state.user || state.user.role === "guest" || state.user.hasPassword || document.querySelector("#requiredPasswordSetup")) return;
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="required-password-modal" id="requiredPasswordSetup">
+      <form class="required-password-card" id="requiredPasswordForm">
+        <div>
+          <span>首次手机号登录</span>
+          <h2>请设置登录密码</h2>
+          <p>完成设置后，后续即可使用已绑定手机号和密码登录。</p>
+        </div>
+        <label class="field"><span>新密码</span><input name="password" type="password" minlength="8" autocomplete="new-password" placeholder="至少 8 位，包含字母和数字" required /></label>
+        <label class="field"><span>确认新密码</span><input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+        <button class="primary-btn" type="submit">设置密码并继续</button>
+        <button class="ghost-btn" id="requiredPasswordLogout" type="button">退出登录</button>
+      </form>
+    </div>
+  `);
+  document.querySelector("#requiredPasswordForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    if (form.get("password") !== form.get("confirmPassword")) {
+      toast("两次输入的密码不一致");
+      return;
+    }
+    try {
+      const result = await api("/api/account/password", {
+        method: "POST",
+        body: JSON.stringify({ password: form.get("password") })
+      });
+      state.user = result.user;
+      document.querySelector("#requiredPasswordSetup")?.remove();
+      toast("密码设置成功");
+      renderShell();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+  document.querySelector("#requiredPasswordLogout").addEventListener("click", () => {
+    state.token = "";
+    state.user = null;
+    localStorage.removeItem("smart_taiyuan_token");
+    document.querySelector("#requiredPasswordSetup")?.remove();
+    authView = "login";
+    renderLogin();
+  });
+}
+
+async function adminApi(path, options = {}) {
+  return api(path, options);
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || "").split(",").pop());
+    reader.onerror = () => reject(new Error("文件读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function accountRoleLabel(role) {
+  return { super_admin: "总管理员", admin: "普通管理员", teacher: "老师", student: "学生", guest: "游客" }[role] || role;
+}
+
 const weatherFallbackLocation = { latitude: 32.4558, longitude: 119.9231, name: "泰州市" };
 
 function weatherCodeInfo(code, isDay = true) {
@@ -837,6 +1229,8 @@ window.addEventListener("storage", (event) => {
 
 function renderLogin() {
   stopLoginParticles();
+  let smsChallenge = "";
+  let smsCountdownTimer = null;
   app.innerHTML = `
     <main class="login-wrap">
       <canvas class="login-particles" id="loginParticles" aria-hidden="true"></canvas>
@@ -859,20 +1253,50 @@ function renderLogin() {
         </div>
         <form class="login-form" id="loginForm">
           <div class="login-form-heading">
-            <span>统一身份认证</span>
             <h2>欢迎回来</h2>
-            <p>登录后继续使用智慧校园服务</p>
+            <p>请使用学校登记信息完成安全登录</p>
           </div>
-          <label class="field login-field">
-            <span>手机号</span>
-            <input name="phone" value="13800000000" autocomplete="tel" inputmode="tel" />
-          </label>
-          <label class="field login-field">
-            <span>验证码</span>
-            <input name="code" value="123456" autocomplete="one-time-code" />
-          </label>
-          <button class="primary-btn login-submit" type="submit"><span>登录</span><b aria-hidden="true">→</b></button>
-          <p class="login-help">测试账号已预填，可直接登录体验</p>
+          <div class="login-role-switch" role="group" aria-label="选择登录身份">
+            <button class="active" type="button" data-login-role="student">学生登录</button>
+            <button type="button" data-login-role="teacher">老师登录</button>
+            <input name="identityType" type="hidden" value="student" />
+          </div>
+          <div class="login-auth-switch" role="group" aria-label="选择验证方式">
+            <button class="active" type="button" data-login-auth="sms">手机号登录</button>
+            <button type="button" data-login-auth="password">密码登录</button>
+            <input name="loginMode" type="hidden" value="sms" />
+          </div>
+          <div class="login-identity-grid">
+            <label class="field login-field login-field-wide">
+              <span>学校</span>
+              <input name="school" value="泰州学院" autocomplete="organization" required />
+            </label>
+            <label class="field login-field">
+              <span>专业</span>
+              <input name="major" value="数字经济" autocomplete="organization-title" required />
+            </label>
+            <label class="field login-field">
+              <span id="loginAccountLabel">学号</span>
+              <input name="studentNo" placeholder="请输入学号" autocomplete="username" required />
+            </label>
+            <label class="field login-field login-field-wide" id="loginPhoneField">
+              <span>手机号</span>
+              <input name="phone" placeholder="请输入学校登记手机号" autocomplete="tel" inputmode="tel" maxlength="11" required />
+            </label>
+            <label class="field login-field login-field-wide" id="loginCodeField">
+              <span>短信验证码</span>
+              <span class="login-code-control">
+                <input name="code" placeholder="请输入 6 位验证码" autocomplete="one-time-code" inputmode="numeric" maxlength="6" required />
+                <button id="sendSmsCode" type="button">获取验证码</button>
+              </span>
+            </label>
+            <label class="field login-field login-field-wide" id="loginPasswordField" hidden>
+              <span>登录密码</span>
+              <input name="password" type="password" placeholder="请输入已设置的密码" autocomplete="current-password" />
+            </label>
+          </div>
+          <button class="primary-btn login-submit" type="submit"><span>验证并登录</span><b aria-hidden="true">→</b></button>
+          <button class="login-guest-btn" id="guestLoginBtn" type="button"><span>游客模式</span><small>免验证，只读体验</small></button>
         </form>
       </section>
     </main>
@@ -884,21 +1308,128 @@ function renderLogin() {
     renderIntro();
   });
   document.querySelector("#loginThemeToggle")?.addEventListener("click", () => {
+    if (smsCountdownTimer) clearInterval(smsCountdownTimer);
     const nextTheme = document.documentElement.dataset.theme === "day" ? "night" : "day";
     applyTheme(nextTheme, true);
     renderLogin();
+  });
+  document.querySelectorAll("[data-login-role]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const form = document.querySelector("#loginForm");
+      const identityType = button.dataset.loginRole;
+      form.elements.identityType.value = identityType;
+      document.querySelectorAll("[data-login-role]").forEach((item) => item.classList.toggle("active", item === button));
+      document.querySelector("#loginAccountLabel").textContent = identityType === "teacher" ? "工号" : "学号";
+      form.elements.studentNo.placeholder = identityType === "teacher" ? "请输入教师工号" : "请输入学号";
+      form.elements.studentNo.value = "";
+      form.elements.code.value = "";
+      smsChallenge = "";
+      if (identityType === "teacher") toast("老师请使用学校身份库登记的工号与手机号登录");
+    });
+  });
+  document.querySelectorAll("[data-login-auth]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const form = document.querySelector("#loginForm");
+      const passwordMode = button.dataset.loginAuth === "password";
+      form.elements.loginMode.value = passwordMode ? "password" : "sms";
+      document.querySelectorAll("[data-login-auth]").forEach((item) => item.classList.toggle("active", item === button));
+      document.querySelector("#loginPhoneField").hidden = false;
+      document.querySelector("#loginCodeField").hidden = passwordMode;
+      document.querySelector("#loginPasswordField").hidden = !passwordMode;
+      form.elements.phone.required = true;
+      form.elements.code.required = !passwordMode;
+      form.elements.password.required = passwordMode;
+      document.querySelector(".login-submit span").textContent = passwordMode ? "使用密码登录" : "验证并登录";
+      if (passwordMode) toast("密码登录需填写已绑定手机号");
+    });
+  });
+  document.querySelector("#sendSmsCode")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const formElement = document.querySelector("#loginForm");
+    const invalidIdentityField = [...formElement.querySelectorAll('input:not([name="code"])')].find((input) => !input.checkValidity());
+    if (invalidIdentityField) {
+      invalidIdentityField.reportValidity();
+      return;
+    }
+    const form = new FormData(formElement);
+    button.disabled = true;
+    button.textContent = "发送中...";
+    try {
+      const result = await api("/api/auth/sms/send", {
+        method: "POST",
+        body: JSON.stringify({
+          school: form.get("school"),
+          major: form.get("major"),
+          studentNo: form.get("studentNo"),
+          phone: form.get("phone"),
+          identityType: form.get("identityType")
+        })
+      });
+      smsChallenge = result.challenge;
+      let remaining = result.retryAfter || 60;
+      const codeInput = formElement.elements.code;
+      if (result.developmentCode) {
+        codeInput.value = result.developmentCode;
+        toast(`本地开发验证码：${result.developmentCode}`);
+      } else {
+        toast("验证码已发送，请留意手机短信");
+      }
+      button.textContent = `${remaining} 秒后重发`;
+      smsCountdownTimer = setInterval(() => {
+        remaining -= 1;
+        button.textContent = remaining > 0 ? `${remaining} 秒后重发` : "重新获取";
+        if (remaining <= 0) {
+          clearInterval(smsCountdownTimer);
+          smsCountdownTimer = null;
+          button.disabled = false;
+        }
+      }, 1000);
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "获取验证码";
+      toast(error.message);
+    }
+  });
+  document.querySelector("#guestLoginBtn")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await api("/api/auth/guest", { method: "POST" });
+      state.token = result.token;
+      state.user = result.user;
+      localStorage.setItem("smart_taiyuan_token", result.token);
+      renderShell();
+      toast("已进入游客只读模式");
+    } catch (error) {
+      button.disabled = false;
+      toast(error.message);
+    }
   });
   document.querySelector("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
-      const result = await api("/api/auth/login", {
+      const passwordMode = form.get("loginMode") === "password";
+      const result = await api(passwordMode ? "/api/auth/password/login" : "/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({
+        body: JSON.stringify(passwordMode ? {
+          school: form.get("school"),
+          major: form.get("major"),
+          studentNo: form.get("studentNo"),
           phone: form.get("phone"),
-          code: form.get("code")
+          identityType: form.get("identityType"),
+          password: form.get("password")
+        } : {
+          phone: form.get("phone"),
+          code: form.get("code"),
+          school: form.get("school"),
+          major: form.get("major"),
+          studentNo: form.get("studentNo"),
+          identityType: form.get("identityType"),
+          challenge: smsChallenge
         })
       });
+      if (smsCountdownTimer) clearInterval(smsCountdownTimer);
       state.token = result.token;
       state.user = result.user;
       localStorage.setItem("smart_taiyuan_token", result.token);
@@ -909,7 +1440,7 @@ function renderLogin() {
   });
 }
 
-function renderIntro() {
+function renderLegacyIntro() {
   stopLoginParticles();
   const isDay = document.documentElement.dataset.theme === "day";
   app.innerHTML = `
@@ -1015,6 +1546,130 @@ function renderIntro() {
   });
 }
 
+function renderIntro() {
+  stopLoginParticles();
+  const themeId = activeYouthTheme();
+  const theme = youthThemes[themeId];
+  const preference = youthThemePreference();
+  const now = new Date();
+  const autoLabel = `${now.getMonth() + 1}月${now.getDate()}日 · ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const themeButtons = Object.entries(youthThemes).map(([id, item]) => `
+    <button class="${preference === id ? "active" : ""}" data-youth-theme="${id}" type="button" title="${item.label}主题">
+      <span style="--swatch:${item.accent}">${item.icon}</span><strong>${item.label}</strong>
+    </button>
+  `).join("");
+
+  document.documentElement.dataset.youthTheme = themeId;
+  app.innerHTML = `
+    <main class="youth-intro youth-theme-${themeId}" style="--youth-accent:${theme.accent}">
+      <section class="youth-hero" id="introTop">
+        <div class="youth-scene" aria-hidden="true"></div>
+        <div class="youth-vignette" aria-hidden="true"></div>
+        <canvas class="youth-atmosphere" id="youthAtmosphere" aria-hidden="true"></canvas>
+        <div class="youth-motion-layers" aria-hidden="true">
+          <div class="youth-pointer-light"></div>
+          <div class="youth-sun-glow"></div><div class="youth-light-rays"></div>
+          <div class="youth-cloud cloud-one"></div><div class="youth-cloud cloud-two"></div>
+          <div class="youth-wind wind-one"></div><div class="youth-wind wind-two"></div><div class="youth-wind wind-three"></div>
+          <div class="youth-birds"><i></i><i></i><i></i></div>
+          <div class="youth-shooting-stars">${Array.from({ length: 5 }, (_, index) => `<i style="--delay:${index * 2.7}s;--top:${12 + index * 11}%"></i>`).join("")}</div>
+          <div class="youth-rain">${Array.from({ length: 22 }, (_, index) => `<i style="--left:${(index * 17) % 101}%;--delay:${(index % 9) * -.23}s;--duration:${1.1 + (index % 5) * .18}s"></i>`).join("")}</div>
+          <div class="youth-fireflies">${Array.from({ length: 18 }, (_, index) => `<i style="--left:${(index * 31) % 96}%;--top:${35 + ((index * 19) % 56)}%;--delay:${(index % 8) * -.7}s"></i>`).join("")}</div>
+          <div class="youth-constellations"><i></i><i></i><i></i><i></i><i></i></div>
+          <div class="youth-mist mist-one"></div><div class="youth-mist mist-two"></div>
+          <div class="youth-foreground"></div>
+          <div class="youth-film-grain"></div>
+        </div>
+
+        <header class="youth-nav">
+          <a class="youth-brand" href="#introTop" aria-label="智慧校园首页">
+            <img src="/assets/campus-mark.png" alt="" />
+            <span><strong>智慧校园</strong><small>连接校园，启迪未来</small></span>
+          </a>
+          <nav aria-label="浏览页导航">
+            <a href="#youthMoments">校园生活</a>
+            <a href="#youthMoments">学习成长</a>
+            <a href="#youthMoments">AI 助手</a>
+          </nav>
+          <div class="youth-nav-actions">
+            <button class="youth-mode-trigger" id="youthModeTrigger" type="button" aria-expanded="false">
+              <span>${theme.icon}</span><strong>${preference === "auto" ? `自动 · ${theme.label}` : theme.label}</strong><b>⌄</b>
+            </button>
+            <button class="youth-login" data-enter-login type="button">登录 / 注册</button>
+          </div>
+          <div class="youth-theme-popover" id="youthThemePopover" hidden>
+            <button class="${preference === "auto" ? "active" : ""}" data-youth-theme="auto" type="button">
+              <span class="auto-orbit">◉</span><strong>自动</strong><small>${autoLabel}<br />按日期与时间切换</small>
+            </button>
+            <div class="youth-theme-options">${themeButtons}</div>
+          </div>
+        </header>
+
+        <div class="youth-copy">
+          <p class="youth-eyebrow">${theme.eyebrow}</p>
+          <h1>${theme.title}</h1>
+          <p class="youth-summary">${theme.summary}</p>
+          <div class="youth-actions">
+            <button class="youth-primary" data-enter-login type="button">开启青春旅程 <span>→</span></button>
+            <a class="youth-secondary" href="#youthMoments">看看校园生活</a>
+          </div>
+        </div>
+
+        <div class="youth-signposts" aria-label="快捷服务">
+          <button data-enter-login type="button"><span>▣</span><strong>今日课程</strong><small>查看课表与学习安排</small><b>→</b></button>
+          <button data-enter-login type="button"><span>✦</span><strong>AI 助学</strong><small>智能问答，学习更高效</small><b>→</b></button>
+          <button data-enter-login type="button"><span>⚑</span><strong>校园活动</strong><small>发现精彩，参与其中</small><b>→</b></button>
+          <button data-enter-login type="button"><span>◎</span><strong>成长记录</strong><small>记录点滴，见证成长</small><b>→</b></button>
+        </div>
+
+        <a class="youth-scroll" href="#youthMoments"><span>向下探索</span><i></i></a>
+
+        <aside class="youth-radio" aria-label="青春电台">
+          <div class="youth-radio-cover"><span>${theme.icon}</span></div>
+          <div class="youth-radio-copy"><small>青春电台</small><strong>${theme.label} · ${theme.track}</strong></div>
+          <div class="youth-wave" aria-hidden="true">${Array.from({ length: 18 }, (_, index) => `<i style="--h:${8 + ((index * 7) % 19)}px"></i>`).join("")}</div>
+          <button id="youthRadioToggle" type="button" aria-label="播放青春电台"><span data-radio-icon>▶</span></button>
+        </aside>
+      </section>
+
+      <section class="youth-moments" id="youthMoments">
+        <div class="youth-moments-heading">
+          <p>${theme.icon} ${theme.label}日校园手记</p>
+          <h2>让每一次点击，都连接更鲜活的校园生活。</h2>
+          <button data-enter-login type="button">进入智慧校园 →</button>
+        </div>
+        <div class="youth-moment-list">
+          <article><span>08:00</span><strong>从今天的第一节课出发</strong><p>课表、考试、空教室与学习计划，重要安排清晰可见。</p></article>
+          <article><span>14:30</span><strong>在灵感出现时抓住它</strong><p>AI 助手、软件库与学习工具，让创造不被工具打断。</p></article>
+          <article><span>18:20</span><strong>去遇见课堂之外的热爱</strong><p>活动、实验室、图书馆与校园资讯，让青春有更多可能。</p></article>
+        </div>
+      </section>
+    </main>
+  `;
+
+  initYouthAtmosphere(themeId);
+  updateYouthRadio(themeId);
+
+  const trigger = document.querySelector("#youthModeTrigger");
+  const popover = document.querySelector("#youthThemePopover");
+  trigger?.addEventListener("click", () => {
+    const nextHidden = !popover.hidden;
+    popover.hidden = nextHidden;
+    trigger.setAttribute("aria-expanded", String(!nextHidden));
+  });
+  document.querySelectorAll("button[data-youth-theme]").forEach((button) => {
+    button.addEventListener("click", () => setYouthTheme(button.dataset.youthTheme));
+  });
+  document.querySelector("#youthRadioToggle")?.addEventListener("click", () => toggleYouthAudio(themeId));
+  document.querySelectorAll("[data-enter-login]").forEach((button) => {
+    button.addEventListener("click", () => {
+      stopYouthAudio();
+      authView = "login";
+      renderLogin();
+    });
+  });
+}
+
 function shell(content, title, subtitle) {
   const firstName = state.user?.name?.slice(0, 1) || "泰";
   return `
@@ -1028,7 +1683,7 @@ function shell(content, title, subtitle) {
           </div>
         </div>
         <nav class="nav">
-          ${moduleGroups
+          ${visibleModuleGroups()
             .map(
               (group) => `
                 <section class="nav-section">
@@ -1117,7 +1772,7 @@ function bindNav() {
   const moduleSearch = document.querySelector("#moduleSearch");
   const moduleSearchResults = document.querySelector("#moduleSearchResults");
   if (moduleSearch && moduleSearchResults) {
-    const allModules = moduleGroups.flatMap((group) => group.items.map((item) => ({ ...item, group: group.title })));
+    const allModules = visibleModuleGroups().flatMap((group) => group.items.map((item) => ({ ...item, group: group.title })));
     const renderModuleResults = () => {
       const keyword = moduleSearch.value.trim().toLowerCase();
       const results = allModules
@@ -1287,6 +1942,13 @@ async function renderShell() {
     }
   }
 
+  if (requestedRoute === "student-admin" && !canAccessStudentAdmin()) {
+    state.route = "profile";
+    history.replaceState(null, "", routeToUrl("profile"));
+    toast("仅管理员可以访问学生身份库");
+    return renderShell();
+  }
+
   const renderer = routes[requestedRoute] || routes.dashboard;
   try {
     const view = await renderer();
@@ -1295,6 +1957,7 @@ async function renderShell() {
     bindNav();
     view.afterRender?.();
     bindMotionEffects();
+    showRequiredPasswordSetup();
   } catch (error) {
     if (renderVersion !== renderShellVersion || requestedRoute !== state.route) return;
     app.innerHTML = shell(`<div class="empty">${error.message}</div>`, "加载失败", "请稍后重试");
@@ -1634,7 +2297,7 @@ const routes = {
           <article class="dash-card apps-card">
             <h2 class="section-title"><span>⌘ 服务分区</span></h2>
             <div class="module-groups">
-              ${moduleGroups
+              ${visibleModuleGroups()
                 .filter((group) => group.title !== "总览")
                 .map(
                   (group) => `
@@ -2688,6 +3351,7 @@ const routes = {
   },
 
   async ai() {
+    const serverAi = await api("/api/ai/status");
     if (localStorage.getItem("smart_campus_ai_schema") !== AI_PANEL_SCHEMA) {
       localStorage.removeItem("smart_campus_ai_config");
       localStorage.removeItem("smart_campus_ai_messages");
@@ -2695,7 +3359,8 @@ const routes = {
       localStorage.setItem("smart_campus_ai_schema", AI_PANEL_SCHEMA);
     }
     const storedConfig = JSON.parse(localStorage.getItem(AI_CONFIG_KEY) || "{}");
-    const activeProvider = aiProviderPresets.find((item) => item.id === storedConfig.provider)
+    const activeProvider = aiProviderPresets.find((item) => item.id === serverAi.provider)
+      || aiProviderPresets.find((item) => item.id === storedConfig.provider)
       || aiProviderPresets.find((item) => item.id === "deepseek")
       || aiProviderPresets[0];
     const storedMessages = JSON.parse(localStorage.getItem(AI_MESSAGES_KEY) || "[]");
@@ -2706,13 +3371,13 @@ const routes = {
       .join("");
     return {
       title: "AI 助手",
-      subtitle: "校园问答、学习规划、资料分析与多模型 API 配置",
+      subtitle: "真实模型驱动的通用问答、写作、编程、学习与分析助手",
       content: `
         <section class="ai-page">
           <aside class="ai-side-panel dash-card">
             <div class="ai-brand-row">
               <span class="ai-orbit">✦</span>
-              <div><strong>智慧校园 AI</strong><p>${activeProvider.name} · ${storedConfig.model || activeProvider.model}</p></div>
+              <div><strong>全能 AI 助手</strong><p>${activeProvider.name} · ${serverAi.model}</p></div>
             </div>
             <button class="ai-side-action active" data-ai-new-chat><span>＋</span>新对话</button>
             <button class="ai-side-action"><span>◷</span>历史会话</button>
@@ -2745,12 +3410,12 @@ const routes = {
           <main class="ai-chat-panel dash-card">
             <header class="ai-chat-head">
               <div>
-                <h2>AI 助手 <button class="ai-config-button" data-ai-config-open>⚙ API 配置</button></h2>
-                <p>当前：${activeProvider.name} / ${storedConfig.model || activeProvider.model}。新版面板已隔离旧配置和旧会话，避免本地缓存冲突。</p>
+                <h2>AI 助手 <button class="ai-config-button" data-ai-config-open>⚙ 服务状态</button></h2>
+                <p>当前：${activeProvider.name} / ${serverAi.model}。${serverAi.configured ? "真实 API 已连接，可处理通用问题。" : "尚未配置服务端 API Key。"}</p>
               </div>
               <div class="ai-status-stack">
-                <span>升级</span>
-                <strong>${activeProvider.protocol}</strong>
+                <span>${serverAi.configured ? "在线" : "未配置"}</span>
+                <strong>${serverAi.provider}</strong>
               </div>
             </header>
             <div class="ai-top-icons">
@@ -2790,7 +3455,7 @@ const routes = {
 
             <form class="ai-composer" id="aiComposer">
               <button type="button" title="上传文件">✦</button>
-              <input name="prompt" placeholder="输入问题、总结文档、生成方案、辅助学习……" autocomplete="off" />
+              <textarea name="prompt" rows="1" placeholder="输入问题、总结文档、生成方案、编写代码……" autocomplete="off"></textarea>
               <select name="scene">
                 <option value="pro">专业版</option>
                 <option value="study">学习</option>
@@ -2805,7 +3470,7 @@ const routes = {
           <div class="ai-config-modal hidden" id="aiConfigModal">
             <form class="ai-config-card" id="aiConfigForm">
               <div class="ai-config-head">
-                <div><strong>AI 配置</strong><p>支持国内外主流模型，也支持学校自建大模型网关。</p></div>
+                <div><strong>AI 服务状态</strong><p>密钥仅保存在服务端环境变量中，不会发送到浏览器。</p></div>
                 <button type="button" data-ai-config-close>×</button>
               </div>
               <label class="field">
@@ -2817,13 +3482,13 @@ const routes = {
                 <label class="field"><span>模型名称</span><input name="model" value="${storedConfig.model || activeProvider.model}" /></label>
               </div>
               <label class="field"><span>Base URL</span><input name="baseUrl" value="${storedConfig.baseUrl || activeProvider.baseUrl}" /></label>
-              <label class="field"><span>API Key</span><input name="apiKey" type="password" value="${storedConfig.apiKey || ""}" placeholder="sk-... / ak-... / 自建网关 token" /></label>
-              <label class="field"><span>系统提示词</span><textarea name="systemPrompt">${storedConfig.systemPrompt || "你是泰州学院智慧校园 AI 助手，回答要准确、简洁，并提醒用户以学校官方通知为准。"}</textarea></label>
+              <label class="field"><span>服务端连接</span><input value="${serverAi.configured ? "已配置真实 API" : "未配置 AI_API_KEY"}" readonly /></label>
+              <label class="field"><span>能力范围</span><textarea readonly>通用知识、写作、编程、数据分析、学习辅导、职业规划与校园生活，不局限于校园。</textarea></label>
               <div class="ai-config-actions">
                 <button class="ghost-btn" type="button" id="aiTestConfig">测试配置</button>
-                <button class="primary-btn" type="submit">保存配置</button>
+                <button class="primary-btn" type="submit">保存显示偏好</button>
               </div>
-              <p class="muted">当前为前端配置面板。生产环境请把密钥交给 Java/Python 后端加密保存，前端只保存配置名称。旧版本地配置已隔离，避免冲突。</p>
+              <p class="muted">请在服务器 .env 中配置 AI_PROVIDER、AI_BASE_URL、AI_API_KEY 和 AI_MODEL，重启服务后生效。</p>
             </form>
           </div>
         </section>
@@ -2901,18 +3566,16 @@ const routes = {
             composer.prompt.focus();
           });
         });
+        composer.prompt.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            composer.requestSubmit();
+          }
+        });
         composer.addEventListener("submit", (event) => {
           event.preventDefault();
           const prompt = new FormData(composer).get("prompt").trim();
           if (!prompt) return;
-          const config = {
-            provider: activeProvider.id,
-            protocol: activeProvider.protocol,
-            baseUrl: activeProvider.baseUrl,
-            model: activeProvider.model,
-            systemPrompt: "你是泰州学院智慧校园 AI 助手，回答要准确、简洁，并提醒用户以学校官方通知为准。",
-            ...JSON.parse(localStorage.getItem(AI_CONFIG_KEY) || "{}")
-          };
           const messages = getMessages();
           const time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
           messages.push({ role: "user", text: prompt, time });
@@ -2924,7 +3587,6 @@ const routes = {
           api("/api/ai/chat", {
             method: "POST",
             body: JSON.stringify({
-              config,
               messages: messages.filter((item) => item !== pendingMessage)
             })
           })
@@ -3376,6 +4038,245 @@ const routes = {
     };
   },
 
+  async "student-admin"() {
+    let health = null;
+    let students = [];
+    let totalCount = 0;
+    let studentCount = 0;
+    let canManageRoles = false;
+    let loadError = "";
+    try {
+      const [studentResult, allAccountResult] = await Promise.all([
+        adminApi("/api/admin/students?role=student"),
+        adminApi("/api/admin/students")
+      ]);
+      health = await adminApi("/api/admin/health");
+      students = studentResult.students;
+      studentCount = studentResult.totalCount ?? studentResult.count ?? students.length;
+      totalCount = allAccountResult.totalCount ?? allAccountResult.count ?? students.length;
+      canManageRoles = studentResult.canManageRoles;
+    } catch (error) {
+      loadError = error.message;
+    }
+    const studentRows = students.map((student) => `
+      <tr>
+        <td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td>
+        <td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td>
+        <td>${escapeHtml(student.studentNo)}</td>
+        <td>${escapeHtml(student.phoneMasked || student.phone)}</td>
+        <td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
+        <td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td>
+        <td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td>
+        <td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td>
+      </tr>
+    `).join("");
+    return {
+      title: "学生身份库",
+      subtitle: "通过 MySQL 管理学生身份、登录资格和批量导入",
+      content: `
+        <section class="student-admin-page">
+          <div class="card student-admin-toolbar">
+            <div>
+              <span class="admin-kicker">身份库管理</span>
+              <h2>学生登录资格中心</h2>
+              <p>身份信息仅在服务端核验，手机号在列表中自动脱敏。</p>
+            </div>
+            <div class="admin-current-role"><span>当前权限</span><strong>${accountRoleLabel(state.user.role)}</strong><small>${canManageRoles ? "可管理全部账号和角色" : "可管理学生与老师"}</small></div>
+          </div>
+
+          ${loadError ? `<div class="card admin-alert">${escapeHtml(loadError)}</div>` : ""}
+          <div class="admin-stat-grid">
+            <div class="card"><span>存储模式</span><strong>${health?.mode === "mysql" ? "MySQL" : health ? "本地演示" : "等待连接"}</strong><small>${health?.connected ? "连接正常" : health?.message || "输入管理员密钥后查看"}</small></div>
+            <div class="card"><span>账号总数</span><strong>${totalCount.toLocaleString("zh-CN")}</strong><small>MySQL 实时统计 · 当前列表展示 ${students.length} 条</small></div>
+            <div class="card"><span>安全策略</span><strong>四项核验</strong><small>学校、专业、学号/工号、手机号</small></div>
+          </div>
+
+          <div class="admin-work-grid">
+            <div class="card">
+              <h2 class="section-title">单个账号录入 / 更新</h2>
+              <form class="form student-entry-form" id="studentEntryForm">
+                <label class="field"><span>姓名</span><input name="name" required /></label>
+                <label class="field"><span>学校</span><input name="school" value="泰州学院" required /></label>
+                <label class="field"><span>学院</span><input name="college" /></label>
+                <label class="field"><span>专业</span><input name="major" required /></label>
+                <label class="field"><span>学号 / 工号</span><input name="studentNo" required /></label>
+                <label class="field"><span>手机号</span><input name="phone" inputmode="tel" maxlength="11" required /></label>
+                <label class="field"><span>账号角色</span><select name="role"><option value="student">学生</option><option value="teacher">老师</option>${canManageRoles ? `<option value="admin">普通管理员</option><option value="super_admin">总管理员</option>` : ""}</select></label>
+                <button class="primary-btn" type="submit">保存账号</button>
+              </form>
+            </div>
+            <div class="card">
+              <h2 class="section-title">Excel 批量导入</h2>
+              <div class="admin-import-guide">
+                <p>支持 xlsx、xls 和 csv 文件。教师账号请在“学号”列填写工号。首行列名：</p>
+                <code>姓名、学校、学院、专业、学号、手机号、状态、角色</code>
+              </div>
+              <div class="admin-template-example">
+                <div class="admin-template-example-copy">
+                  <strong>导入示例（虚构信息）</strong>
+                  <span>林晨曦 · 示例大学 · 数字经济 · DEMO2026001 · 学生</span>
+                </div>
+                <a class="ghost-btn admin-template-download" href="/downloads/templates/%E6%99%BA%E6%85%A7%E6%A0%A1%E5%9B%AD%E8%BA%AB%E4%BB%BD%E5%BA%93%E5%AF%BC%E5%85%A5%E7%A4%BA%E4%BE%8B.xlsx" download="智慧校园身份库导入示例.xlsx">下载 Excel 示例</a>
+              </div>
+              <form class="form" id="studentImportForm">
+                <label class="field"><span>选择学生名单</span><input name="file" type="file" accept=".xlsx,.xls,.csv" required /></label>
+                <button class="primary-btn" type="submit">导入身份库</button>
+              </form>
+              <div class="admin-import-result" id="studentImportResult">重复的学校 + 学号将更新原记录。</div>
+            </div>
+          </div>
+
+          <div class="card student-list-card">
+            <div class="student-list-head">
+              <div><h2 class="section-title">账号列表</h2><p>停用后，该账号无法获取登录验证码。</p></div>
+              <form id="studentSearchForm"><input name="query" placeholder="搜索姓名、专业、学号、工号或手机号" /><button class="ghost-btn" type="submit">搜索</button></form>
+            </div>
+            <div class="student-role-filters" aria-label="按账号角色筛选">
+              <button class="active" type="button" data-account-role="student">学生 <span>${studentCount.toLocaleString("zh-CN")}</span></button>
+              <button type="button" data-account-role="teacher">老师</button>
+              ${canManageRoles ? `<button type="button" data-account-role="admin">普通管理员</button><button type="button" data-account-role="super_admin">总管理员</button>` : ""}
+            </div>
+            <div class="table-wrap">
+              <table class="student-table">
+                <thead><tr><th>账号</th><th>学校 / 专业</th><th>学号 / 工号</th><th>手机号</th><th>角色</th><th>状态</th><th>密码</th><th>操作</th></tr></thead>
+                <tbody>${studentRows || `<tr><td colspan="8" class="empty">身份库暂无账号</td></tr>`}</tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      `,
+      afterRender() {
+        document.querySelector("#studentEntryForm")?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          try {
+            await adminApi("/api/admin/students", {
+              method: "POST",
+              body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries()))
+            });
+            toast("学生身份已保存");
+            renderShell();
+          } catch (error) {
+            toast(error.message);
+          }
+        });
+        document.querySelector("#studentImportForm")?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const file = event.currentTarget.elements.file.files?.[0];
+          if (!file) return;
+          const resultNode = document.querySelector("#studentImportResult");
+          resultNode.textContent = "正在解析并导入...";
+          try {
+            const result = await adminApi("/api/admin/students/import", {
+              method: "POST",
+              body: JSON.stringify({ filename: file.name, fileBase64: await fileToBase64(file) })
+            });
+            resultNode.textContent = `成功 ${result.success} 条，失败 ${result.failed} 条。${result.errors.slice(0, 3).join("；")}`;
+            toast("学生名单导入完成");
+            setTimeout(() => renderShell(), 900);
+          } catch (error) {
+            resultNode.textContent = error.message;
+          }
+        });
+        document.querySelector("#studentSearchForm")?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const query = new FormData(event.currentTarget).get("query");
+          try {
+            await loadFilteredStudents({ query, role: document.querySelector(".student-role-filters button.active")?.dataset.accountRole || "" });
+          } catch (error) {
+            toast(error.message);
+          }
+        });
+        function renderFilteredStudents(result) {
+          const tbody = document.querySelector(".student-table tbody");
+          tbody.innerHTML = result.students.map((student) => `
+            <tr><td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td><td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td><td>${escapeHtml(student.studentNo)}</td><td>${escapeHtml(student.phoneMasked)}</td><td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td><td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td><td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td><td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td></tr>
+          `).join("") || `<tr><td colspan="8" class="empty">该筛选条件下暂无账号</td></tr>`;
+          bindStudentStatusButtons();
+          bindStudentRoleSelects();
+          bindStudentPasswordResetButtons();
+        }
+        async function loadFilteredStudents({ query = "", role = "" } = {}) {
+          const result = await adminApi(`/api/admin/students?query=${encodeURIComponent(query)}&role=${encodeURIComponent(role)}`);
+          renderFilteredStudents(result);
+          const activeButton = document.querySelector(`.student-role-filters button[data-account-role="${role}"]`);
+          document.querySelectorAll(".student-role-filters button").forEach((button) => button.classList.toggle("active", button === activeButton));
+          if (activeButton) {
+            activeButton.querySelector("span")?.remove();
+            activeButton.insertAdjacentHTML("beforeend", ` <span>${result.totalCount.toLocaleString("zh-CN")}</span>`);
+          }
+        }
+        document.querySelectorAll(".student-role-filters button").forEach((button) => {
+          button.addEventListener("click", async () => {
+            try {
+              await loadFilteredStudents({
+                query: document.querySelector("#studentSearchForm [name='query']")?.value || "",
+                role: button.dataset.accountRole
+              });
+            } catch (error) {
+              toast(error.message);
+            }
+          });
+        });
+        function bindStudentStatusButtons() {
+          document.querySelectorAll(".student-status-btn").forEach((button) => {
+            button.addEventListener("click", async () => {
+              try {
+                await adminApi("/api/admin/students/status", {
+                  method: "PUT",
+                  body: JSON.stringify({ studentNo: button.dataset.studentNo, status: button.dataset.nextStatus })
+                });
+                toast(button.dataset.nextStatus === "disabled" ? "学生已停用" : "学生已启用");
+                renderShell();
+              } catch (error) {
+                toast(error.message);
+              }
+            });
+          });
+        }
+        bindStudentStatusButtons();
+        function bindStudentPasswordResetButtons() {
+          document.querySelectorAll(".student-password-reset-btn").forEach((button) => {
+            if (button.dataset.bound === "true") return;
+            button.dataset.bound = "true";
+            button.addEventListener("click", async () => {
+              try {
+                const result = await adminApi("/api/admin/students/password-reset", {
+                  method: "POST",
+                  body: JSON.stringify({ studentNo: button.dataset.studentNo })
+                });
+                toast("密码已清除，请用户通过手机号登录后重新设置");
+                renderShell();
+              } catch (error) {
+                toast(error.message);
+              }
+            });
+          });
+        }
+        bindStudentPasswordResetButtons();
+        function bindStudentRoleSelects() {
+          document.querySelectorAll(".student-role-select").forEach((select) => {
+            if (select.dataset.bound === "true") return;
+            select.dataset.bound = "true";
+            select.addEventListener("change", async () => {
+              try {
+                await adminApi("/api/admin/students/role", {
+                  method: "PUT",
+                  body: JSON.stringify({ studentNo: select.dataset.studentNo, role: select.value })
+                });
+                toast("账号角色已更新");
+                renderShell();
+              } catch (error) {
+                toast(error.message);
+                renderShell();
+              }
+            });
+          });
+        }
+        bindStudentRoleSelects();
+      }
+    };
+  },
+
   async profile() {
     const bindings = state.user.paymentBindings || {};
     return {
@@ -3389,7 +4290,8 @@ const routes = {
               <div class="row"><span>姓名</span><strong>${state.user.name}</strong></div>
               <div class="row"><span>学院</span><strong>${state.user.college}</strong></div>
               <div class="row"><span>专业</span><strong>${state.user.major}</strong></div>
-              <div class="row"><span>学号</span><strong>${state.user.studentNo}</strong></div>
+              <div class="row"><span>${state.user.role === "teacher" ? "工号" : "学号"}</span><strong>${state.user.studentNo}</strong></div>
+              <div class="row"><span>账号角色</span><strong>${accountRoleLabel(state.user.role)}</strong></div>
               <div class="row"><span>人员认证</span><span class="badge success">${state.user.verified ? "已绑定" : "待绑定"}</span></div>
             </div>
           </div>
@@ -3406,6 +4308,15 @@ const routes = {
               </div>
             </div>
             <p class="muted">当前为模拟绑定入口，正式版需要接入微信支付商户号、支付宝开放平台应用和服务端签名。</p>
+          </div>
+          <div class="card">
+            <h2 class="section-title">登录密码 <span class="badge ${state.user.hasPassword ? "success" : ""}">${state.user.hasPassword ? "已设置" : "未设置"}</span></h2>
+            <p class="muted">首次需通过手机号验证码登录并设置密码。密码会加盐加密保存，管理员只能清除，无法查看原密码。</p>
+            <form class="form" id="passwordForm">
+              <label class="field"><span>新密码</span><input name="password" type="password" minlength="8" autocomplete="new-password" placeholder="至少 8 位，包含字母和数字" required /></label>
+              <label class="field"><span>确认新密码</span><input name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required /></label>
+              <button class="primary-btn" type="submit">${state.user.hasPassword ? "更新密码" : "设置密码"}</button>
+            </form>
           </div>
           <div class="card">
             <h2 class="section-title">在线客服</h2>
@@ -3430,6 +4341,25 @@ const routes = {
         </section>
       `,
       afterRender() {
+        document.querySelector("#passwordForm")?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          if (form.get("password") !== form.get("confirmPassword")) {
+            toast("两次输入的密码不一致");
+            return;
+          }
+          try {
+            const result = await api("/api/account/password", {
+              method: "POST",
+              body: JSON.stringify({ password: form.get("password") })
+            });
+            state.user = result.user;
+            toast("登录密码已安全更新");
+            renderShell();
+          } catch (error) {
+            toast(error.message);
+          }
+        });
         document.querySelector("#supportForm").addEventListener("submit", async (event) => {
           event.preventDefault();
           await api("/api/support/tickets", {

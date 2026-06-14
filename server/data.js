@@ -2,13 +2,26 @@ const users = [
   {
     id: "u-1001",
     name: "张同学",
-    phone: "13800000000",
+    school: process.env.CAMPUS_USER_SCHOOL || "泰州学院",
+    phone: process.env.CAMPUS_USER_PHONE || "",
     role: "student",
-    college: "信息工程学院",
-    major: "软件技术",
-    studentNo: "20260001",
+    college: process.env.CAMPUS_USER_COLLEGE || "经济与管理学院",
+    major: process.env.CAMPUS_USER_MAJOR || "数字经济",
+    studentNo: process.env.CAMPUS_USER_STUDENT_NO || "",
     verified: true,
     avatarColor: "#1f7a6d"
+  },
+  {
+    id: "u-guest",
+    name: "游客同学",
+    school: "智慧校园体验空间",
+    phone: "",
+    role: "guest",
+    college: "访客体验",
+    major: "功能预览",
+    studentNo: "GUEST",
+    verified: false,
+    avatarColor: "#4d91ff"
   }
 ];
 
