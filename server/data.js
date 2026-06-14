@@ -1,10 +1,10 @@
 const users = [
   {
     id: "u-1001",
-    name: "张同学",
+    name: process.env.CAMPUS_USER_NAME || "张同学",
     school: process.env.CAMPUS_USER_SCHOOL || "泰州学院",
     phone: process.env.CAMPUS_USER_PHONE || "",
-    role: "student",
+    role: process.env.CAMPUS_USER_ROLE || "student",
     college: process.env.CAMPUS_USER_COLLEGE || "经济与管理学院",
     major: process.env.CAMPUS_USER_MAJOR || "数字经济",
     studentNo: process.env.CAMPUS_USER_STUDENT_NO || "",
