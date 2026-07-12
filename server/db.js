@@ -1,6 +1,8 @@
 const mysql = require("mysql2/promise");
 
 const mysqlConfigured = Boolean(process.env.DATABASE_URL || process.env.MYSQL_HOST);
+const autoMigrateSchema = process.env.AUTO_MIGRATE_SCHEMA === "true"
+  || (!process.env.VERCEL && process.env.NODE_ENV !== "production");
 let pool = null;
 
 function getPool() {
@@ -28,4 +30,4 @@ function getPool() {
   return pool;
 }
 
-module.exports = { mysqlConfigured, getPool };
+module.exports = { mysqlConfigured, autoMigrateSchema, getPool };

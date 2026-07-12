@@ -8460,6 +8460,38 @@ html[data-theme="day"] .student-role-filters button.active {
   opacity: 0.42;
 }
 
+.student-list-status {
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.student-list-card.is-loading .table-wrap {
+  opacity: 0.62;
+  transition: opacity 160ms ease;
+}
+
+.student-list-card.is-loading .student-list-status {
+  color: var(--primary);
+}
+
+.student-list-card.is-loading .student-list-status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: student-list-spin 700ms linear infinite;
+}
+
+@keyframes student-list-spin {
+  to { transform: rotate(360deg); }
+}
+
 html[data-theme="day"] .admin-kicker,
 html[data-theme="day"] .admin-import-guide code {
   color: #167a78;

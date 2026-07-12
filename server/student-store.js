@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const data = require("./data");
 const permanentAdmins = require("./permanent-admins");
-const { mysqlConfigured, getPool } = require("./db");
+const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 
 let initialized = false;
 
@@ -29,6 +29,10 @@ function normalizeStudent(row) {
 
 async function initialize() {
   if (!mysqlConfigured || initialized) return;
+  if (!autoMigrateSchema) {
+    initialized = true;
+    return;
+  }
   const db = getPool();
   await db.query(`
     CREATE TABLE IF NOT EXISTS students (
@@ -354,6 +358,80 @@ async function upsertStudent(input) {
   return student;
 }
 
+async function bulkUpsertStudents(items = []) {
+  const prepared = [];
+  const errors = [];
+  for (const item of items) {
+    try {
+      prepared.push({
+        student: validateStudent(item.input),
+        roleExplicit: Boolean(item.input.roleExplicit),
+        statusExplicit: Boolean(item.input.statusExplicit),
+        rowNumber: Number(item.rowNumber || 0)
+      });
+    } catch (error) {
+      errors.push(`第 ${item.rowNumber || "?"} 行：${error.message}`);
+    }
+  }
+  if (!prepared.length) return { success: 0, failed: errors.length, errors };
+  if (!mysqlConfigured) {
+    for (const item of prepared) await upsertStudent(item.student);
+    return { success: prepared.length, failed: errors.length, errors };
+  }
+
+  await initialize();
+  const existingByKey = new Map();
+  const studentNumbers = [...new Set(prepared.map((item) => item.student.studentNo))];
+  for (let offset = 0; offset < studentNumbers.length; offset += 300) {
+    const chunk = studentNumbers.slice(offset, offset + 300);
+    const placeholders = chunk.map(() => "?").join(",");
+    const [rows] = await getPool().execute(`SELECT * FROM students WHERE student_no IN (${placeholders})`, chunk);
+    for (const row of rows) existingByKey.set(`${row.school}\x1f${row.student_no}`, normalizeStudent(row));
+  }
+
+  const students = prepared.map((item) => {
+    const key = `${item.student.school}\x1f${item.student.studentNo}`;
+    const existing = existingByKey.get(key);
+    let student = { ...item.student };
+    if (existing) {
+      student.id = existing.id;
+      if (!item.roleExplicit) student.role = existing.role;
+      if (!item.statusExplicit) student.status = existing.status;
+      if (permanentAdmins.isPermanentSuperAdmin(existing)) {
+        student = { ...student, role: "super_admin", status: "active", verified: true };
+      }
+    }
+    return student;
+  });
+
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    for (let offset = 0; offset < students.length; offset += 150) {
+      const chunk = students.slice(offset, offset + 150);
+      const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(",");
+      const values = chunk.flatMap((student) => [
+        student.id, student.name, student.school, student.college, student.major, student.className,
+        student.studentNo, student.phone, student.status, student.role, student.verified ? 1 : 0, student.avatarColor
+      ]);
+      await connection.execute(`
+        INSERT INTO students (id, name, school, college, major, class_name, student_no, phone, status, role, verified, avatar_color)
+        VALUES ${placeholders}
+        ON DUPLICATE KEY UPDATE
+          name = VALUES(name), college = VALUES(college), major = VALUES(major), class_name = VALUES(class_name), phone = VALUES(phone),
+          status = VALUES(status), role = VALUES(role), verified = VALUES(verified), avatar_color = VALUES(avatar_color)
+      `, values);
+    }
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  return { success: students.length, failed: errors.length, errors };
+}
+
 async function setStudentStatus(studentNo, status) {
   const target = await findByStudentNo(studentNo);
   if (target && permanentAdmins.isPermanentSuperAdmin(target) && status !== "active") {
@@ -507,6 +585,7 @@ module.exports = {
   countStudents,
   countStudentsByRole,
   upsertStudent,
+  bulkUpsertStudents,
   setStudentStatus,
   setStudentRole,
   findByStudentNo,

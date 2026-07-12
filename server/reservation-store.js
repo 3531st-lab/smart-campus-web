@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const data = require("./data");
-const { mysqlConfigured, getPool } = require("./db");
+const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 
 const STORE_PATH = path.join(__dirname, "lab-reservations.json");
 let initialized = false;
@@ -59,6 +59,10 @@ function writeStore(rows) {
 
 async function initialize() {
   if (!mysqlConfigured || initialized) return;
+  if (!autoMigrateSchema) {
+    initialized = true;
+    return;
+  }
   const db = getPool();
   await db.query(`
     CREATE TABLE IF NOT EXISTS lab_reservations (

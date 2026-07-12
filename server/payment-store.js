@@ -1,12 +1,16 @@
 const fs = require("fs");
 const path = require("path");
-const { mysqlConfigured, getPool } = require("./db");
+const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 
 const STORE_PATH = path.join(__dirname, "payment-orders.json");
 let initialized = false;
 
 async function initialize() {
   if (!mysqlConfigured || initialized) return;
+  if (!autoMigrateSchema) {
+    initialized = true;
+    return;
+  }
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS payment_orders (
       id VARCHAR(80) PRIMARY KEY,

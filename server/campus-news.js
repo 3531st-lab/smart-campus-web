@@ -1,4 +1,4 @@
-const { mysqlConfigured, getPool } = require("./db");
+const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 
 const NEWS_CACHE_MS = 5 * 60 * 1000;
 const SOURCE_TIMEOUT_MS = 5000;
@@ -49,6 +49,10 @@ function emptyCache() {
 
 async function initializePersistentCache() {
   if (!mysqlConfigured || persistentCacheInitialized) return;
+  if (!autoMigrateSchema) {
+    persistentCacheInitialized = true;
+    return;
+  }
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS campus_news_cache (
       cache_key VARCHAR(40) PRIMARY KEY,

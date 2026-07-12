@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { mysqlConfigured, getPool } = require("./db");
+const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 
 const STORE_PATH = path.join(__dirname, "notification-receipts.json");
 let initialized = false;
@@ -21,6 +21,10 @@ function writeStore(rows) {
 
 async function initialize() {
   if (!mysqlConfigured || initialized) return;
+  if (!autoMigrateSchema) {
+    initialized = true;
+    return;
+  }
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS notification_receipts (
       user_id VARCHAR(80) NOT NULL,

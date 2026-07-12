@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { mysqlConfigured, getPool } = require("./db");
+const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 
 const STORE_PATH = path.join(__dirname, "user-timetables.json");
 const PREFERENCES_PATH = path.join(__dirname, "user-timetable-preferences.json");
@@ -42,6 +42,10 @@ function ownerKey(user) {
 
 async function initialize() {
   if (!mysqlConfigured || initialized) return;
+  if (!autoMigrateSchema) {
+    initialized = true;
+    return;
+  }
   const db = getPool();
   await db.query(`
     CREATE TABLE IF NOT EXISTS user_timetable_courses (

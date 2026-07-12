@@ -732,6 +732,8 @@ function adminStudent(student) {
 }
 
 function importedStudent(row) {
+  const roleValue = String(row["角色"] ?? row.role ?? "").trim();
+  const statusValue = String(row["状态"] ?? row.status ?? "").trim();
   return {
     name: row["姓名"] ?? row.name,
     school: row["学校"] ?? row.school,
@@ -740,12 +742,14 @@ function importedStudent(row) {
     className: row["班级"] ?? row["行政班"] ?? row["班级名称"] ?? row.className ?? row.class_name ?? "",
     studentNo: row["学号"] ?? row["工号"] ?? row.studentNo ?? row.student_no,
     phone: String(row["手机号"] ?? row.phone ?? "").replace(/\.0$/, ""),
-    status: ["停用", "disabled"].includes(row["状态"] ?? row.status) ? "disabled" : "active",
-    role: ["总管理员", "super_admin"].includes(row["角色"] ?? row.role)
+    status: ["停用", "disabled"].includes(statusValue) ? "disabled" : "active",
+    statusExplicit: Boolean(statusValue),
+    role: ["总管理员", "super_admin"].includes(roleValue)
       ? "super_admin"
-      : ["老师", "teacher"].includes(row["角色"] ?? row.role)
+      : ["老师", "teacher"].includes(roleValue)
       ? "teacher"
-      : ["管理员", "普通管理员", "admin"].includes(row["角色"] ?? row.role) ? "admin" : "student"
+      : ["管理员", "普通管理员", "admin"].includes(roleValue) ? "admin" : "student",
+    roleExplicit: Boolean(roleValue)
   };
 }
 
@@ -1055,6 +1059,8 @@ async function handleApi(req, res) {
         page,
         pageSize,
         totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+        storageMode: studentStore.mysqlConfigured ? "mysql" : "memory",
+        storageConnected: true,
         canManageRoles: isSuperAdmin
       });
       return;
@@ -1161,21 +1167,21 @@ async function handleApi(req, res) {
         sendError(res, 400, "导入文件没有学生数据");
         return;
       }
-      const result = { success: 0, failed: 0, errors: [] };
-      for (let index = 0; index < rows.length; index += 1) {
-        try {
-          const input = importedStudent(rows[index]);
-          if (!isSuperAdmin && ["admin", "super_admin"].includes(input.role)) input.role = "student";
-          const existing = await studentStore.findByStudentNo(String(input.studentNo || ""));
-          if (!isSuperAdmin && existing && !["student", "teacher"].includes(existing.role)) throw new Error("普通管理员不能修改其他管理员");
-          const student = await studentStore.upsertStudent(input);
-          result.success += 1;
-          await studentStore.logAdminAction("import_student", student.studentNo, { operator: adminUser.studentNo, row: index + 2, className: student.className });
-        } catch (error) {
-          result.failed += 1;
-          result.errors.push(`第 ${index + 2} 行：${error.message}`);
+      const items = rows.map((row, index) => {
+        const input = importedStudent(row);
+        if (!isSuperAdmin && input.roleExplicit && ["admin", "super_admin"].includes(input.role)) {
+          input.role = "student";
+          input.roleExplicit = false;
         }
-      }
+        return { input, rowNumber: index + 2 };
+      });
+      const result = await studentStore.bulkUpsertStudents(items);
+      await studentStore.logAdminAction("import_students_batch", "", {
+        operator: adminUser.studentNo,
+        filename: String(body.filename || ""),
+        success: result.success,
+        failed: result.failed
+      });
       sendJson(res, 200, result);
       return;
     }

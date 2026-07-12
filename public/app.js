@@ -6482,21 +6482,20 @@ const routes = {
     let totalCount = 0;
     let studentCount = 0;
     let roleCounts = { student: 0, teacher: 0, admin: 0, super_admin: 0 };
-    let currentAccountState = { query: "", role: "student", page: 1, pageSize: 50, totalPages: 1 };
+    let currentAccountState = { query: "", role: "student", page: 1, pageSize: 20, totalPages: 1 };
+    const accountPageCache = new Map();
     let canManageRoles = false;
     let loadError = "";
     try {
-      const [studentResult, healthResult] = await Promise.all([
-        adminApi("/api/admin/students?role=student&page=1&pageSize=50"),
-        adminApi("/api/admin/health")
-      ]);
-      health = healthResult.identity || healthResult;
+      const studentResult = await adminApi("/api/admin/students?role=student&page=1&pageSize=20");
+      health = { mode: studentResult.storageMode || "mysql", connected: studentResult.storageConnected !== false };
       students = studentResult.students;
       roleCounts = { ...roleCounts, ...(studentResult.roleCounts || {}) };
       studentCount = studentResult.totalCount ?? studentResult.count ?? students.length;
       totalCount = studentResult.accountCount ?? Object.values(roleCounts).reduce((sum, count) => sum + Number(count || 0), 0);
       currentAccountState.totalPages = studentResult.totalPages || 1;
       canManageRoles = studentResult.canManageRoles;
+      accountPageCache.set("|student|1|20", studentResult);
     } catch (error) {
       loadError = error.message;
     }
@@ -6573,6 +6572,7 @@ const routes = {
           <div class="card student-list-card">
             <div class="student-list-head">
               <div><h2 class="section-title">账号列表</h2><p>停用后，该账号无法获取登录验证码。</p></div>
+              <span class="student-list-status" id="studentListStatus" aria-live="polite">已加载</span>
               <form id="studentSearchForm"><input name="query" placeholder="搜索姓名、专业、班级、学号、工号或手机号" /><button class="ghost-btn" type="submit">搜索</button></form>
             </div>
             <div class="student-role-filters" aria-label="按账号角色筛选">
@@ -6603,7 +6603,9 @@ const routes = {
               body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries()))
             });
             toast("学生身份已保存");
-            renderShell();
+            accountPageCache.clear();
+            await loadFilteredStudents({ page: 1, force: true });
+            event.currentTarget.reset();
           } catch (error) {
             toast(error.message);
           }
@@ -6613,17 +6615,24 @@ const routes = {
           const file = event.currentTarget.elements.file.files?.[0];
           if (!file) return;
           const resultNode = document.querySelector("#studentImportResult");
+          const submitButton = event.currentTarget.querySelector("button[type='submit']");
+          if (submitButton) submitButton.disabled = true;
           resultNode.textContent = "正在解析并导入...";
+          const startedAt = performance.now();
           try {
             const result = await adminApi("/api/admin/students/import", {
               method: "POST",
               body: JSON.stringify({ filename: file.name, fileBase64: await fileToBase64(file) })
             });
-            resultNode.textContent = `成功 ${result.success} 条，失败 ${result.failed} 条。${result.errors.slice(0, 3).join("；")}`;
+            const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+            resultNode.textContent = `成功 ${result.success} 条，失败 ${result.failed} 条，用时 ${elapsed} 秒。${result.errors.slice(0, 3).join("；")}`;
             toast("学生名单导入完成");
-            setTimeout(() => renderShell(), 900);
+            accountPageCache.clear();
+            await loadFilteredStudents({ role: "student", page: 1, force: true });
           } catch (error) {
             resultNode.textContent = error.message;
+          } finally {
+            if (submitButton) submitButton.disabled = false;
           }
         });
         document.querySelector("#studentSearchForm")?.addEventListener("submit", async (event) => {
@@ -6668,19 +6677,42 @@ const routes = {
           if (previous) previous.disabled = currentAccountState.page <= 1;
           if (next) next.disabled = currentAccountState.page >= currentAccountState.totalPages;
         }
-        async function loadFilteredStudents({ query = currentAccountState.query, role = currentAccountState.role, page = currentAccountState.page } = {}) {
+        function setAccountListBusy(busy, message = "正在加载...") {
+          document.querySelector(".student-list-card")?.classList.toggle("is-loading", busy);
+          const statusNode = document.querySelector("#studentListStatus");
+          if (statusNode) statusNode.textContent = busy ? message : "已加载";
+          document.querySelectorAll(".student-role-filters button").forEach((button) => { button.disabled = busy; });
+          const previous = document.querySelector("#studentPagePrev");
+          const next = document.querySelector("#studentPageNext");
+          if (previous) previous.disabled = busy || currentAccountState.page <= 1;
+          if (next) next.disabled = busy || currentAccountState.page >= currentAccountState.totalPages;
+        }
+        async function loadFilteredStudents({ query = currentAccountState.query, role = currentAccountState.role, page = currentAccountState.page, force = false } = {}) {
           currentAccountState = { ...currentAccountState, query: String(query || ""), role: String(role || ""), page: Math.max(1, Number(page) || 1) };
+          const activeButton = document.querySelector(`.student-role-filters button[data-account-role="${currentAccountState.role}"]`);
+          document.querySelectorAll(".student-role-filters button").forEach((button) => button.classList.toggle("active", button === activeButton));
           const params = new URLSearchParams({
             query: currentAccountState.query,
             role: currentAccountState.role,
             page: String(currentAccountState.page),
             pageSize: String(currentAccountState.pageSize)
           });
-          const result = await adminApi(`/api/admin/students?${params}`);
-          renderFilteredStudents(result);
-          const activeButton = document.querySelector(`.student-role-filters button[data-account-role="${currentAccountState.role}"]`);
-          document.querySelectorAll(".student-role-filters button").forEach((button) => button.classList.toggle("active", button === activeButton));
-          updateAccountListMeta(result);
+          const cacheKey = `${currentAccountState.query}|${currentAccountState.role}|${currentAccountState.page}|${currentAccountState.pageSize}`;
+          setAccountListBusy(true, currentAccountState.page > 1 ? `正在加载第 ${currentAccountState.page} 页...` : "正在切换账号分类...");
+          try {
+            let result = !force ? accountPageCache.get(cacheKey) : null;
+            if (!result && !currentAccountState.query && Number(roleCounts[currentAccountState.role] || 0) === 0) {
+              result = { students: [], totalCount: 0, page: 1, pageSize: currentAccountState.pageSize, totalPages: 1, roleCounts };
+            }
+            if (!result) {
+              result = await adminApi(`/api/admin/students?${params}`);
+              accountPageCache.set(cacheKey, result);
+            }
+            renderFilteredStudents(result);
+            updateAccountListMeta(result);
+          } finally {
+            setAccountListBusy(false);
+          }
         }
         document.querySelectorAll(".student-role-filters button").forEach((button) => {
           button.addEventListener("click", async () => {
@@ -6704,7 +6736,8 @@ const routes = {
                   body: JSON.stringify({ studentNo: button.dataset.studentNo, status: button.dataset.nextStatus })
                 });
                 toast(button.dataset.nextStatus === "disabled" ? "学生已停用" : "学生已启用");
-                await loadFilteredStudents();
+                accountPageCache.clear();
+                await loadFilteredStudents({ force: true });
               } catch (error) {
                 toast(error.message);
               }
@@ -6723,7 +6756,8 @@ const routes = {
                   body: JSON.stringify({ studentNo: button.dataset.studentNo })
                 });
                 toast("密码已清除，请用户通过手机号登录后重新设置");
-                await loadFilteredStudents();
+                accountPageCache.clear();
+                await loadFilteredStudents({ force: true });
               } catch (error) {
                 toast(error.message);
               }
@@ -6742,10 +6776,12 @@ const routes = {
                   body: JSON.stringify({ studentNo: select.dataset.studentNo, role: select.value })
                 });
                 toast("账号角色已更新");
-                await loadFilteredStudents();
+                accountPageCache.clear();
+                await loadFilteredStudents({ force: true });
               } catch (error) {
                 toast(error.message);
-                await loadFilteredStudents();
+                accountPageCache.clear();
+                await loadFilteredStudents({ force: true });
               }
             });
           });
