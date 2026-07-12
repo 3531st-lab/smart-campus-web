@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS students (
   school VARCHAR(120) NOT NULL,
   college VARCHAR(120) NOT NULL DEFAULT '',
   major VARCHAR(120) NOT NULL,
+  class_name VARCHAR(120) NOT NULL DEFAULT '',
   student_no VARCHAR(64) NOT NULL,
   phone VARCHAR(32) NOT NULL,
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS students (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_school_student_no (school, student_no),
   KEY idx_identity (school, major, student_no, phone),
+  KEY idx_class (school, college, major, class_name),
   KEY idx_status (status)
 );
 
@@ -28,4 +30,46 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs (
   target_student_no VARCHAR(64) NOT NULL DEFAULT '',
   detail JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_timetable_courses (
+  owner_key VARCHAR(80) NOT NULL,
+  course_id VARCHAR(160) NOT NULL,
+  course_data JSON NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (owner_key, course_id),
+  KEY idx_timetable_owner (owner_key)
+);
+
+CREATE TABLE IF NOT EXISTS user_timetable_preferences (
+  owner_key VARCHAR(80) PRIMARY KEY,
+  semester VARCHAR(120) NOT NULL DEFAULT '',
+  week TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  schedule VARCHAR(20) NOT NULL DEFAULT '',
+  hidden_course_ids JSON NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS timetable_global_settings (
+  setting_key VARCHAR(80) PRIMARY KEY,
+  setting_value VARCHAR(255) NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS payment_orders (
+  id VARCHAR(80) PRIMARY KEY,
+  user_id VARCHAR(80) NOT NULL,
+  provider VARCHAR(40) NOT NULL DEFAULT '',
+  scene VARCHAR(160) NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  currency VARCHAR(12) NOT NULL DEFAULT 'cny',
+  status VARCHAR(40) NOT NULL DEFAULT 'created',
+  stripe_session_id VARCHAR(160) NULL,
+  checkout_url TEXT NULL,
+  metadata JSON NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_payment_user (user_id, created_at),
+  UNIQUE KEY uq_stripe_session (stripe_session_id)
 );

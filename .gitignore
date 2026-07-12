@@ -3,4 +3,13 @@ node_modules/
 .DS_Store
 Thumbs.db
 *.log
+*.pid
+*.jobid
 .vercel/
+.env.vercel.*
+.wrangler/
+output/
+server/ai-runtime.json
+server/payment-orders.json
+server/user-timetable-preferences.json
+server/user-timetables.json

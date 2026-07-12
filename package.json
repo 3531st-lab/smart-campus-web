@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "node server/index.js",
     "start": "node server/index.js",
+    "check": "node --check server/index.js && node --check server/student-store.js && node --check server/permanent-admins.js && node --check server/timetable-store.js && node --check server/reservation-store.js && node --check server/notification-store.js && node --check server/payment-store.js && node --check server/integrations.js && node --check server/campus-news.js",
+    "db:init": "node scripts/init-cloud-database.js",
+    "db:migrate:cloud": "node scripts/migrate-local-database.js",
     "music:generate": "node scripts/generate-youth-music.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
   },
   "dependencies": {
     "mysql2": "^3.22.5",

@@ -18,15 +18,22 @@ applyTheme(preferredTheme());
 const state = {
   token: localStorage.getItem("smart_taiyuan_token") || "",
   user: null,
-  route: routeFromLocation()
+  route: routeFromLocation(),
+  unreadNotifications: 0,
+  sidebarScrollTop: Number(sessionStorage.getItem("smart_campus_sidebar_scroll") || 0)
 };
 
-const APP_BUILD = "real-ai-api-v73-20260614";
+const APP_BUILD = "campus-search-v151-20260710";
 window.__SMART_CAMPUS_BUILD__ = APP_BUILD;
+const LEGAL_CONSENT_VERSION = "2026.06.20";
+const LEGAL_CONSENT_STORAGE_KEY = "smart_campus_legal_consent_v1";
+const LEGAL_OPERATOR_NAME = "智慧校园平台运营方";
+const LEGAL_CONTACT = "请通过平台管理员或个人中心反馈渠道联系";
 let renderShellVersion = 0;
 let dashboardGreetingTimer = null;
 let loginParticleCleanup = null;
 let authView = "intro";
+let notificationBadgeTimer = null;
 const YOUTH_THEME_STORAGE_KEY = "smart_campus_youth_theme_v1";
 const YOUTH_MUSIC_STORAGE_KEY = "smart_campus_youth_music_v1";
 let youthAudio = null;
@@ -110,40 +117,48 @@ function setYouthTheme(preference) {
 const moduleGroups = [
   {
     title: "总览",
-    items: [{ id: "dashboard", label: "首页", icon: "⌂", desc: "校园服务总览" }]
+    items: [{ id: "dashboard", label: "首页", icon: "home", desc: "校园服务总览" }]
   },
   {
     title: "教学服务",
     items: [
-      { id: "timetable", label: "课表查询", icon: "▣", desc: "智能课程表与外部导入" },
-      { id: "progress", label: "成绩查询", icon: "▤", desc: "课程成绩与学业进度" },
-      { id: "rooms", label: "空教室查询", icon: "▱", desc: "自习空间快速检索" },
-      { id: "exams", label: "考试报名", icon: "✦", desc: "证书、竞赛与报名时间" }
+      { id: "timetable", label: "课表查询", icon: "calendar", desc: "智能课程表与外部导入" },
+      { id: "progress", label: "成绩查询", icon: "chart", desc: "课程成绩与学业进度" },
+      { id: "rooms", label: "空教室查询", icon: "door", desc: "自习空间快速检索" },
+      { id: "exams", label: "考试报名", icon: "award", desc: "证书、竞赛与报名时间" },
+      { id: "labs", label: "实验室预约", icon: "lab", desc: "实验室、设备与维修" },
+      { id: "lab-approval", label: "预约审批", icon: "award", desc: "管理员审核实验室预约", adminOnly: true }
     ]
   },
   {
     title: "校园生活",
     items: [
-      { id: "labs", label: "实验室预约", icon: "⌘", desc: "实验室、设备与维修" },
-      { id: "library", label: "图书馆服务", icon: "▥", desc: "座位、研讨室与楼层图" },
-      { id: "canteen", label: "食堂点餐", icon: "♨", desc: "点餐、支付与配送点" },
-      { id: "events", label: "校园活动", icon: "♔", desc: "活动报名与社团安排" }
+      { id: "library", label: "图书馆服务", icon: "library", desc: "座位、研讨室与楼层图" },
+      { id: "canteen", label: "食堂点餐", icon: "bowl", desc: "点餐、支付与配送点" },
+      { id: "events", label: "校园活动", icon: "gift", desc: "活动报名与社团安排" },
+      { id: "news", label: "校园资讯", icon: "news", desc: "官网、学院与社团动态" }
     ]
   },
   {
     title: "学习与工作",
     items: [
-      { id: "ai", label: "AI 助手", icon: "✧", desc: "问答、写作、资料分析" },
-      { id: "news", label: "校园资讯", icon: "☷", desc: "官网、学院与社团动态" },
-      { id: "tools", label: "学习工具中心", icon: "⌬", desc: "文档互转、计算、翻译" },
-      { id: "software", label: "软件库", icon: "▦", desc: "学习办公与开发软件" }
+      { id: "ai", label: "AI 助手", icon: "sparkles", desc: "问答、写作、资料分析" },
+      { id: "tools", label: "学习工具中心", icon: "toolbox", desc: "文档互转、计算、翻译、综测核算" },
+      { id: "software", label: "软件库", icon: "grid", desc: "学习办公与开发软件" }
     ]
   },
   {
     title: "个人服务",
     items: [
-      { id: "profile", label: "个人中心", icon: "○", desc: "账号、认证、支付绑定" },
-      { id: "student-admin", label: "学生身份库", icon: "▦", desc: "学生、老师与管理员账号管理", adminOnly: true }
+      { id: "profile", label: "个人中心", icon: "user", desc: "账号、认证、支付绑定" }
+    ]
+  },
+  {
+    title: "权限管理",
+    items: [
+      { id: "student-admin", label: "学生身份库", icon: "database", desc: "学生、老师与管理员账号管理", adminOnly: true },
+      { id: "class-timetable-admin", label: "班级课表导入", icon: "calendar", desc: "管理员按班级集中发布课表", adminOnly: true },
+      { id: "ai-admin", label: "AI 模型配置", icon: "settings", desc: "AI 助手与课表 OCR 服务配置", adminOnly: true, superAdminOnly: true }
     ]
   }
 ];
@@ -153,11 +168,82 @@ function canAccessStudentAdmin() {
   return ["admin", "super_admin"].includes(state.user?.role);
 }
 
+function isSuperAdmin() {
+  return state.user?.role === "super_admin";
+}
+
+function canAccessModule(item) {
+  if (item.superAdminOnly) return isSuperAdmin();
+  if (item.adminOnly) return canAccessStudentAdmin();
+  return true;
+}
+
 function visibleModuleGroups() {
   return moduleGroups
-    .map((group) => ({ ...group, items: group.items.filter((item) => !item.adminOnly || canAccessStudentAdmin()) }))
+    .map((group) => ({ ...group, items: group.items.filter(canAccessModule) }))
     .filter((group) => group.items.length);
 }
+
+function iconSvg(name) {
+  const icons = {
+    home: `<path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z" />`,
+    calendar: `<path d="M7 3v4M17 3v4M4 9h16M6 5h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />`,
+    chart: `<path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-8" />`,
+    door: `<path d="M6 20h12M8 20V5a1 1 0 0 1 1-1h8v16M13 12h.01" />`,
+    award: `<circle cx="12" cy="8" r="4" /><path d="m8.8 11.2-1.3 6.3L12 15l4.5 2.5-1.3-6.3" />`,
+    lab: `<path d="M9 3h6M10 3v5l-5 9a3 3 0 0 0 2.6 4.5h8.8A3 3 0 0 0 19 17l-5-9V3M8 15h8" />`,
+    library: `<path d="M4 19V5M8 19V5M12 19V5M16 19V5M20 19V5M3 19h18" />`,
+    bowl: `<path d="M4 12h16a8 8 0 0 1-16 0Z" /><path d="M7 12c0-2 2-2 2-4M12 12c0-2 2-2 2-4M17 12c0-2 2-2 2-4" />`,
+    gift: `<path d="M20 12v8H4v-8M3 8h18v4H3zM12 8v12M8 8a2 2 0 1 1 4 0M16 8a2 2 0 1 0-4 0" />`,
+    sparkles: `<path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7zM5 15l.8 2.2L8 18l-2.2.8L5 21l-.8-2.2L2 18l2.2-.8zM19 14l.7 1.8 1.8.7-1.8.7L19 19l-.7-1.8-1.8-.7 1.8-.7z" />`,
+    news: `<path d="M5 4h11a3 3 0 0 1 3 3v13H7a2 2 0 0 1-2-2z" /><path d="M8 8h7M8 12h7M8 16h4" />`,
+    toolbox: `<path d="M9 6V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1M4 8h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 12h16M12 12v3" />`,
+    grid: `<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" />`,
+    user: `<circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" />`,
+    database: `<ellipse cx="12" cy="5" rx="7" ry="3" /><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />`,
+    settings: `<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" /><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2.1 2.1 0 0 1-2.97 2.97l-.05-.05a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.1 1.65V21a2.1 2.1 0 0 1-4.2 0v-.08a1.8 1.8 0 0 0-1.18-1.65 1.8 1.8 0 0 0-1.98.36l-.05.05a2.1 2.1 0 0 1-2.97-2.97l.05-.05a1.8 1.8 0 0 0 .36-1.98 1.8 1.8 0 0 0-1.65-1.1H3a2.1 2.1 0 0 1 0-4.2h.08a1.8 1.8 0 0 0 1.65-1.18 1.8 1.8 0 0 0-.36-1.98l-.05-.05A2.1 2.1 0 0 1 7.29 3.2l.05.05a1.8 1.8 0 0 0 1.98.36A1.8 1.8 0 0 0 10.42 2H10.5a2.1 2.1 0 0 1 4.2 0v.08a1.8 1.8 0 0 0 1.1 1.65 1.8 1.8 0 0 0 1.98-.36l.05-.05a2.1 2.1 0 0 1 2.97 2.97l-.05.05a1.8 1.8 0 0 0-.36 1.98A1.8 1.8 0 0 0 22 9.42H22a2.1 2.1 0 0 1 0 4.2h-.08a1.8 1.8 0 0 0-1.65 1.1Z" />`,
+    menu: `<path d="M4 7h16M4 12h16M4 17h16" />`,
+    search: `<circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" />`,
+    sun: `<circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />`,
+    moon: `<path d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5Z" />`,
+    file: `<path d="M6 3h8l4 4v14H6z" /><path d="M14 3v5h5M9 13h6M9 17h6" />`,
+    calculator: `<rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 7h8v3H8zM8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01" />`,
+    languages: `<path d="M4 5h8M8 3v2M6 9c1.6 2.4 3.4 4 6 5M11 5c-.7 4-2.8 7-6 9M14 20l4-9 4 9M15.5 17h5" />`,
+    copy: `<rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />`,
+    refresh: `<path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 4v7h-7" />`,
+    chevron: `<path d="m6 9 6 6 6-6" />`
+  };
+  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.grid}</svg>`;
+}
+
+function setUnreadNotificationCount(count) {
+  const nextCount = Math.max(0, Number(count || 0));
+  state.unreadNotifications = nextCount;
+  document.querySelectorAll(".bell-count").forEach((node) => {
+    node.textContent = String(nextCount);
+    node.hidden = nextCount === 0;
+  });
+  document.querySelectorAll(".bell-dot").forEach((node) => {
+    node.hidden = nextCount === 0;
+  });
+}
+
+async function refreshUnreadNotificationCount() {
+  if (!state.token || !state.user) return;
+  try {
+    const data = await api("/api/notifications");
+    const unreadCount = (data.notifications || []).filter((item) => !item.read).length;
+    setUnreadNotificationCount(unreadCount);
+  } catch (error) {
+    // Keep the last known badge when the network is temporarily unavailable.
+  }
+}
+
+function startNotificationBadgeSync() {
+  if (notificationBadgeTimer || !state.token) return;
+  notificationBadgeTimer = setInterval(refreshUnreadNotificationCount, 15000);
+}
+
 function routeFromLocation() {
   if (location.hash) return location.hash.slice(1);
   const path = location.pathname.replace(/^\/+|\/+$/g, "");
@@ -169,6 +255,91 @@ function routeFromLocation() {
 function routeToUrl(route) {
   if (route === "tools" || String(route).startsWith("tools/")) return `/${route}`;
   return `/#${route || "dashboard"}`;
+}
+
+function loadCommandRecent() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(COMMAND_CENTER_STORAGE_KEY) || "[]");
+    return Array.isArray(stored) ? stored.slice(0, 8) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCommandRecent(commandId) {
+  if (!commandId) return;
+  const next = [commandId, ...loadCommandRecent().filter((id) => id !== commandId)].slice(0, 8);
+  localStorage.setItem(COMMAND_CENTER_STORAGE_KEY, JSON.stringify(next));
+}
+
+function commandCenterCommands() {
+  const moduleCommands = visibleModuleGroups().flatMap((group) => group.items.map((item) => ({
+    id: `route:${item.id}`,
+    route: item.id,
+    label: item.label,
+    desc: item.desc,
+    group: group.title,
+    icon: item.icon,
+    keywords: `${item.label} ${item.desc} ${group.title} ${item.id}`
+  })));
+  const extraCommands = [
+    { id: "tool:quality-score", route: "tools/quality-score", label: "综测核算", desc: "按细则核算综合素质测评分", group: "学习工具", icon: "award", keywords: "综测 综合素质 测评 核算 加分 扣分" },
+    { id: "tool:calculator", route: "tools/calculator", label: "全能计算器", desc: "成绩、时间、比例和常用数值计算", group: "学习工具", icon: "calculator", keywords: "计算器 成绩 绩点 比例" },
+    { id: "tool:translate", route: "tools/translate", label: "语言翻译", desc: "中英互译和学习文本处理", group: "学习工具", icon: "languages", keywords: "翻译 英语 中文 语言" },
+    { id: "tool:doc-convert", route: "tools/doc-convert", label: "文档互转", desc: "文档格式转换与整理", group: "学习工具", icon: "file", keywords: "文档 word pdf excel 转换" },
+    { id: "action:add-course", route: "timetable", label: "添加课程", desc: "进入课表后点击空白格添加或修改课程", group: "快捷操作", icon: "calendar", keywords: "添加课程 修改课程 删除课程 课表" },
+    { id: "action:import-timetable", route: "timetable", label: "导入课表", desc: "支持 Excel 和图片识别导入个人课表", group: "快捷操作", icon: "file", keywords: "导入课表 图片 OCR Excel" },
+    { id: "action:reserve-lab", route: "labs", label: "预约实验室", desc: "提交实验室预约并等待管理员审批", group: "快捷操作", icon: "lab", keywords: "实验室预约 预约 申请" },
+    { id: "action:notifications", route: "notifications", label: "查看未读消息", desc: `${state.unreadNotifications || 0} 条未读通知`, group: "快捷操作", icon: "news", keywords: "消息 通知 未读 铃铛" },
+    { id: "action:ai-config", route: "ai", label: "配置个人 AI", desc: "在 AI 助手右侧填写自己的 API Key", group: "快捷操作", icon: "sparkles", keywords: "AI API Key 模型 配置" },
+    { id: "admin:student", route: "student-admin", label: "学生身份库", desc: "维护学生、老师、管理员账号", group: "权限管理", icon: "database", keywords: "学生身份库 账号 管理员 老师 学生" },
+    { id: "admin:class-timetable", route: "class-timetable-admin", label: "班级课表导入", desc: "管理员按班级集中发布课表", group: "权限管理", icon: "calendar", keywords: "班级课表 管理员 集中导入" },
+    { id: "admin:lab-approval", route: "lab-approval", label: "预约审批", desc: "管理员审批实验室预约申请", group: "教学服务", icon: "award", keywords: "实验室 审批 管理员 预约审批" }
+  ].filter((item) => {
+    const module = navItems.find((nav) => nav.id === item.route);
+    return !module || canAccessModule(module);
+  });
+  const seen = new Set();
+  return [...moduleCommands, ...extraCommands].filter((item) => {
+    if (seen.has(item.route) && !item.id.startsWith("action:")) return false;
+    seen.add(item.route);
+    return true;
+  });
+}
+
+function commandRecommendationIds() {
+  const hour = new Date().getHours();
+  if (hour < 11) return ["route:timetable", "action:notifications", "tool:quality-score", "route:ai"];
+  if (hour < 17) return ["action:reserve-lab", "tool:calculator", "route:software", "route:news"];
+  return ["route:ai", "tool:quality-score", "route:news", "action:notifications"];
+}
+
+function scoreCommand(command, keyword, recentIds, recommendedIds) {
+  let score = 0;
+  const text = `${command.label} ${command.desc} ${command.group} ${command.keywords}`.toLowerCase();
+  if (!keyword) score += recommendedIds.includes(command.id) ? 30 : 0;
+  if (recentIds.includes(command.id)) score += 60 - recentIds.indexOf(command.id) * 5;
+  if (recommendedIds.includes(command.id)) score += 24;
+  if (command.route === state.route || (command.route === "tools" && state.route.startsWith("tools/"))) score += 6;
+  if (keyword) {
+    if (command.label.toLowerCase().includes(keyword)) score += 90;
+    if (text.includes(keyword)) score += 45;
+    keyword.split(/\s+/).filter(Boolean).forEach((part) => {
+      if (text.includes(part)) score += 12;
+    });
+  }
+  return score;
+}
+
+function getCommandCenterResults(keyword = "") {
+  const normalized = keyword.trim().toLowerCase();
+  const recentIds = loadCommandRecent();
+  const recommendedIds = commandRecommendationIds();
+  return commandCenterCommands()
+    .map((command) => ({ ...command, score: scoreCommand(command, normalized, recentIds, recommendedIds) }))
+    .filter((command) => !normalized || command.score > 0)
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label, "zh-CN"))
+    .slice(0, normalized ? 10 : 9);
 }
 
 const aiProviderPresets = [
@@ -197,7 +368,47 @@ const aiProviderPresets = [
 const AI_PANEL_SCHEMA = "real-server-ai-v25-20260614";
 const AI_CONFIG_KEY = "smart_campus_ai_config_panel_v2";
 const AI_MESSAGES_KEY = "smart_campus_ai_messages_panel_v2";
+const AI_CONVERSATIONS_KEY = "smart_campus_ai_conversations_v1";
+const AI_ACTIVE_CONVERSATION_KEY = "smart_campus_ai_active_conversation_v1";
+const AI_TRASH_KEY = "smart_campus_ai_conversation_trash_v1";
+const COMMAND_CENTER_STORAGE_KEY = "smart_campus_command_recent_v1";
 const app = document.querySelector("#app");
+
+function aiConversationId() {
+  return globalThis.crypto?.randomUUID?.() || `ai-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function loadAiConversations() {
+  let conversations = [];
+  try {
+    conversations = JSON.parse(localStorage.getItem(AI_CONVERSATIONS_KEY) || "[]");
+  } catch {
+    conversations = [];
+  }
+  if (!Array.isArray(conversations)) conversations = [];
+  if (!conversations.length) {
+    let legacyMessages = [];
+    try {
+      legacyMessages = JSON.parse(localStorage.getItem(AI_MESSAGES_KEY) || "[]");
+    } catch {
+      legacyMessages = [];
+    }
+    const now = new Date().toISOString();
+    conversations = [{
+      id: aiConversationId(),
+      title: legacyMessages.find((item) => item.role === "user")?.text?.slice(0, 24) || "新对话",
+      messages: Array.isArray(legacyMessages) ? legacyMessages : [],
+      createdAt: now,
+      updatedAt: now
+    }];
+    localStorage.setItem(AI_CONVERSATIONS_KEY, JSON.stringify(conversations));
+  }
+  return conversations.slice(0, 50);
+}
+
+function saveAiConversations(conversations) {
+  localStorage.setItem(AI_CONVERSATIONS_KEY, JSON.stringify(conversations.slice(0, 50)));
+}
 
 function currentDateInfo() {
   const now = new Date();
@@ -218,11 +429,140 @@ function paymentName(provider) {
 
 const weekDays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const TIMETABLE_STORAGE_KEY = "smart_taiyuan_imported_courses_xlsx_v2";
+const TIMETABLE_SETTINGS_KEY = "smart_taiyuan_timetable_settings_v1";
+const TIMETABLE_HIDDEN_KEY = "smart_taiyuan_timetable_hidden_v1";
+const TIMETABLE_IMAGE_KEY = "smart_taiyuan_timetable_image_v1";
+const TIMETABLE_SEMESTERS = ["2025-2026学年第二学期", "2025-2026学年第一学期", "2026-2027学年第一学期"];
+const TIMETABLE_WEEKS = Array.from({ length: 20 }, (_, index) => index + 1);
+const TIMETABLE_DEFAULT_WEEK_ONE_START = "2026-02-23";
+const TIMETABLE_SCHEDULES = {
+  summer: ["08:00", "08:50", "09:50", "10:40", "11:30", "14:30", "15:20", "16:20", "17:10", "19:00", "19:50", "20:40"],
+  winter: ["08:00", "08:50", "09:50", "10:40", "11:30", "14:00", "14:50", "15:50", "16:40", "19:00", "19:50", "20:40"]
+};
+const TIMETABLE_COLORS = ["teal", "blue", "violet", "orange", "green", "rose"];
+
+function getTimetableSettings() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(TIMETABLE_SETTINGS_KEY) || "{}");
+    return {
+      semester: TIMETABLE_SEMESTERS.includes(stored.semester) ? stored.semester : TIMETABLE_SEMESTERS[0],
+      week: Math.min(20, Math.max(1, Number(stored.week || 17))),
+      schedule: stored.schedule === "winter" ? "winter" : "summer",
+      weekOneStart: /^\d{4}-\d{2}-\d{2}$/.test(String(stored.weekOneStart || "")) ? stored.weekOneStart : TIMETABLE_DEFAULT_WEEK_ONE_START
+    };
+  } catch (error) {
+    return { semester: TIMETABLE_SEMESTERS[0], week: 17, schedule: "summer", weekOneStart: TIMETABLE_DEFAULT_WEEK_ONE_START };
+  }
+}
+
+function saveTimetableSettings(patch) {
+  localStorage.setItem(TIMETABLE_SETTINGS_KEY, JSON.stringify({ ...getTimetableSettings(), ...patch }));
+}
+
+async function persistTimetableSettings(patch) {
+  saveTimetableSettings(patch);
+  if (!state.user || state.user.role === "guest") return getTimetableSettings();
+  const result = await api("/api/timetable/settings", {
+    method: "POST",
+    body: JSON.stringify(patch)
+  });
+  const settings = result.settings || {};
+  saveTimetableSettings(Object.fromEntries(Object.entries(settings).filter(([, value]) => value !== "" && value !== 0)));
+  return getTimetableSettings();
+}
+
+function timetableHiddenKey() {
+  const userKey = state.user?.studentNo || state.user?.id || "guest";
+  return `${TIMETABLE_HIDDEN_KEY}_${userKey}`;
+}
+
+function getLocalHiddenCourseIds() {
+  try {
+    return JSON.parse(localStorage.getItem(timetableHiddenKey()) || "[]").map(String);
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveLocalHiddenCourseIds(ids) {
+  localStorage.setItem(timetableHiddenKey(), JSON.stringify([...new Set(ids.map(String))]));
+}
+
+function parseWeeks(value) {
+  if (Array.isArray(value)) return value.map(Number).filter((week) => week >= 1 && week <= 20);
+  const text = String(value || "").trim();
+  if (!text || text === "全部" || text === "1-20") return TIMETABLE_WEEKS;
+  const weeks = new Set();
+  text.replace(/周/g, "").split(/[,\uFF0C、\s]+/).filter(Boolean).forEach((part) => {
+    const range = part.split(/[-~至]/).map((item) => Number(item.trim()));
+    if (range.length >= 2 && range[0] && range[1]) {
+      const start = Math.min(range[0], range[1]);
+      const end = Math.max(range[0], range[1]);
+      for (let week = start; week <= end; week += 1) {
+        if (week >= 1 && week <= 20) weeks.add(week);
+      }
+    } else {
+      const week = Number(part);
+      if (week >= 1 && week <= 20) weeks.add(week);
+    }
+  });
+  return weeks.size ? [...weeks].sort((a, b) => a - b) : TIMETABLE_WEEKS;
+}
+
+function formatWeeks(weeks = TIMETABLE_WEEKS) {
+  const list = parseWeeks(weeks);
+  if (list.length === 20) return "1-20周";
+  const ranges = [];
+  let start = list[0];
+  let previous = list[0];
+  for (let index = 1; index <= list.length; index += 1) {
+    if (list[index] === previous + 1) {
+      previous = list[index];
+      continue;
+    }
+    ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+    start = list[index];
+    previous = list[index];
+  }
+  return `${ranges.join("、")}周`;
+}
+
+function sectionFromTime(time) {
+  const minutes = minutesOf(time);
+  if (!minutes) return 1;
+  const allStarts = TIMETABLE_SCHEDULES.summer.map((item, index) => ({ index: index + 1, value: minutesOf(item) }))
+    .concat(TIMETABLE_SCHEDULES.winter.map((item, index) => ({ index: index + 1, value: minutesOf(item) })));
+  return allStarts.reduce((best, item) => Math.abs(item.value - minutes) < Math.abs(best.value - minutes) ? item : best, allStarts[0]).index;
+}
+
+function normalizeCourseRecord(course, index = 0) {
+  const startSection = Math.min(12, Math.max(1, Number(course.startSection || course.section || course.period || course["开始节次"] || sectionFromTime(course.time))));
+  const sectionCount = Math.min(4, Math.max(1, Number(course.sectionCount || course.duration || course.count || course["连续节数"] || 2)));
+  const normalized = {
+    ...course,
+    id: course.id || `course-${Date.now()}-${index}`,
+    day: normalizeDay(course.day || course.weekday || course["星期"]),
+    semester: course.semester || course["学期"] || TIMETABLE_SEMESTERS[0],
+    weeks: parseWeeks(course.weeks || course.week || course["周次"]),
+    startSection,
+    sectionCount,
+    course: course.course || course.title || course.name || course["课程名称"] || course["课程"] || "",
+    location: course.location || course.room || course["上课地点"] || course["地点"] || course["教室"] || "",
+    teacher: course.teacher || course["任课教师"] || course["教师"] || course["老师"] || "",
+    note: course.note || course.remark || course["备注"] || "",
+    source: course.source || "自定义课表"
+  };
+  return {
+    ...normalized,
+    time: normalized.time || courseTimeLabel(normalized, getTimetableSettings().schedule),
+    color: normalized.color || TIMETABLE_COLORS[Math.abs(String(normalized.course).split("").reduce((sum, char) => sum + char.charCodeAt(0), 0)) % TIMETABLE_COLORS.length]
+  };
+}
 
 function getStoredCourses() {
   try {
-    return JSON.parse(localStorage.getItem(TIMETABLE_STORAGE_KEY) || "[]").map((course) => ({
-      ...course,
+    return JSON.parse(localStorage.getItem(timetableStorageKey()) || "[]").map((course) => ({
+      ...normalizeCourseRecord(course),
       day: normalizeDay(course.day)
     }));
   } catch (error) {
@@ -231,7 +571,170 @@ function getStoredCourses() {
 }
 
 function saveStoredCourses(courses) {
-  localStorage.setItem(TIMETABLE_STORAGE_KEY, JSON.stringify(courses));
+  localStorage.setItem(timetableStorageKey(), JSON.stringify(courses));
+}
+
+function timetableStorageKey() {
+  const userKey = state.user?.studentNo || state.user?.id || "guest";
+  return `${TIMETABLE_STORAGE_KEY}_${userKey}`;
+}
+
+function courseSignature(course = {}) {
+  return [
+    course.semester,
+    Array.isArray(course.weeks) ? course.weeks.join(",") : course.weeks,
+    course.day,
+    course.startSection,
+    course.sectionCount,
+    course.course,
+    course.location
+  ].map((value) => String(value || "").trim()).join("|");
+}
+
+function mergeCourseLists(...lists) {
+  const seen = new Set();
+  return lists.flat().filter(Boolean).map((course, index) => normalizeCourseRecord(course, index)).filter((course) => {
+    const key = courseSignature(course);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function timetableCourseGradient(course, paletteIndex = 0) {
+  const palette = [
+    ["#149f9a", "#2670a4", "#58d2cd", "rgba(30, 166, 169, .18)"],
+    ["#2573cf", "#264aa2", "#75b4ff", "rgba(48, 112, 216, .18)"],
+    ["#715dd5", "#9953ba", "#b69bff", "rgba(126, 91, 214, .18)"],
+    ["#d88b35", "#bd6260", "#ffc078", "rgba(211, 120, 67, .18)"],
+    ["#299a67", "#23849a", "#6edaa7", "rgba(42, 151, 118, .18)"],
+    ["#c15283", "#6f5bcd", "#f28eb6", "rgba(173, 83, 154, .18)"],
+    ["#178ba8", "#3464b8", "#69cce0", "rgba(36, 133, 181, .18)"],
+    ["#405fb8", "#7655c7", "#91a9ff", "rgba(77, 91, 194, .18)"],
+    ["#b77939", "#a95573", "#e7a86b", "rgba(177, 103, 72, .18)"],
+    ["#2d8b78", "#456fbd", "#74d1bb", "rgba(48, 133, 132, .18)"],
+    ["#8b5bb2", "#4a6cb7", "#c195df", "rgba(111, 91, 183, .18)"],
+    ["#3b789d", "#2a9a91", "#79bfd2", "rgba(45, 133, 153, .18)"],
+    ["#4f82bd", "#326e91", "#89b8e8", "rgba(59, 119, 164, .18)"],
+    ["#5e65bd", "#3b8b9b", "#929be6", "rgba(73, 113, 181, .18)"],
+    ["#a5668f", "#6967b7", "#d39abb", "rgba(139, 92, 157, .18)"],
+    ["#347f68", "#397da2", "#79bda2", "rgba(49, 126, 119, .18)"],
+    ["#b06f48", "#8c617f", "#dfa078", "rgba(158, 99, 92, .18)"],
+    ["#397aa7", "#5964b4", "#7db4dc", "rgba(67, 111, 173, .18)"],
+    ["#317f8d", "#5d6ba9", "#78bdc4", "rgba(57, 119, 151, .18)"],
+    ["#6974b6", "#477f91", "#a1a8dc", "rgba(83, 116, 166, .18)"]
+  ];
+  const colors = palette[Math.abs(Number(paletteIndex) || 0) % palette.length];
+  return [
+    `--course-start:${colors[0]}`,
+    `--course-end:${colors[1]}`,
+    `--course-accent:${colors[2]}`,
+    `--course-glow:${colors[3]}`
+  ].join(";");
+}
+
+function currentPersonalCourses() {
+  return Array.isArray(window.__personalTimetableCourses) ? window.__personalTimetableCourses : getStoredCourses();
+}
+
+async function replacePersonalCourses(courses) {
+  const cleanCourses = mergeCourseLists(courses);
+  if (!state.user || state.user.role === "guest") {
+    saveStoredCourses(cleanCourses);
+    window.__personalTimetableCourses = cleanCourses;
+    return cleanCourses;
+  }
+  const result = await api("/api/timetable/personal", {
+    method: "POST",
+    body: JSON.stringify({ courses: cleanCourses })
+  });
+  const syncedCourses = mergeCourseLists(result.courses || cleanCourses);
+  window.__personalTimetableCourses = syncedCourses;
+  saveStoredCourses([]);
+  return syncedCourses;
+}
+
+async function upsertPersonalCourse(course) {
+  if (!state.user || state.user.role === "guest") {
+    saveLocalHiddenCourseIds(getLocalHiddenCourseIds().filter((id) => id !== String(course.id)));
+    const courses = currentPersonalCourses();
+    const nextCourses = course.id && courses.some((item) => item.id === course.id)
+      ? courses.map((item) => (item.id === course.id ? { ...item, ...course } : item))
+      : [...courses, course];
+    return replacePersonalCourses(nextCourses);
+  }
+  const result = await api("/api/timetable/personal/course", {
+    method: "POST",
+    body: JSON.stringify({ course })
+  });
+  const syncedCourses = mergeCourseLists(result.courses || []);
+  window.__personalTimetableCourses = syncedCourses;
+  saveStoredCourses([]);
+  return syncedCourses;
+}
+
+async function deletePersonalCourse(id) {
+  if (!state.user || state.user.role === "guest") {
+    saveLocalHiddenCourseIds([...getLocalHiddenCourseIds(), id]);
+    return replacePersonalCourses(currentPersonalCourses().filter((item) => item.id !== id));
+  }
+  const result = await api("/api/timetable/personal/delete", {
+    method: "POST",
+    body: JSON.stringify({ id })
+  });
+  const syncedCourses = mergeCourseLists(result.courses || []);
+  window.__personalTimetableCourses = syncedCourses;
+  window.__hiddenTimetableCourseIds = (result.hiddenCourseIds || []).map(String);
+  saveStoredCourses([]);
+  return syncedCourses;
+}
+
+function getTimetableImage() {
+  try {
+    return JSON.parse(localStorage.getItem(TIMETABLE_IMAGE_KEY) || "null");
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveTimetableImage(image) {
+  localStorage.setItem(TIMETABLE_IMAGE_KEY, JSON.stringify(image));
+}
+
+function clearTimetableImage() {
+  localStorage.removeItem(TIMETABLE_IMAGE_KEY);
+}
+
+function compressTimetableImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error("图片格式无法识别"));
+      image.onload = () => {
+        const maxWidth = 1100;
+        const maxHeight = 1800;
+        const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+        const context = canvas.getContext("2d");
+        context.fillStyle = "#fff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve({
+          name: file.name,
+          importedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+          width: canvas.width,
+          height: canvas.height,
+          dataUrl: canvas.toDataURL("image/jpeg", 0.82)
+        });
+      };
+      image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function currentGreeting() {
@@ -551,7 +1054,7 @@ function stopYouthAudio() {
 function startYouthAudio(themeId) {
   const previous = youthAudio;
   if (previous?.themeId === themeId && !previous.element.paused) return;
-  const element = new Audio(`/assets/music/${themeId}.wav`);
+  const element = new Audio("/assets/music/page-theme.mp3?v=custom-page-music-v128-20260620");
   element.loop = true;
   element.preload = "auto";
   element.volume = 0;
@@ -610,10 +1113,24 @@ function updateYouthRadio(themeId) {
 
 async function getUnifiedTimetable() {
   const data = await api("/api/timetable");
-  const courses = [...(data.courses || []), ...getStoredCourses()].map((course) => ({
-    ...course,
-    day: normalizeDay(course.day)
-  }));
+  const serverSettings = Object.fromEntries(Object.entries(data.settings || {}).filter(([, value]) => value !== "" && value !== 0));
+  if (Object.keys(serverSettings).length) saveTimetableSettings(serverSettings);
+  let personalCourses = mergeCourseLists(data.personalCourses || []);
+  const localCourses = getStoredCourses();
+  if (state.user?.role === "guest") {
+    personalCourses = localCourses;
+  } else if (localCourses.length) {
+    personalCourses = await replacePersonalCourses(mergeCourseLists(personalCourses, localCourses));
+  }
+  window.__personalTimetableCourses = personalCourses;
+  const hiddenCourseIds = state.user?.role === "guest"
+    ? getLocalHiddenCourseIds()
+    : (data.hiddenCourseIds || []).map(String);
+  window.__hiddenTimetableCourseIds = hiddenCourseIds;
+  const hiddenSet = new Set(hiddenCourseIds);
+  // Personal records are full course overrides. Keep them first so edits such as
+  // teacher and location are not hidden by the matching school timetable entry.
+  const courses = mergeCourseLists(personalCourses, (data.courses || []).filter((course) => !hiddenSet.has(String(course.id))));
   return { ...data, courses };
 }
 
@@ -639,21 +1156,48 @@ function bindTimetableEditor() {
   if (!modal || !form) return;
 
   const closeModal = () => modal.classList.add("hidden");
+  const openModal = (course = {}) => {
+    const settings = getTimetableSettings();
+    const normalized = normalizeCourseRecord({
+      semester: settings.semester,
+      weeks: [settings.week],
+      day: todayDayName(),
+      startSection: 1,
+      sectionCount: 2,
+      ...course
+    });
+    if (course.id === "") normalized.id = "";
+    form.elements.id.value = normalized.id || "";
+    form.elements.semester.value = normalized.semester || settings.semester;
+    form.elements.weeks.value = formatWeeks(normalized.weeks).replace(/周/g, "");
+    form.elements.day.value = normalizeDay(normalized.day);
+    form.elements.startSection.value = normalized.startSection || 1;
+    form.elements.sectionCount.value = normalized.sectionCount || 2;
+    form.elements.course.value = normalized.course || "";
+    form.elements.location.value = normalized.location || "";
+    form.elements.teacher.value = normalized.teacher || "";
+    form.elements.note.value = normalized.note || "";
+    form.querySelector("#deleteTimetableCourse")?.classList.toggle("hidden", !normalized.id);
+    modal.classList.remove("hidden");
+    form.elements.course.focus();
+  };
+  const findCurrentCourse = (id) => (window.__currentTimetableCourses || []).find((item) => item.id === id);
   document.querySelectorAll("[data-course-edit]").forEach((button) => {
     button.addEventListener("click", () => {
-      const course = getStoredCourses().find((item) => item.id === button.dataset.courseEdit);
-      if (!course) {
-        toast("该课程不是导入课程，暂不支持修改");
-        return;
-      }
-      form.elements.id.value = course.id;
-      form.elements.day.value = normalizeDay(course.day);
-      form.elements.time.value = course.time || "";
-      form.elements.course.value = course.course || "";
-      form.elements.location.value = course.location || "";
-      form.elements.teacher.value = course.teacher || "";
-      modal.classList.remove("hidden");
-      form.elements.course.focus();
+      openModal(currentPersonalCourses().find((item) => item.id === button.dataset.courseEdit) || findCurrentCourse(button.dataset.courseEdit));
+    });
+  });
+  document.querySelectorAll("[data-course-add]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const settings = getTimetableSettings();
+      openModal({
+        id: "",
+        day: button.dataset.day,
+        startSection: Number(button.dataset.section || 1),
+        sectionCount: 2,
+        semester: settings.semester,
+        weeks: [settings.week]
+      });
     });
   });
   document.querySelectorAll("[data-timetable-edit-close]").forEach((button) => {
@@ -662,27 +1206,45 @@ function bindTimetableEditor() {
   modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal();
   });
-  form.addEventListener("submit", (event) => {
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
+    const id = String(formData.get("id") || "").trim();
     const updated = {
-      id: formData.get("id"),
+      id: id || `manual-${Date.now()}`,
+      semester: String(formData.get("semester") || TIMETABLE_SEMESTERS[0]).trim(),
+      weeks: parseWeeks(formData.get("weeks")),
       day: normalizeDay(formData.get("day")),
-      time: String(formData.get("time") || "").trim(),
+      startSection: Number(formData.get("startSection") || 1),
+      sectionCount: Number(formData.get("sectionCount") || 2),
       course: String(formData.get("course") || "").trim(),
       location: String(formData.get("location") || "").trim(),
       teacher: String(formData.get("teacher") || "").trim(),
-      source: "智慧校园课表模板"
+      note: String(formData.get("note") || "").trim(),
+      source: "手动维护"
     };
-    if (!updated.time || !updated.course) {
-      toast("请填写课程名称和上课时间");
+    updated.time = courseTimeLabel(updated, getTimetableSettings().schedule);
+    if (!updated.course) {
+      toast("请填写课程名称");
       return;
     }
-    saveStoredCourses(getStoredCourses().map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+    await upsertPersonalCourse(updated);
     closeModal();
-    toast("课程已更新");
+    toast(id ? "课程已更新" : "课程已添加");
     renderShell();
   });
+  form.querySelector("#deleteTimetableCourse")?.addEventListener("click", async () => {
+    const id = form.elements.id.value;
+    if (!id) return;
+    await deletePersonalCourse(id);
+    closeModal();
+    toast("课程已删除");
+    renderShell();
+  });
+}
+
+function todayDayName() {
+  return weekDays[(new Date().getDay() + 6) % 7];
 }
 
 function bindTimetableImportModal() {
@@ -691,6 +1253,12 @@ function bindTimetableImportModal() {
   if (!modal || !openButton) return;
   const closeModal = () => modal.classList.add("hidden");
   openButton.addEventListener("click", () => modal.classList.remove("hidden"));
+  document.querySelector("#downloadTimetableExample")?.addEventListener("click", () => {
+    const link = document.createElement("a");
+    link.href = "/downloads/templates/课表导入示例.xlsx";
+    link.download = "课表导入示例.xlsx";
+    link.click();
+  });
   document.querySelectorAll("[data-timetable-import-close]").forEach((button) => {
     button.addEventListener("click", closeModal);
   });
@@ -842,6 +1410,77 @@ function minutesOf(value) {
   return match ? Number(match[1]) * 60 + Number(match[2]) : 0;
 }
 
+function courseTimeLabel(course, scheduleMode = "summer") {
+  const starts = TIMETABLE_SCHEDULES[scheduleMode] || TIMETABLE_SCHEDULES.summer;
+  const startIndex = Math.min(12, Math.max(1, Number(course.startSection || 1))) - 1;
+  const endIndex = Math.min(11, startIndex + Math.max(1, Number(course.sectionCount || 1)) - 1);
+  return `${starts[startIndex]}-${starts[endIndex]}`;
+}
+
+function courseMatchesTimetable(course, settings) {
+  return (course.semester || TIMETABLE_SEMESTERS[0]) === settings.semester && parseWeeks(course.weeks).includes(Number(settings.week));
+}
+
+function dateFromIso(value) {
+  const [year, month, day] = String(value || TIMETABLE_DEFAULT_WEEK_ONE_START).split("-").map(Number);
+  return new Date(year || 2026, (month || 2) - 1, day || 23);
+}
+
+function dayDateLabels(selectedWeek, weekOneStart = TIMETABLE_DEFAULT_WEEK_ONE_START) {
+  const baseMonday = dateFromIso(weekOneStart);
+  const monday = new Date(baseMonday);
+  monday.setDate(baseMonday.getDate() + (Number(selectedWeek) - 1) * 7);
+  return weekDays.map((day, index) => {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + index);
+    return {
+      day,
+      date: `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`
+    };
+  });
+}
+
+function bindTimetableControls() {
+  const semester = document.querySelector("#timetableSemester");
+  const week = document.querySelector("#timetableWeek");
+  const weekOneStart = document.querySelector("#timetableWeekOneStart");
+  const saveWeekOneStart = document.querySelector("#saveTimetableWeekOneStart");
+  const addButton = document.querySelector("#addTimetableCourse");
+  semester?.addEventListener("change", async () => {
+    await persistTimetableSettings({ semester: semester.value });
+    renderShell();
+  });
+  week?.addEventListener("change", async () => {
+    await persistTimetableSettings({ week: Number(week.value) });
+    renderShell();
+  });
+  weekOneStart?.addEventListener("change", async () => {
+    await persistTimetableSettings({ weekOneStart: weekOneStart.value || TIMETABLE_DEFAULT_WEEK_ONE_START });
+    toast("第一周起始日期已更新");
+    renderShell();
+  });
+  saveWeekOneStart?.addEventListener("click", () => {
+    weekOneStart?.dispatchEvent(new Event("change"));
+  });
+  document.querySelectorAll("[data-timetable-week-step]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const settings = getTimetableSettings();
+      const next = Math.min(20, Math.max(1, settings.week + Number(button.dataset.timetableWeekStep)));
+      await persistTimetableSettings({ week: next });
+      renderShell();
+    });
+  });
+  document.querySelectorAll("[data-timetable-schedule]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await persistTimetableSettings({ schedule: button.dataset.timetableSchedule });
+      renderShell();
+    });
+  });
+  addButton?.addEventListener("click", () => {
+    document.querySelector("[data-course-add]")?.click();
+  });
+}
+
 function courseConflicts(courses) {
   const conflicts = [];
   for (const day of weekDays) {
@@ -885,6 +1524,41 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function softwareInitials(name = "") {
+  const text = String(name).trim();
+  const latin = text.match(/[A-Za-z0-9]+/g);
+  if (latin?.length) return latin.slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+  return text.slice(0, 2) || "软";
+}
+
+function softwareAccent(item = {}) {
+  const palette = ["#2f8cff", "#18b7a7", "#7c5cff", "#f59f31", "#e7587a", "#28a6d6"];
+  const seed = String(item.name || item.category || "").split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return palette[seed % palette.length];
+}
+
+function softwareIconMarkup(item = {}, size = "card") {
+  const initials = escapeHtml(softwareInitials(item.name));
+  const accent = escapeHtml(softwareAccent(item));
+  const icon = item.icon ? escapeHtml(item.icon) : "";
+  const fallback = `<span class="software-icon-fallback" style="--software-accent:${accent}">${initials}</span>`;
+  if (!icon) return fallback;
+  return `<img src="${icon}" alt="${escapeHtml(item.name)} 图标" loading="lazy" referrerpolicy="no-referrer" data-software-icon="${size}" data-fallback="${initials}" data-accent="${accent}" />${fallback}`;
+}
+
+function bindSoftwareIconFallbacks(root = document) {
+  root.querySelectorAll("img[data-software-icon]").forEach((img) => {
+    const fallback = img.nextElementSibling;
+    const showFallback = () => {
+      img.hidden = true;
+      if (fallback?.classList.contains("software-icon-fallback")) fallback.hidden = false;
+    };
+    if (fallback?.classList.contains("software-icon-fallback")) fallback.hidden = true;
+    img.addEventListener("error", showFallback, { once: true });
+    if (img.complete && img.naturalWidth === 0) showFallback();
+  });
 }
 
 function evaluateFormula(expression) {
@@ -1188,6 +1862,11 @@ async function updateDashboardWeather(force = false) {
 function setRoute(route) {
   if (!route) return;
   if (route === state.route && routeFromLocation() === route) return;
+  const sidebar = document.querySelector(".sidebar");
+  if (sidebar) {
+    state.sidebarScrollTop = sidebar.scrollTop;
+    sessionStorage.setItem("smart_campus_sidebar_scroll", String(state.sidebarScrollTop));
+  }
   state.route = route;
   paintRouteIntent(route);
   const nextUrl = routeToUrl(route);
@@ -1218,7 +1897,7 @@ function syncRouteFromLocation() {
 window.addEventListener("hashchange", syncRouteFromLocation);
 window.addEventListener("popstate", syncRouteFromLocation);
 window.addEventListener("storage", (event) => {
-  if (event.key === TIMETABLE_STORAGE_KEY && ["dashboard", "timetable"].includes(state.route)) {
+  if (String(event.key || "").startsWith(TIMETABLE_STORAGE_KEY) && ["dashboard", "timetable"].includes(state.route)) {
     renderShell();
   }
   if (event.key === THEME_STORAGE_KEY) {
@@ -1226,6 +1905,73 @@ window.addEventListener("storage", (event) => {
     renderShell();
   }
 });
+
+function legalDocumentMarkup(type) {
+  if (type === "privacy") {
+    return `
+      <article class="legal-document">
+        <p class="legal-document-note">版本：${LEGAL_CONSENT_VERSION} · 生效日期：2026年6月20日</p>
+        <h3>智慧校园隐私政策</h3>
+        <p>本政策说明 ${LEGAL_OPERATOR_NAME} 如何处理你在使用本平台时提交或产生的个人信息。我们遵循合法、正当、必要、诚信和最小化原则，不以同意一揽子处理非必要信息作为提供基础服务的条件。</p>
+        <h4>一、我们处理的信息</h4>
+        <p>1. 校园身份信息：姓名、学校、学院或专业、学号或工号、手机号、账号角色和认证状态，用于核验身份、登录和权限控制。</p>
+        <p>2. 服务数据：个人课表、课程导入记录、实验室预约、消息通知、校园活动及用户主动填写的内容，用于提供对应功能并在不同终端间同步。</p>
+        <p>3. 安全与运行信息：登录时间、操作日志、设备和浏览器基本信息、网络地址的安全特征、错误日志，用于防攻击、反滥用、排查故障和保障账号安全。</p>
+        <p>4. AI 功能数据：你主动发送的提示词、文件、图片、对话内容以及自行配置的模型服务信息。API Key 应加密保存或仅保存在当前浏览器；平台不会要求管理员查看用户的明文密钥。</p>
+        <h4>二、处理目的与方式</h4>
+        <p>我们仅在完成登录认证、提供校园服务、同步用户设置、发送必要通知、保障安全、履行法定义务和取得你单独同意的其他目的范围内处理信息。改变处理目的、处理敏感个人信息或超出合理预期时，将另行告知并依法取得同意。</p>
+        <h4>三、敏感个人信息</h4>
+        <p>手机号、校园身份、学习与成长记录在特定场景下可能对个人权益产生较大影响。平台仅在实现身份认证、教学服务和安全管理所必需的范围内处理，并采取更严格的访问控制。请勿在 AI 对话、公开内容或普通备注中提交身份证号、银行卡、密码、验证码、健康信息等非必要敏感信息。</p>
+        <h4>四、保存期限</h4>
+        <p>短信验证码仅在验证有效期内使用；消息通知默认仅展示并清理最近 14 天内容；账号与校园身份信息在账号有效和提供服务所必需期间保存。超过目的所需期限后，我们将删除或匿名化处理，但法律法规另有规定或处理争议、安全审计所必需的除外。</p>
+        <h4>五、委托处理、共享与第三方服务</h4>
+        <p>短信、云数据库、文件存储、AI 模型等能力可能由第三方服务商提供。我们将依据功能需要展示服务商及处理目的，并通过合同、安全评估和最小权限限制其处理。除依法提供、保护重大权益或取得授权外，不出售个人信息。</p>
+        <p>当你自行选择境外 AI 服务商时，相关内容可能由该服务商按照其条款处理。平台应在实际发生跨境提供前履行告知、单独同意及其他法定程序；未完成前不得默认向境外传输个人信息。</p>
+        <h4>六、你的权利</h4>
+        <p>你可以依法查询、复制、更正、补充、删除个人信息，撤回同意、限制或拒绝特定处理，并申请注销账号。撤回同意不影响此前基于同意已经开展的合法处理；必要身份信息被删除后，部分校园服务可能无法继续提供。</p>
+        <h4>七、未成年人保护</h4>
+        <p>未满 14 周岁的用户应由监护人阅读并同意专门的未成年人个人信息处理规则后使用；未完成相应监护人同意机制前，本平台不面向未满 14 周岁用户提供注册服务。其他未成年人应在监护人指导下使用。</p>
+        <h4>八、安全事件与联系我们</h4>
+        <p>我们采用传输加密、访问控制、密码哈希、日志审计、备份和漏洞修复等措施。发生可能影响个人权益的安全事件时，将依法采取补救措施并履行通知或报告义务。隐私请求与投诉方式：${LEGAL_CONTACT}。</p>
+        <h4>九、政策更新</h4>
+        <p>重大变更将以显著方式通知，并在依法需要时重新取得同意。你可在登录页随时查看当前版本。</p>
+        <p class="legal-scroll-end">已阅读至隐私政策末尾</p>
+      </article>
+    `;
+  }
+  return `
+    <article class="legal-document">
+      <p class="legal-document-note">版本：${LEGAL_CONSENT_VERSION} · 生效日期：2026年6月20日</p>
+      <h3>智慧校园用户协议</h3>
+      <p>欢迎使用智慧校园平台。请在注册、登录或使用服务前认真阅读本协议。你点击同意并继续，即表示已理解并接受本协议；不同意时请停止登录和使用。</p>
+      <h4>一、协议主体与适用范围</h4>
+      <p>本协议由你与 ${LEGAL_OPERATOR_NAME} 共同订立，适用于网页端及后续移动端的课程、校园服务、AI 助手、成长档案、活动社区和数据看板等功能。平台目前属于校园数字化服务项目；除非运营主体获得学校正式授权并明确公示，不应被理解为学校官方教务系统或替代学校正式通知渠道。</p>
+      <h4>二、账号与校园身份</h4>
+      <p>你应提供真实、准确、完整的学校、专业、学号或工号及手机号信息，并妥善保管密码、验证码和登录设备。账号仅限本人使用，不得出借、转让、出售或用于绕过权限。发现冒用或异常登录时应立即联系管理员。</p>
+      <h4>三、平台服务</h4>
+      <p>平台可提供课表、成绩与空教室查询、考试报名信息、实验室预约、图书馆与校园活动信息、软件目录、AI 助手等服务。涉及考试、成绩、收费、学校处分和正式教学安排的内容，应以学校或主管部门的正式系统和公告为准。</p>
+      <h4>四、使用规范</h4>
+      <p>不得利用平台制作、复制、发布违法有害信息，不得实施网络攻击、恶意爬取、批量注册、撞库、越权访问、干扰服务、传播恶意程序、侵犯知识产权或他人个人信息。合理的学习研究、无障碍访问和经授权的接口调用不受不当限制。</p>
+      <h4>五、AI 与自动化功能</h4>
+      <p>AI 输出可能存在错误、遗漏或时效偏差，不构成医疗、法律、金融等专业意见，也不能代替教师、学校和主管部门决定。你应核验重要内容，不得将 AI 用于作弊、侵犯权益或违法用途。使用自有 API 时，还应遵守所选服务商条款和隐私规则。</p>
+      <h4>六、知识产权</h4>
+      <p>平台程序、界面和自制内容依法受保护。用户对其合法上传的原创内容保留权利，并仅授予平台为提供、维护和改进所选服务所必要的、非独占的使用许可。第三方软件、新闻和资源的权利归原权利人所有，下载与使用应遵守正版授权。</p>
+      <h4>七、短信、费用和第三方服务</h4>
+      <p>平台发送登录验证码本身不向用户额外收费，运营商可能按套餐规则收取通信费用。未来出现付费服务时，将在购买前明确价格、内容、退款条件和服务主体，不以默认勾选方式收费。</p>
+      <h4>八、服务变更、中断与责任</h4>
+      <p>平台可为维护、安全或合规需要调整服务，并尽量提前通知。因不可抗力、基础通信故障或第三方服务中断造成影响时，将及时修复并采取合理补救。本协议不排除或限制法律规定不得排除或限制的责任，也不影响消费者和个人信息主体依法享有的权利。</p>
+      <h4>九、违规处置与账号退出</h4>
+      <p>存在违法、侵权、安全风险或严重违反本协议的行为时，平台可依据事实和影响采取提醒、限制功能、暂停或终止服务，并保留必要证据。用户有权申诉和申请注销账号。</p>
+      <h4>十、未成年人</h4>
+      <p>未成年人应在监护人指导下阅读和使用。未满 14 周岁的用户，须由监护人依法作出同意后方可处理其个人信息；平台尚未提供相应机制时不得自行注册。</p>
+      <h4>十一、协议更新与争议解决</h4>
+      <p>重大更新将显著提示并在必要时重新取得同意。协议适用中华人民共和国法律。发生争议时应先友好协商；协商不成的，依法向有管辖权的人民法院提起诉讼。</p>
+      <h4>十二、联系我们</h4>
+      <p>账号申诉、侵权投诉、服务建议和法律通知：${LEGAL_CONTACT}。</p>
+      <p class="legal-scroll-end">已阅读至用户协议末尾</p>
+    </article>
+  `;
+}
 
 function renderLogin() {
   stopLoginParticles();
@@ -1295,14 +2041,162 @@ function renderLogin() {
               <input name="password" type="password" placeholder="请输入已设置的密码" autocomplete="current-password" />
             </label>
           </div>
+          <div class="login-legal-consent">
+            <input id="loginLegalConsent" name="legalConsent" type="checkbox" disabled required />
+            <label for="loginLegalConsent">我已完整阅读并同意</label>
+            <button type="button" data-open-legal="terms">《用户协议》</button>
+            <span>和</span>
+            <button type="button" data-open-legal="privacy">《隐私政策》</button>
+            <small id="loginLegalHint">请分别阅读两份文件至末尾后再勾选</small>
+          </div>
           <button class="primary-btn login-submit" type="submit"><span>验证并登录</span><b aria-hidden="true">→</b></button>
           <button class="login-guest-btn" id="guestLoginBtn" type="button"><span>游客模式</span><small>免验证，只读体验</small></button>
         </form>
+      </section>
+      <section class="legal-reader" id="legalReader" role="dialog" aria-modal="true" aria-labelledby="legalReaderTitle" hidden>
+        <div class="legal-reader-backdrop" data-close-legal></div>
+        <div class="legal-reader-panel">
+          <header>
+            <div><span>登录前必读</span><h2 id="legalReaderTitle">服务条款与隐私说明</h2></div>
+            <button type="button" data-close-legal aria-label="关闭协议阅读器">×</button>
+          </header>
+          <nav class="legal-reader-tabs" aria-label="法律文件">
+            <button class="active" type="button" data-legal-tab="terms">用户协议 <span data-legal-state="terms">未读</span></button>
+            <button type="button" data-legal-tab="privacy">隐私政策 <span data-legal-state="privacy">未读</span></button>
+          </nav>
+          <div class="legal-reader-content" id="legalReaderContent" tabindex="0"></div>
+          <footer>
+            <p id="legalReaderProgress">请滚动至文件末尾</p>
+            <button class="legal-reader-confirm" id="legalReaderConfirm" type="button" disabled>完成本文件阅读</button>
+          </footer>
+        </div>
       </section>
     </main>
   `;
 
   initLoginParticles();
+  let savedLegalConsent = null;
+  try {
+    savedLegalConsent = JSON.parse(localStorage.getItem(LEGAL_CONSENT_STORAGE_KEY) || "null");
+  } catch {
+    localStorage.removeItem(LEGAL_CONSENT_STORAGE_KEY);
+  }
+  const hasSavedLegalConsent = savedLegalConsent?.accepted === true
+    && savedLegalConsent?.version === LEGAL_CONSENT_VERSION;
+  const legalReadState = {
+    terms: hasSavedLegalConsent,
+    privacy: hasSavedLegalConsent,
+    current: "terms",
+    reachedEnd: false
+  };
+  const legalReader = document.querySelector("#legalReader");
+  const legalContent = document.querySelector("#legalReaderContent");
+  const legalConfirm = document.querySelector("#legalReaderConfirm");
+  const legalProgress = document.querySelector("#legalReaderProgress");
+  const legalCheckbox = document.querySelector("#loginLegalConsent");
+  const legalHint = document.querySelector("#loginLegalHint");
+
+  const legalConsentPayload = () => ({
+    accepted: legalCheckbox.checked,
+    version: LEGAL_CONSENT_VERSION,
+    documents: ["user_agreement", "privacy_policy"],
+    consentedAt: new Date().toISOString()
+  });
+
+  const syncLegalControls = () => {
+    const bothRead = legalReadState.terms && legalReadState.privacy;
+    legalCheckbox.disabled = !bothRead;
+    legalHint.textContent = bothRead
+      ? (legalCheckbox.checked ? `已同意当前版本（${LEGAL_CONSENT_VERSION}）` : "两份文件已读，请勾选同意后登录")
+      : "请分别阅读两份文件至末尾后再勾选";
+    Object.entries(legalReadState).forEach(([key, value]) => {
+      if (!["terms", "privacy"].includes(key)) return;
+      const badge = document.querySelector(`[data-legal-state="${key}"]`);
+      if (badge) {
+        badge.textContent = value ? "已读" : "未读";
+        badge.classList.toggle("read", value);
+      }
+    });
+  };
+
+  const showLegalDocument = (type) => {
+    legalReadState.current = type === "privacy" ? "privacy" : "terms";
+    legalReadState.reachedEnd = false;
+    legalContent.innerHTML = legalDocumentMarkup(legalReadState.current);
+    legalContent.scrollTop = 0;
+    legalConfirm.disabled = !legalReadState[legalReadState.current];
+    legalConfirm.textContent = legalReadState[legalReadState.current] ? "本文件已阅读" : "完成本文件阅读";
+    legalProgress.textContent = legalReadState[legalReadState.current] ? "本文件已完成阅读" : "请滚动至文件末尾";
+    document.querySelectorAll("[data-legal-tab]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.legalTab === legalReadState.current);
+    });
+    syncLegalControls();
+  };
+
+  const openLegalReader = (type) => {
+    showLegalDocument(type);
+    legalReader.hidden = false;
+    document.body.classList.add("legal-reader-open");
+    requestAnimationFrame(() => legalContent.focus());
+  };
+
+  const closeLegalReader = () => {
+    legalReader.hidden = true;
+    document.body.classList.remove("legal-reader-open");
+  };
+
+  document.querySelectorAll("[data-open-legal]").forEach((button) => {
+    button.addEventListener("click", () => openLegalReader(button.dataset.openLegal));
+  });
+  document.querySelectorAll("[data-close-legal]").forEach((button) => button.addEventListener("click", closeLegalReader));
+  document.querySelectorAll("[data-legal-tab]").forEach((button) => {
+    button.addEventListener("click", () => showLegalDocument(button.dataset.legalTab));
+  });
+  legalContent.addEventListener("scroll", () => {
+    const remaining = legalContent.scrollHeight - legalContent.scrollTop - legalContent.clientHeight;
+    if (remaining <= 12) {
+      legalReadState.reachedEnd = true;
+      legalConfirm.disabled = false;
+      legalProgress.textContent = "已到达文件末尾，可以完成阅读";
+    }
+  });
+  legalConfirm.addEventListener("click", () => {
+    if (!legalReadState.reachedEnd && !legalReadState[legalReadState.current]) return;
+    legalReadState[legalReadState.current] = true;
+    syncLegalControls();
+    const nextType = legalReadState.current === "terms" ? "privacy" : "terms";
+    if (!legalReadState[nextType]) showLegalDocument(nextType);
+    else closeLegalReader();
+  });
+  legalCheckbox.checked = hasSavedLegalConsent;
+  legalCheckbox.addEventListener("change", () => {
+    if (legalCheckbox.checked && legalReadState.terms && legalReadState.privacy) {
+      localStorage.setItem(LEGAL_CONSENT_STORAGE_KEY, JSON.stringify({
+        accepted: true,
+        version: LEGAL_CONSENT_VERSION,
+        acceptedAt: new Date().toISOString()
+      }));
+    } else {
+      localStorage.removeItem(LEGAL_CONSENT_STORAGE_KEY);
+    }
+    syncLegalControls();
+  });
+  syncLegalControls();
+
+  const ensureLegalConsent = () => {
+    if (legalCheckbox.checked && legalReadState.terms && legalReadState.privacy) return true;
+    openLegalReader(!legalReadState.terms ? "terms" : "privacy");
+    toast("请先完整阅读并同意用户协议与隐私政策");
+    return false;
+  };
+
+  document.querySelector(".login-submit")?.addEventListener("click", (event) => {
+    if (!legalCheckbox.checked) {
+      event.preventDefault();
+      ensureLegalConsent();
+    }
+  });
+
   document.querySelector("#loginBackBtn")?.addEventListener("click", () => {
     authView = "intro";
     renderIntro();
@@ -1346,6 +2240,7 @@ function renderLogin() {
   document.querySelector("#sendSmsCode")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     const formElement = document.querySelector("#loginForm");
+    if (!ensureLegalConsent()) return;
     const invalidIdentityField = [...formElement.querySelectorAll('input:not([name="code"])')].find((input) => !input.checkValidity());
     if (invalidIdentityField) {
       invalidIdentityField.reportValidity();
@@ -1362,7 +2257,8 @@ function renderLogin() {
           major: form.get("major"),
           studentNo: form.get("studentNo"),
           phone: form.get("phone"),
-          identityType: form.get("identityType")
+          identityType: form.get("identityType"),
+          legalConsent: legalConsentPayload()
         })
       });
       smsChallenge = result.challenge;
@@ -1392,9 +2288,13 @@ function renderLogin() {
   });
   document.querySelector("#guestLoginBtn")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
+    if (!ensureLegalConsent()) return;
     button.disabled = true;
     try {
-      const result = await api("/api/auth/guest", { method: "POST" });
+      const result = await api("/api/auth/guest", {
+        method: "POST",
+        body: JSON.stringify({ legalConsent: legalConsentPayload() })
+      });
       state.token = result.token;
       state.user = result.user;
       localStorage.setItem("smart_taiyuan_token", result.token);
@@ -1407,6 +2307,7 @@ function renderLogin() {
   });
   document.querySelector("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!ensureLegalConsent()) return;
     const form = new FormData(event.currentTarget);
     try {
       const passwordMode = form.get("loginMode") === "password";
@@ -1418,7 +2319,8 @@ function renderLogin() {
           studentNo: form.get("studentNo"),
           phone: form.get("phone"),
           identityType: form.get("identityType"),
-          password: form.get("password")
+          password: form.get("password"),
+          legalConsent: legalConsentPayload()
         } : {
           phone: form.get("phone"),
           code: form.get("code"),
@@ -1426,7 +2328,8 @@ function renderLogin() {
           major: form.get("major"),
           studentNo: form.get("studentNo"),
           identityType: form.get("identityType"),
-          challenge: smsChallenge
+          challenge: smsChallenge,
+          legalConsent: legalConsentPayload()
         })
       });
       if (smsCountdownTimer) clearInterval(smsCountdownTimer);
@@ -1671,7 +2574,9 @@ function renderIntro() {
 }
 
 function shell(content, title, subtitle) {
-  const firstName = state.user?.name?.slice(0, 1) || "泰";
+  const accountName = state.user?.name || "未登录";
+  const accountRole = accountRoleLabel(state.user?.role || "guest");
+  const isDayTheme = document.documentElement.dataset.theme === "day";
   return `
     <div class="shell">
       <aside class="sidebar">
@@ -1692,7 +2597,7 @@ function shell(content, title, subtitle) {
                     .map(
                       (item) => `
                         <button class="${state.route === item.id || (item.id === "tools" && state.route.startsWith("tools/")) ? "active" : ""}" data-route="${item.id}">
-                          <span class="nav-icon">${item.icon}</span><span>${item.label}</span>
+                          <span class="nav-icon">${iconSvg(item.icon)}</span><span>${item.label}</span>
                         </button>
                       `
                     )
@@ -1711,31 +2616,39 @@ function shell(content, title, subtitle) {
       <main class="main">
         <header class="topbar">
           <div class="top-left">
-            <button class="menu-btn" aria-label="菜单">☰</button>
+            <button class="menu-btn" aria-label="菜单">${iconSvg("menu")}</button>
             <h1 class="page-title">${title}</h1>
           </div>
           <div class="top-actions">
             <div class="search-box">
-              <span>⌕</span>
-              <input id="moduleSearch" placeholder="搜索服务、资讯、应用..." autocomplete="off" />
-              <div class="search-results" id="moduleSearchResults"></div>
+              <span class="search-icon">${iconSvg("search")}</span>
+              <input id="moduleSearch" placeholder="搜索校园功能..." autocomplete="off" aria-label="搜索校园功能" />
+              <span class="search-shortcut">搜索</span>
+              <div class="search-results command-center-panel" id="moduleSearchResults"></div>
             </div>
             <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换白天与夜晚主题" title="切换白天与夜晚主题">
-              <span class="theme-toggle-icon" aria-hidden="true">${document.documentElement.dataset.theme === "day" ? "☀" : "☾"}</span>
-              <span class="theme-toggle-text">${document.documentElement.dataset.theme === "day" ? "白天" : "夜晚"}</span>
+              <span class="theme-toggle-icon" aria-hidden="true">${iconSvg(isDayTheme ? "sun" : "moon")}</span>
+              <span class="theme-toggle-text">${isDayTheme ? "白天" : "夜晚"}</span>
             </button>
             <button class="bell-btn ${state.route === "notifications" ? "active" : ""}" data-route="notifications" aria-label="消息通知">
-              <span class="bell-icon">♮</span>
-              <span class="bell-dot"></span>
-              <span class="bell-count">12</span>
+              <span class="bell-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" role="img">
+                  <path d="M15 17H9" />
+                  <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+                  <path d="M10 21h4" />
+                </svg>
+              </span>
+              <span class="bell-dot" ${state.unreadNotifications ? "" : "hidden"}></span>
+              <span class="bell-count" ${state.unreadNotifications ? "" : "hidden"}>${state.unreadNotifications}</span>
             </button>
-            <div class="user-chip">
-              <span class="avatar">${firstName}</span>
-              <div>
-                <strong>${state.user?.name || "未登录"}</strong>
-              </div>
-              <span class="chevron">⌄</span>
-            </div>
+            <button class="user-chip" data-route="profile" type="button" aria-label="打开个人中心">
+              <span class="avatar">${iconSvg("user")}</span>
+              <span class="user-chip-copy">
+                <strong>${accountName}</strong>
+                <small>${accountRole}</small>
+              </span>
+              <span class="chevron">${iconSvg("chevron")}</span>
+            </button>
           </div>
         </header>
         ${content}
@@ -1745,6 +2658,14 @@ function shell(content, title, subtitle) {
 }
 
 function bindNav() {
+  const sidebar = document.querySelector(".sidebar");
+  if (sidebar) {
+    sidebar.scrollTop = state.sidebarScrollTop;
+    sidebar.addEventListener("scroll", () => {
+      state.sidebarScrollTop = sidebar.scrollTop;
+      sessionStorage.setItem("smart_campus_sidebar_scroll", String(state.sidebarScrollTop));
+    }, { passive: true });
+  }
   if (!window.__smartCampusRouteDelegationBound) {
     window.__smartCampusRouteDelegationBound = true;
     document.addEventListener("click", (event) => {
@@ -1765,45 +2686,79 @@ function bindNav() {
   });
   if (window.matchMedia("(max-width: 760px)").matches) {
     const activeRoute = document.querySelector(".nav button.active");
-    requestAnimationFrame(() => {
-      activeRoute?.scrollIntoView({ block: "nearest", inline: "center" });
-    });
+    const nav = document.querySelector(".nav");
+    if (activeRoute && nav) {
+      requestAnimationFrame(() => {
+        nav.scrollLeft = Math.max(0, activeRoute.offsetLeft - (nav.clientWidth - activeRoute.clientWidth) / 2);
+      });
+    }
   }
   const moduleSearch = document.querySelector("#moduleSearch");
   const moduleSearchResults = document.querySelector("#moduleSearchResults");
   if (moduleSearch && moduleSearchResults) {
-    const allModules = visibleModuleGroups().flatMap((group) => group.items.map((item) => ({ ...item, group: group.title })));
+    let activeResultIndex = -1;
     const renderModuleResults = () => {
-      const keyword = moduleSearch.value.trim().toLowerCase();
-      const results = allModules
-        .filter((item) => {
-          const text = `${item.label} ${item.desc} ${item.group}`.toLowerCase();
-          return !keyword || text.includes(keyword);
-        })
-        .slice(0, 7);
+      const results = getCommandCenterResults(moduleSearch.value);
+      activeResultIndex = results.length ? Math.min(Math.max(activeResultIndex, 0), results.length - 1) : -1;
       moduleSearchResults.innerHTML = results
         .map(
-          (item) => `
-            <button type="button" data-route="${item.id}">
-              <span>${item.icon}</span>
+          (item, index) => `
+            <button type="button" data-command-index="${index}" data-command-id="${item.id}" data-command-route="${item.route}" class="${index === activeResultIndex ? "active" : ""}">
+              <span>${iconSvg(item.icon)}</span>
               <strong>${item.label}</strong>
               <em>${item.group} · ${item.desc}</em>
             </button>
           `
         )
-        .join("");
-      moduleSearchResults.classList.toggle("show", Boolean(keyword));
-      moduleSearchResults.querySelectorAll("[data-route]").forEach((button) => {
-        button.type = "button";
-      });
+        .join("") || '<p class="search-empty">没有找到匹配功能</p>';
+      moduleSearchResults.classList.add("show");
+      return results;
     };
-    moduleSearch.addEventListener("input", renderModuleResults);
-    moduleSearch.addEventListener("focus", renderModuleResults);
+    const runResult = (button) => {
+      if (!button?.dataset.commandRoute) return;
+      saveCommandRecent(button.dataset.commandId);
+      moduleSearch.value = "";
+      moduleSearchResults.classList.remove("show");
+      setRoute(button.dataset.commandRoute);
+    };
+    moduleSearch.addEventListener("input", () => {
+      activeResultIndex = 0;
+      renderModuleResults();
+    });
+    moduleSearch.addEventListener("focus", () => {
+      activeResultIndex = -1;
+      renderModuleResults();
+    });
+    moduleSearch.addEventListener("keydown", (event) => {
+      const results = Array.from(moduleSearchResults.querySelectorAll("[data-command-route]"));
+      if (event.key === "Escape") {
+        moduleSearch.value = "";
+        moduleSearchResults.classList.remove("show");
+        moduleSearch.blur();
+        return;
+      }
+      if (!results.length || !["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "ArrowDown") activeResultIndex = (activeResultIndex + 1) % results.length;
+      if (event.key === "ArrowUp") activeResultIndex = (activeResultIndex - 1 + results.length) % results.length;
+      if (event.key === "Enter") return runResult(results[Math.max(0, activeResultIndex)]);
+      results.forEach((result, index) => result.classList.toggle("active", index === activeResultIndex));
+      results[activeResultIndex]?.scrollIntoView({ block: "nearest" });
+    });
+    moduleSearchResults.addEventListener("click", (event) => runResult(event.target.closest("[data-command-route]")));
     if (!window.__smartCampusSearchBlurBound) {
       window.__smartCampusSearchBlurBound = true;
       document.addEventListener("click", (event) => {
         if (event.target.closest(".search-box")) return;
         document.querySelectorAll(".search-results.show").forEach((node) => node.classList.remove("show"));
+      });
+    }
+    if (!window.__smartCampusSearchShortcutBound) {
+      window.__smartCampusSearchShortcutBound = true;
+      document.addEventListener("keydown", (event) => {
+        if (!((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k")) return;
+        event.preventDefault();
+        document.querySelector("#moduleSearch")?.focus();
       });
     }
   }
@@ -1822,7 +2777,8 @@ function bindNav() {
             fileData: await readFileAsBase64(file)
           })
         });
-        saveStoredCourses([...getStoredCourses(), ...result.courses]);
+        window.__personalTimetableCourses = mergeCourseLists(result.savedCourses || result.courses || []);
+        saveStoredCourses([]);
         toast(`已导入 ${result.count} 门课程`);
         renderShell();
       } catch (error) {
@@ -1832,12 +2788,54 @@ function bindNav() {
       }
     });
   }
+  const timetableImageFile = document.querySelector("#timetableImageFile");
+  const chooseTimetableImage = document.querySelector("#chooseTimetableImage");
+  if (timetableImageFile && chooseTimetableImage) {
+    chooseTimetableImage.addEventListener("click", () => timetableImageFile.click());
+    timetableImageFile.addEventListener("change", async () => {
+      const file = timetableImageFile.files?.[0];
+      if (!file) return;
+      try {
+        const image = await compressTimetableImage(file);
+        saveTimetableImage(image);
+        toast("课表图片已导入，正在自动识别课程");
+        const settings = getTimetableSettings();
+        const result = await api("/api/timetable/image/import", {
+          method: "POST",
+          body: JSON.stringify({
+            filename: file.name,
+            imageData: image.dataUrl,
+            semester: settings.semester,
+            week: settings.week
+          })
+        });
+        if (result.courses?.length) {
+          window.__personalTimetableCourses = mergeCourseLists(result.savedCourses || result.courses || []);
+          saveStoredCourses([]);
+          toast(`图片识别完成，已导入 ${result.count} 门课程`);
+        } else {
+          toast(result.warning || "未识别到课程，可对照图片手动添加");
+        }
+        renderShell();
+      } catch (error) {
+        toast(`图片已保存，自动识别失败：${error.message}`);
+        renderShell();
+      } finally {
+        timetableImageFile.value = "";
+      }
+    });
+  }
   document.querySelectorAll("[data-timetable-action]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const action = button.dataset.timetableAction;
       if (action === "clear") {
-        saveStoredCourses([]);
+        await replacePersonalCourses([]);
         toast("已清空外部导入课程");
+        renderShell();
+      }
+      if (action === "clear-image") {
+        clearTimetableImage();
+        toast("课表图片已移除");
         renderShell();
       }
     });
@@ -1911,6 +2909,8 @@ function bindMotionEffects() {
 
 async function renderShell() {
   stopLoginParticles();
+  const currentSidebar = document.querySelector(".sidebar");
+  if (currentSidebar) state.sidebarScrollTop = currentSidebar.scrollTop;
   const renderVersion = ++renderShellVersion;
   const requestedRoute = routes[state.route] ? state.route : "dashboard";
   if (requestedRoute !== state.route) {
@@ -1922,6 +2922,11 @@ async function renderShell() {
   }
 
   if (!state.token) {
+    if (notificationBadgeTimer) {
+      clearInterval(notificationBadgeTimer);
+      notificationBadgeTimer = null;
+    }
+    setUnreadNotificationCount(0);
     if (authView === "login") renderLogin();
     else renderIntro();
     return;
@@ -1942,10 +2947,11 @@ async function renderShell() {
     }
   }
 
-  if (requestedRoute === "student-admin" && !canAccessStudentAdmin()) {
+  const requestedModule = navItems.find((item) => item.id === requestedRoute);
+  if (requestedModule && !canAccessModule(requestedModule)) {
     state.route = "profile";
     history.replaceState(null, "", routeToUrl("profile"));
-    toast("仅管理员可以访问学生身份库");
+    toast(requestedModule.superAdminOnly ? "仅总管理员可以访问该页面" : "仅管理员可以访问该页面");
     return renderShell();
   }
 
@@ -1958,6 +2964,8 @@ async function renderShell() {
     view.afterRender?.();
     bindMotionEffects();
     showRequiredPasswordSetup();
+    startNotificationBadgeSync();
+    refreshUnreadNotificationCount();
   } catch (error) {
     if (renderVersion !== renderShellVersion || requestedRoute !== state.route) return;
     app.innerHTML = shell(`<div class="empty">${error.message}</div>`, "加载失败", "请稍后重试");
@@ -1969,9 +2977,10 @@ async function renderShell() {
 function toolsSubnav() {
   return `
     <nav class="tools-subnav" aria-label="学习工具快捷入口">
-      <button type="button" data-route="tools/doc-convert">文档互转</button>
-      <button type="button" data-route="tools/calculator">全能计算器</button>
-      <button type="button" data-route="tools/translate">语言翻译</button>
+      <button type="button" class="${state.route === "tools/doc-convert" ? "active" : ""}" data-route="tools/doc-convert"><span class="tools-subnav-icon">${iconSvg("file")}</span><strong>文档互转</strong></button>
+      <button type="button" class="${state.route === "tools/calculator" ? "active" : ""}" data-route="tools/calculator"><span class="tools-subnav-icon">${iconSvg("calculator")}</span><strong>全能计算器</strong></button>
+      <button type="button" class="${state.route === "tools/translate" ? "active" : ""}" data-route="tools/translate"><span class="tools-subnav-icon">${iconSvg("languages")}</span><strong>语言翻译</strong></button>
+      <button type="button" class="${state.route === "tools/quality-score" ? "active" : ""}" data-route="tools/quality-score"><span class="tools-subnav-icon">${iconSvg("award")}</span><strong>综测核算</strong></button>
     </nav>
   `;
 }
@@ -1991,7 +3000,7 @@ function toolBackbar(title, desc) {
 function docConvertPanel() {
   return `
     <section class="dash-card tool-panel converter-panel">
-      <h2 class="section-title"><span>▣ 文档互转</span><a href="https://github.com/ONLYOFFICE/DocumentServer" target="_blank" rel="noreferrer">GitHub</a></h2>
+      <h2 class="section-title"><span>${iconSvg("toolbox")} 文档互转</span><a href="https://github.com/ONLYOFFICE/DocumentServer" target="_blank" rel="noreferrer">GitHub</a></h2>
       <p class="muted">支持 Word / Excel / PPT 近 1:1 高保真转换。安装 LibreOffice 后会优先走 Headless Office 渲染引擎；PDF、Markdown、HTML 仍可走内置转换。</p>
       <form class="form tool-form" id="convertForm">
         <label class="field">
@@ -2027,7 +3036,7 @@ function docConvertPanel() {
 function calculatorPanel() {
   return `
     <section class="dash-card tool-panel calculator-panel">
-      <h2 class="section-title"><span>⌬ 全能计算器</span><a href="https://github.com/josdejong/mathjs" target="_blank" rel="noreferrer">math.js</a></h2>
+      <h2 class="section-title"><span>${iconSvg("chart")} 全能计算器</span><a href="https://github.com/josdejong/mathjs" target="_blank" rel="noreferrer">math.js</a></h2>
       <form class="form tool-form" id="formulaForm">
         <label class="field">
           <span>数学公式</span>
@@ -2097,6 +3106,63 @@ function translatePanel() {
         <button class="primary-btn" type="submit">开始翻译</button>
       </form>
       <div class="tool-result translate-result" id="translateResult">正式版接 LibreTranslate API；当前先提供校内术语词库演示。</div>
+    </section>
+  `;
+}
+
+function legacyQualityScorePanel() {
+  return `
+    <section class="dash-card tool-panel quality-score-panel">
+      <h2 class="section-title"><span>${iconSvg("award")} 综测核算</span><small>简单版</small></h2>
+      <p class="muted">按“基础分 × 权重 + 加分 - 扣分”的方式快速估算综合素质测评总分，适合先做个人预估，最终结果以学院正式细则和老师审核为准。</p>
+      <form class="form tool-form quality-score-form" id="qualityScoreForm">
+        <div class="quality-score-grid">
+          <label class="field">
+            <span>德育表现</span>
+            <input name="moral" type="number" min="0" max="100" step="0.1" value="90" />
+          </label>
+          <label class="field">
+            <span>智育成绩</span>
+            <input name="academic" type="number" min="0" max="100" step="0.1" value="85" />
+          </label>
+          <label class="field">
+            <span>体育健康</span>
+            <input name="sport" type="number" min="0" max="100" step="0.1" value="88" />
+          </label>
+          <label class="field">
+            <span>美育实践</span>
+            <input name="aesthetic" type="number" min="0" max="100" step="0.1" value="80" />
+          </label>
+          <label class="field">
+            <span>劳育服务</span>
+            <input name="labor" type="number" min="0" max="100" step="0.1" value="86" />
+          </label>
+          <label class="field">
+            <span>竞赛/荣誉加分</span>
+            <input name="bonus" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="field">
+            <span>违纪/缺勤扣分</span>
+            <input name="deduct" type="number" min="0" step="0.1" value="0" />
+          </label>
+        </div>
+        <div class="quality-weight-card">
+          <strong>默认权重</strong>
+          <span>德育 15%</span>
+          <span>智育 60%</span>
+          <span>体育 10%</span>
+          <span>美育 5%</span>
+          <span>劳育 10%</span>
+        </div>
+        <button class="primary-btn" type="submit">开始核算</button>
+      </form>
+      <div class="quality-score-result" id="qualityScoreResult">
+        <div>
+          <span>预估总分</span>
+          <strong>--</strong>
+        </div>
+        <p>填写各项分数后点击核算，这里会显示等级、构成和提醒。</p>
+      </div>
     </section>
   `;
 }
@@ -2244,10 +3310,755 @@ function bindTranslateTool() {
   });
 }
 
+function legacyComputeQualityScore(values) {
+  const scoreOf = (name) => {
+    const value = Number(values.get(name));
+    if (!Number.isFinite(value)) throw new Error("请把各项分数填写完整");
+    return Math.min(100, Math.max(0, value));
+  };
+  const parts = [
+    { key: "moral", label: "德育", weight: 0.15, score: scoreOf("moral") },
+    { key: "academic", label: "智育", weight: 0.6, score: scoreOf("academic") },
+    { key: "sport", label: "体育", weight: 0.1, score: scoreOf("sport") },
+    { key: "aesthetic", label: "美育", weight: 0.05, score: scoreOf("aesthetic") },
+    { key: "labor", label: "劳育", weight: 0.1, score: scoreOf("labor") }
+  ];
+  const bonus = Math.max(0, Number(values.get("bonus") || 0));
+  const deduct = Math.max(0, Number(values.get("deduct") || 0));
+  const base = parts.reduce((sum, item) => sum + item.score * item.weight, 0);
+  const total = Math.max(0, Math.min(100, base + bonus - deduct));
+  const grade = total >= 90 ? "优秀" : total >= 80 ? "良好" : total >= 70 ? "中等" : total >= 60 ? "合格" : "需提升";
+  return {
+    total: Number(total.toFixed(2)),
+    base: Number(base.toFixed(2)),
+    bonus: Number(bonus.toFixed(2)),
+    deduct: Number(deduct.toFixed(2)),
+    grade,
+    parts: parts.map((item) => ({
+      ...item,
+      contribution: Number((item.score * item.weight).toFixed(2))
+    }))
+  };
+}
+
+function legacyBindQualityScoreTool() {
+  const form = document.querySelector("#qualityScoreForm");
+  const resultBox = document.querySelector("#qualityScoreResult");
+  if (!form || !resultBox) return;
+  const render = () => {
+    try {
+      const result = computeQualityScore(new FormData(form));
+      resultBox.innerHTML = `
+        <div class="quality-score-main">
+          <span>预估总分</span>
+          <strong>${result.total}</strong>
+          <em>${result.grade}</em>
+        </div>
+        <div class="quality-score-bars">
+          ${result.parts
+            .map(
+              (item) => `
+                <p style="--score:${item.score}%">
+                  <span>${item.label}</span>
+                  <b>${item.score} 分 · 折算 ${item.contribution}</b>
+                </p>
+              `
+            )
+            .join("")}
+        </div>
+        <small>基础折算 ${result.base}，加分 ${result.bonus}，扣分 ${result.deduct}。该结果仅作个人预估，正式综测以学院审核为准。</small>
+      `;
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    render();
+  });
+  form.querySelectorAll("input").forEach((input) => input.addEventListener("input", render));
+  render();
+}
+
+const QUALITY_SCORE_STORAGE_KEY = "smart_campus_quality_score_2025_v2";
+const QUALITY_SCORE_RULES = {
+  version: "泰州学院经济与管理学院学生综合素质测评操作细则（2025新版）",
+  modules: [
+    { id: "moral", name: "德育素质", short: "德育", max: 28, baseMax: 18, bonusMax: 10, deductMax: 28, min: 0, owner: "班长、团支书、副班长" },
+    { id: "academic", name: "智育素质", short: "智育", max: 48, baseMax: 38, bonusMax: 10, deductMax: 48, min: 0, owner: "副班长、组织委员、学习委员" },
+    { id: "sport", name: "体育素质", short: "体育", max: 8, baseMax: 5, bonusMax: 8, deductMax: 8, min: 0, owner: "体育委员、心理委员" },
+    { id: "aesthetic", name: "美育素质", short: "美育", max: 8, baseMax: 3, bonusMax: 8, deductMax: 8, min: 0, owner: "文娱委员、宣传委员" },
+    { id: "labor", name: "劳育素质", short: "劳育", max: 8, baseMax: 4, bonusMax: 8, deductMax: 8, min: -8, owner: "实践委员、生活委员" }
+  ],
+  presets: {
+    bonus: [
+      { module: "moral", name: "德育：阳光引航主题学习全勤", points: 1, proof: "班级考勤或活动记录" },
+      { module: "moral", name: "德育：核心价值观实践活动", points: 0.5, proof: "PU 截图，最高 4 分" },
+      { module: "moral", name: "德育：入党积极分子", points: 0.5, proof: "政治身份认定材料" },
+      { module: "moral", name: "德育：发展对象/预备党员", points: 1, proof: "政治身份认定材料" },
+      { module: "moral", name: "德育：正式党员", points: 2, proof: "政治身份认定材料" },
+      { module: "moral", name: "德育：院级荣誉称号", points: 1, proof: "荣誉证书或公示文件" },
+      { module: "moral", name: "德育：校级/乡镇/街道荣誉", points: 2, proof: "荣誉证书或公示文件" },
+      { module: "moral", name: "德育：省部级荣誉", points: 6, proof: "荣誉证书或公示文件" },
+      { module: "academic", name: "智育：核心及以上论文/作品第一作者", points: 5, proof: "见刊截图、知网/万方链接" },
+      { module: "academic", name: "智育：省级学术期刊论文第一作者", points: 2, proof: "见刊截图、检索链接" },
+      { module: "academic", name: "智育：发明专利", points: 5, proof: "授权证明" },
+      { module: "academic", name: "智育：实用新型/外观设计专利", points: 2, proof: "授权证明" },
+      { module: "academic", name: "智育：计算机软件著作权", points: 1, proof: "软著证书" },
+      { module: "academic", name: "智育：I 类国家级一等奖竞赛", points: 20, proof: "竞赛获奖证书，最终封顶 10 分" },
+      { module: "academic", name: "智育：I 类省级一等奖竞赛", points: 9, proof: "竞赛获奖证书" },
+      { module: "academic", name: "智育：大创省级重点结项主持人", points: 6, proof: "项目结项证明" },
+      { module: "academic", name: "智育：CET-4 初次达标（大一下）", points: 0.5, proof: "成绩单" },
+      { module: "academic", name: "智育：CET-6 初次达标（大二上）", points: 0.8, proof: "成绩单" },
+      { module: "academic", name: "智育：计算机二级初次获得", points: 0.6, proof: "证书，按年级学期调整" },
+      { module: "academic", name: "智育：专业资格证书", points: 1.5, proof: "证书，普通话/驾照不计" },
+      { module: "academic", name: "智育：学术/创新创业讲座", points: 0.2, proof: "PU 截图，最高 2 分" },
+      { module: "sport", name: "体育：体育/心理活动参与", points: 0.1, proof: "PU 截图或组织证明，最高 1 分" },
+      { module: "sport", name: "体育：校级比赛一等奖/第 1 名", points: 1, proof: "获奖证书" },
+      { module: "sport", name: "体育：院级比赛一等奖/第 1 名", points: 0.5, proof: "获奖证书" },
+      { module: "sport", name: "体育：入选校级运动队", points: 1, proof: "队伍训练证明" },
+      { module: "aesthetic", name: "美育：国家级纸媒作品第一作者", points: 3, proof: "作品截图、发刊地与链接" },
+      { module: "aesthetic", name: "美育：校级艺术展演一等奖", points: 1, proof: "获奖证书" },
+      { module: "aesthetic", name: "美育：艺术活动参与", points: 0.1, proof: "PU 截图或组织证明，最高 1 分" },
+      { module: "labor", name: "劳育：学生组织主要负责人", points: 4, proof: "任职证明" },
+      { module: "labor", name: "劳育：班长/团支书/学委/副部", points: 2, proof: "任职证明" },
+      { module: "labor", name: "劳育：校级文明宿舍", points: 2, proof: "校内文件或通报" },
+      { module: "labor", name: "劳育：院级宿舍表扬", points: 0.1, proof: "院内文件，最高 1 分" },
+      { module: "labor", name: "劳育：省级社会实践团队负责人", points: 4, proof: "实践团队证明" }
+    ],
+    deduct: [
+      { module: "moral", name: "德育：无故缺席思想政治教育活动", points: 3, proof: "考勤记录" },
+      { module: "moral", name: "德育：不当网络言论被通报", points: 2, proof: "通报材料" },
+      { module: "moral", name: "德育：违反班规", points: 0.5, proof: "班规记录" },
+      { module: "moral", name: "德育：学院通报批评", points: 2, proof: "学院通报" },
+      { module: "moral", name: "德育：警告处分", points: 3, proof: "处分决定" },
+      { module: "moral", name: "德育：记过处分", points: 5, proof: "处分决定" },
+      { module: "academic", name: "智育：上课迟到", points: 0.5, proof: "课堂考勤" },
+      { module: "academic", name: "智育：旷课", points: 1, proof: "课堂考勤" },
+      { module: "academic", name: "智育：虚假事/病假", points: 2, proof: "核查记录" },
+      { module: "academic", name: "智育：代课或替他人上课", points: 2, proof: "核查记录" },
+      { module: "sport", name: "体育：体育/心理活动缺席或不配合", points: 0.5, proof: "活动记录" },
+      { module: "sport", name: "体育：跑操迟到/缺席", points: 0.5, proof: "跑操签到记录" },
+      { module: "sport", name: "体育：违背体育精神", points: 4, proof: "比赛通报" },
+      { module: "aesthetic", name: "美育：公共场合形象不符合要求", points: 1, proof: "记录或通报" },
+      { module: "labor", name: "劳育：无故不服从劳动安排", points: 1, proof: "劳动安排记录" },
+      { module: "labor", name: "劳育：宿舍校级通报", points: 1, proof: "校级通报" },
+      { module: "labor", name: "劳育：宿舍院级通报", points: 0.1, proof: "院级通报" },
+      { module: "labor", name: "劳育：活动后卫生不合格个别成员", points: 1, proof: "卫生检查通报" }
+    ]
+  },
+  zeroRules: ["违反宪法、反对四项基本原则", "参与有损祖国尊严、荣誉、利益或危害社会秩序的活动", "违反国家法律法规并受到司法及有关部门处罚"],
+  process: ["学生提交原始证明材料，班级按学期以个人文件夹形式留档", "班级综合测评工作小组审核、评议并汇总", "学院综合测评工作领导小组审定", "班级公示不少于 3 个工作日", "基础材料留档 1 学年，结果报送学生工作处备案"]
+};
+
+function qualityModule(id) {
+  return QUALITY_SCORE_RULES.modules.find((item) => item.id === id) || QUALITY_SCORE_RULES.modules[0];
+}
+
+function qualityModuleOptions(selected = "moral") {
+  return QUALITY_SCORE_RULES.modules
+    .map((item) => `<option value="${item.id}" ${item.id === selected ? "selected" : ""}>${item.short}</option>`)
+    .join("");
+}
+
+function qualityPresetOptions(type) {
+  return QUALITY_SCORE_RULES.presets[type]
+    .map((item, index) => `<option value="${index}">${escapeHtml(item.name)}（${item.points} 分）</option>`)
+    .join("");
+}
+
+function qualityModuleWorkbenchHtml() {
+  const descriptions = {
+    moral: "思想品德、荣誉称号、集体贡献、违纪风险",
+    academic: "绩点折算、竞赛论文、证书等级、课堂表现",
+    sport: "体育成绩、体育活动、比赛获奖、跑操考勤",
+    aesthetic: "艺术课程、文艺活动、作品发表、公共形象",
+    labor: "劳动课程、志愿时长、社会实践、职务贡献"
+  };
+  const formulas = {
+    moral: "班主任/辅导员均值 + 工作组评分 + 加分 - 扣分",
+    academic: "绩点 / 最高绩点 x 38 + 创新创业加分 - 学习扣分",
+    sport: "体育课或体测 x 5% + 体育表现加分 - 扣分",
+    aesthetic: "艺术课 x 3% + 美育表现加分 - 扣分",
+    labor: "劳动课或志愿实践基础 + 劳育加分 - 扣分"
+  };
+  return `
+    <div class="quality-module-workbench" aria-label="德智体美劳五个核算模块">
+      ${QUALITY_SCORE_RULES.modules.map((module) => `
+        <article class="quality-module-card" data-quality-focus="${module.id}">
+          <div class="quality-module-card-head">
+            <span>${module.short}</span>
+            <strong>${module.max} 分</strong>
+          </div>
+          <p>${descriptions[module.id]}</p>
+          <em>${formulas[module.id]}</em>
+          <div class="quality-module-card-foot">
+            <small>基础 ${module.baseMax} · 加分封顶 ${module.bonusMax} · 扣分上限 ${module.deductMax}</small>
+            <button type="button" data-quality-focus-button="${module.id}">进入模块</button>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function qualityEvidenceImportHtml() {
+  return `
+    <div class="quality-section quality-evidence-section">
+      <div class="quality-section-head">
+        <div>
+          <h3>证明材料智能识别</h3>
+          <p>上传证书、PU截图、获奖证明或活动证明图片，系统先生成待确认建议；确认后才会写入对应模块，避免误判直接加分。</p>
+        </div>
+        <button class="ghost-btn" type="button" id="qualityEvidenceChoose">上传图片</button>
+      </div>
+      <input id="qualityEvidenceFile" type="file" accept="image/*,.pdf" hidden />
+      <div class="quality-evidence-grid">
+        <div class="quality-evidence-preview" id="qualityEvidencePreview">
+          <strong>可识别材料</strong>
+          <span>荣誉证书、竞赛获奖、英语/计算机等级、志愿服务、文艺体育活动、论文专利等。</span>
+          <small>后续接入 OCR/视觉模型后，可自动读取图片文字并匹配细则项目。</small>
+        </div>
+        <div class="quality-evidence-suggestions" id="qualityEvidenceSuggestions">
+          <strong>识别建议</strong>
+          <span>上传材料后，这里会显示模块、项目、建议分值和证明名称。</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function qualityCompletionHints(result) {
+  const hints = [];
+  result.parts.forEach((part) => {
+    const hasProof = result.proofList.some((item) => item.includes(part.short));
+    if ((part.rawBonus > 0 || part.rawDeduct > 0) && !hasProof) hints.push(`${part.short}已有加扣分，但证明材料不完整`);
+    if (part.rawBonus > part.bonusMax) hints.push(`${part.short}加分超过封顶，建议保留最高价值证明`);
+  });
+  if (!result.proofList.length) hints.push("暂无证明材料，正式提交前请补齐证书、截图或公示文件");
+  if (!hints.length) hints.push("材料链条较完整，可继续核对班级公示与学院审核流程");
+  return hints;
+}
+
+function qualitySuggestEvidence(text = "") {
+  const source = text.toLowerCase();
+  const suggestions = [];
+  const push = (module, name, points, proof) => suggestions.push({ module, name, points, count: 1, total: points, proof });
+  if (/cet|四级|六级|英语/.test(source)) push("academic", "智育：英语等级证明待确认", 0.5, text || "英语等级考试成绩单");
+  if (/计算机|二级|一级|office|ms/.test(source)) push("academic", "智育：计算机等级证书待确认", 0.6, text || "计算机等级证书");
+  if (/竞赛|比赛|获奖|大创|论文|专利|软著/.test(source)) push("academic", "智育：竞赛/论文/专利成果待确认", 1, text || "获奖或成果证明");
+  if (/荣誉|优秀|三好|干部|团员|党员|表彰/.test(source)) push("moral", "德育：荣誉称号或政治身份待确认", 1, text || "荣誉证书或公示文件");
+  if (/体育|运动|跑操|篮球|足球|排球|羽毛球/.test(source)) push("sport", "体育：活动或比赛证明待确认", 0.5, text || "体育活动/比赛证明");
+  if (/文艺|美育|艺术|书画|摄影|歌|舞|主持/.test(source)) push("aesthetic", "美育：文艺活动或作品证明待确认", 0.5, text || "美育活动/作品证明");
+  if (/志愿|义工|劳动|实践|社区|服务|时长/.test(source)) push("labor", "劳育：志愿服务或社会实践证明待确认", 1, text || "志愿服务/社会实践证明");
+  if (!suggestions.length) {
+    push("moral", "待确认材料：请按证明内容选择模块", 0, text || "上传材料");
+  }
+  return suggestions.slice(0, 4);
+}
+
+function renderQualityEvidenceSuggestions(container, suggestions) {
+  container.innerHTML = `
+    <strong>识别建议</strong>
+    ${suggestions.map((item, index) => `
+      <article>
+        <span>${qualityModule(item.module).short}</span>
+        <b>${escapeHtml(item.name)}</b>
+        <em>建议 ${item.points} 分 · ${escapeHtml(item.proof)}</em>
+        <button type="button" data-quality-apply-suggestion="${index}">确认加入</button>
+      </article>
+    `).join("")}
+  `;
+  container.__qualitySuggestions = suggestions;
+}
+
+function qualityScorePanel() {
+  return `
+    <section class="dash-card tool-panel quality-score-panel">
+      <div class="quality-hero">
+        <div>
+          <span class="eyebrow">2025 新版细则 · 五育综合评价</span>
+          <h2>${iconSvg("award")} 综测核算</h2>
+          <p>按泰州学院经济与管理学院综测细则拆分德育、智育、体育、美育、劳育，支持基础分、加分、扣分、封顶、材料提醒和结果导出。</p>
+        </div>
+        <div class="quality-rule-summary" aria-label="综测权重">
+          ${QUALITY_SCORE_RULES.modules.map((item) => `<span><b>${item.short}</b><em>${item.max} 分</em></span>`).join("")}
+        </div>
+      </div>
+      <form class="form tool-form quality-score-form" id="qualityScoreForm">
+        <div class="quality-toolbar">
+          <label class="field"><span>测评学期</span><select name="term"><option>2025-2026学年第二学期</option><option>2025-2026学年第一学期</option><option>2026-2027学年第一学期</option></select></label>
+          <label class="field"><span>年级</span><select name="gradeLevel"><option value="1">大一</option><option value="2">大二</option><option value="3">大三</option><option value="4">大四</option></select></label>
+          <label class="field"><span>学期段</span><select name="semesterPart"><option value="first">上学期</option><option value="second" selected>下学期</option></select></label>
+          <button class="ghost-btn" type="button" data-quality-action="sample">填入示例</button>
+          <button class="ghost-btn" type="button" data-quality-action="save">保存草稿</button>
+          <button class="ghost-btn" type="button" data-quality-action="export">导出明细</button>
+          <button class="ghost-btn danger" type="button" data-quality-action="reset">清空</button>
+        </div>
+
+        ${qualityModuleWorkbenchHtml()}
+        ${qualityEvidenceImportHtml()}
+
+        <div class="quality-section">
+          <div class="quality-section-head"><h3>基础分录入</h3><p>基础分直接按细则公式折算，输入原始评分或成绩即可。</p></div>
+          <div class="quality-score-grid">
+            <label class="field"><span>班主任评分（0-9）</span><input name="moralTeacher" type="number" min="0" max="9" step="0.1" value="8.5" /></label>
+            <label class="field"><span>辅导员评分（0-9）</span><input name="moralAdvisor" type="number" min="0" max="9" step="0.1" value="8.5" /></label>
+            <label class="field"><span>班级工作组评分（0-9）</span><input name="moralGroup" type="number" min="0" max="9" step="0.1" value="8.5" /></label>
+            <label class="field"><span>本人平均学分绩点</span><input name="gpa" type="number" min="0" max="5" step="0.001" value="3.2" /></label>
+            <label class="field"><span>班级/年级最高绩点</span><input name="maxGpa" type="number" min="0.01" max="5" step="0.001" value="4.0" /></label>
+            <label class="field"><span>体育课/体测成绩</span><input name="sportScore" type="number" min="0" max="100" step="0.1" value="85" /></label>
+            <label class="field switch-field"><span>体育免测</span><input name="sportExempt" type="checkbox" /><em>免测基础分按 3 分</em></label>
+            <label class="field"><span>公共艺术课程成绩</span><input name="artScore" type="number" min="0" max="100" step="0.1" value="90" /></label>
+            <label class="field switch-field"><span>美育学分已修满</span><input name="artFull" type="checkbox" /><em>已修满按 3 分</em></label>
+            <label class="field"><span>劳动教育成绩</span><input name="laborScore" type="number" min="0" max="100" step="0.1" value="90" /></label>
+            <label class="field"><span>志愿/义务劳动时长</span><input name="volunteerHours" type="number" min="0" step="0.5" value="0" /></label>
+            <label class="field"><span>假期社会实践次数</span><input name="practiceCount" type="number" min="0" max="2" step="1" value="0" /></label>
+          </div>
+        </div>
+
+        <div class="quality-section quality-auto-section">
+          <div class="quality-section-head"><h3>常见项目自动换算</h3><p>这些项目来自细则正文，系统会按年级/学期自动查表并纳入智育加分。</p></div>
+          <div class="quality-score-grid">
+            <label class="field">
+              <span>英语等级初次达标</span>
+              <select name="englishCert"><option value="">未填</option><option value="cet4">CET-4</option><option value="cet6">CET-6</option></select>
+            </label>
+            <label class="field">
+              <span>计算机证书初次获得</span>
+              <select name="computerCert"><option value="">未填</option><option value="level1">计算机一级</option><option value="level2">计算机二级</option></select>
+            </label>
+            <label class="field"><span>专业资格证数量</span><input name="professionalCertCount" type="number" min="0" step="1" value="0" /></label>
+            <label class="field"><span>职业资格证数量</span><input name="careerCertCount" type="number" min="0" step="1" value="0" /></label>
+            <label class="field"><span>学术/创新创业讲座次数</span><input name="lectureCount" type="number" min="0" step="1" value="0" /></label>
+            <label class="field"><span>第二学位课程门数</span><input name="secondDegreeCourseCount" type="number" min="0" step="1" value="0" /></label>
+          </div>
+        </div>
+
+        <div class="quality-formula-grid">
+          <article><strong>德育</strong><span>班主任/辅导员均值 + 工作组评分 + 加分 - 扣分，最高 28 分</span></article>
+          <article><strong>智育</strong><span>本人绩点 / 最高绩点 × 38 + 创新创业加分 - 学习表现扣分，最高 48 分</span></article>
+          <article><strong>体育</strong><span>体育课或体测成绩 × 5% + 体育表现加分 - 扣分，最高 8 分</span></article>
+          <article><strong>美育</strong><span>公共艺术课程成绩 × 3% + 美育表现加分 - 扣分，最高 8 分</span></article>
+          <article><strong>劳育</strong><span>劳动课或志愿实践基础 + 劳育表现加分 - 扣分，可为负，最低 -8 分</span></article>
+        </div>
+
+        <div class="quality-section">
+          <div class="quality-section-head"><h3>加分项目</h3><p>按 PDF 预设快速选择，也可手动改分。系统会按上限自动封顶。</p></div>
+          <div class="quality-items" id="qualityBonusList" data-quality-list="bonus"></div>
+          <button class="ghost-btn" type="button" data-add-quality-row="bonus">+ 添加加分项</button>
+        </div>
+
+        <div class="quality-section">
+          <div class="quality-section-head"><h3>扣分项目</h3><p>扣分按细则逐项累计，同时受各模块扣分上限控制。</p></div>
+          <div class="quality-items" id="qualityDeductList" data-quality-list="deduct"></div>
+          <button class="ghost-btn" type="button" data-add-quality-row="deduct">+ 添加扣分项</button>
+        </div>
+
+        <div class="quality-section quality-risk-section">
+          <div><h3>特殊风险与流程</h3><p>这些条款不会被普通加扣分替代，系统会在结果中单独提示。</p></div>
+          <div class="quality-risk-grid">
+            ${QUALITY_SCORE_RULES.zeroRules.map((rule, index) => `<label><input type="checkbox" name="zeroRule" value="${index}" /> ${rule}</label>`).join("")}
+            <label><input type="checkbox" name="fakeMaterial" /> 测评过程中弄虚作假（德育素质记零）</label>
+          </div>
+        </div>
+
+        <button class="primary-btn quality-submit" type="submit">实时核算综测</button>
+      </form>
+      <div class="quality-score-result" id="qualityScoreResult">
+        <div class="quality-score-main"><span>综合测评总分</span><strong>--</strong><em>等待核算</em></div>
+        <p>填写基础分和加扣分后，这里会展示五育构成、封顶提示、材料清单和流程提醒。</p>
+      </div>
+      <div class="quality-process-card">
+        <strong>正式测评流程</strong>
+        ${QUALITY_SCORE_RULES.process.map((item, index) => `<span>${index + 1}. ${item}</span>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function numberFromForm(values, name, fallback = 0) {
+  const value = Number(values.get(name));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function laborVolunteerScore(hours) {
+  if (hours <= 0) return 0;
+  if (hours <= 10) return -2;
+  if (hours <= 20) return -1.5;
+  if (hours <= 30) return 1;
+  if (hours <= 40) return 2;
+  return 3;
+}
+
+function qualityTermSlot(values) {
+  const grade = String(values.get("gradeLevel") || "1");
+  const part = values.get("semesterPart") === "first" ? "first" : "second";
+  return `${grade}-${part}`;
+}
+
+function englishCertificateScore(cert, slot) {
+  const table = {
+    cet4: { "1-first": 1, "1-second": 0.5 },
+    cet6: { "1-first": 0, "1-second": 1, "2-first": 0.8, "2-second": 0.5, "3-first": 0.2, "3-second": 0.2 }
+  };
+  return table[cert]?.[slot] || 0;
+}
+
+function computerCertificateScore(cert, slot) {
+  const table = {
+    level1: { "1-first": 0.5, "1-second": 0.3 },
+    level2: { "1-first": 1, "1-second": 0.8, "2-first": 0.6, "2-second": 0.4, "3-first": 0.2, "3-second": 0.1 }
+  };
+  return table[cert]?.[slot] || 0;
+}
+
+function collectQualityAutoBonusRows(values) {
+  const slot = qualityTermSlot(values);
+  const rows = [];
+  const englishCert = values.get("englishCert");
+  const englishScore = englishCertificateScore(englishCert, slot);
+  if (englishCert && englishScore > 0) {
+    rows.push({ type: "bonus", module: "academic", name: `智育：${englishCert === "cet4" ? "CET-4" : "CET-6"} 初次达标自动换算`, points: englishScore, count: 1, total: englishScore, proof: "英语等级考试成绩单" });
+  }
+  if (englishCert && englishScore <= 0) {
+    rows.push({ type: "bonus", module: "academic", name: `智育：${englishCert === "cet4" ? "CET-4" : "CET-6"} 当前年级学期不加分`, points: 0, count: 1, total: 0, proof: "按细则查表为 0" });
+  }
+  const computerCert = values.get("computerCert");
+  const computerScore = computerCertificateScore(computerCert, slot);
+  if (computerCert && computerScore > 0) {
+    rows.push({ type: "bonus", module: "academic", name: `智育：${computerCert === "level1" ? "计算机一级" : "计算机二级"} 初次获得自动换算`, points: computerScore, count: 1, total: computerScore, proof: "计算机等级证书" });
+  }
+  if (computerCert && computerScore <= 0) {
+    rows.push({ type: "bonus", module: "academic", name: `智育：${computerCert === "level1" ? "计算机一级" : "计算机二级"} 当前年级学期不加分`, points: 0, count: 1, total: 0, proof: "按细则查表为 0" });
+  }
+  const professional = Math.max(0, numberFromForm(values, "professionalCertCount"));
+  if (professional) {
+    rows.push({ type: "bonus", module: "academic", name: "智育：专业资格证书", points: 1.5, count: professional, total: Number((professional * 1.5).toFixed(2)), proof: "专业资格证书，普通话/驾照不计" });
+  }
+  const career = Math.max(0, numberFromForm(values, "careerCertCount"));
+  if (career) {
+    rows.push({ type: "bonus", module: "academic", name: "智育：职业资格证书", points: 1, count: career, total: Number(career.toFixed(2)), proof: "职业资格证书" });
+  }
+  const lectures = Math.max(0, numberFromForm(values, "lectureCount"));
+  if (lectures) {
+    rows.push({ type: "bonus", module: "academic", name: "智育：学术/创新创业/职业规划讲座", points: 0.2, count: lectures, total: Math.min(2, Number((lectures * 0.2).toFixed(2))), proof: "PU 截图，最高 2 分" });
+  }
+  const secondDegree = Math.max(0, numberFromForm(values, "secondDegreeCourseCount"));
+  if (secondDegree) {
+    rows.push({ type: "bonus", module: "academic", name: "智育：第二学位专业相关课程", points: 1, count: secondDegree, total: Number(secondDegree.toFixed(2)), proof: "第二学历专业相关课程成绩，公共选修课不计" });
+  }
+  return rows;
+}
+
+function qualityRowHtml(type, item = {}) {
+  const moduleId = item.module || "moral";
+  const presetIndex = Number.isInteger(item.presetIndex) ? item.presetIndex : "";
+  return `
+    <article class="quality-item-row" data-quality-row="${type}">
+      <select class="quality-preset"><option value="">自定义项目</option>${qualityPresetOptions(type)}</select>
+      <select class="quality-module">${qualityModuleOptions(moduleId)}</select>
+      <input class="quality-desc" value="${escapeHtml(item.name || "")}" placeholder="${type === "bonus" ? "加分项目名称" : "扣分项目名称"}" />
+      <input class="quality-points" type="number" min="0" step="0.1" value="${item.points ?? 0}" />
+      <input class="quality-count" type="number" min="0" step="1" value="${item.count || 1}" />
+      <input class="quality-proof" value="${escapeHtml(item.proof || "")}" placeholder="证明材料 / 备注" />
+      <button type="button" class="icon-btn quality-remove" aria-label="删除项目">×</button>
+      <input type="hidden" class="quality-preset-index" value="${presetIndex}" />
+    </article>
+  `;
+}
+
+function collectQualityRows(type) {
+  return [...document.querySelectorAll(`[data-quality-row="${type}"]`)].map((row) => {
+    const points = Math.max(0, Number(row.querySelector(".quality-points")?.value || 0));
+    const count = Math.max(0, Number(row.querySelector(".quality-count")?.value || 0));
+    return {
+      type,
+      module: row.querySelector(".quality-module")?.value || "moral",
+      name: row.querySelector(".quality-desc")?.value?.trim() || (type === "bonus" ? "未命名加分项" : "未命名扣分项"),
+      points,
+      count,
+      total: Number((points * count).toFixed(2)),
+      proof: row.querySelector(".quality-proof")?.value?.trim() || ""
+    };
+  }).filter((item) => item.total > 0 || item.name !== (type === "bonus" ? "未命名加分项" : "未命名扣分项"));
+}
+
+function computeQualityScore(values) {
+  const warnings = [];
+  const moralTeacher = clampNumber(numberFromForm(values, "moralTeacher"), 0, 9);
+  const moralAdvisor = clampNumber(numberFromForm(values, "moralAdvisor"), 0, 9);
+  const moralGroup = clampNumber(numberFromForm(values, "moralGroup"), 0, 9);
+  const gpa = Math.max(0, numberFromForm(values, "gpa"));
+  const maxGpa = Math.max(0.01, numberFromForm(values, "maxGpa", 1));
+  const sportScore = clampNumber(numberFromForm(values, "sportScore"), 0, 100);
+  const artScore = clampNumber(numberFromForm(values, "artScore"), 0, 100);
+  const laborScore = clampNumber(numberFromForm(values, "laborScore"), 0, 100);
+  const volunteerHours = Math.max(0, numberFromForm(values, "volunteerHours"));
+  const practiceCount = clampNumber(numberFromForm(values, "practiceCount"), 0, 2);
+  const base = {
+    moral: ((moralTeacher + moralAdvisor) / 2) + moralGroup,
+    academic: Math.min(38, (gpa / maxGpa) * 38),
+    sport: values.get("sportExempt") === "on" ? 3 : (sportScore / 100) * 5,
+    aesthetic: values.get("artFull") === "on" ? 3 : (artScore / 100) * 3,
+    labor: Math.max(laborScore / 100 * 4, laborVolunteerScore(volunteerHours) + Math.min(1, practiceCount * 0.5))
+  };
+  if (moralTeacher < 7.5 || moralAdvisor < 7.5 || moralGroup < 7.5) warnings.push("德育三项评分中存在低于 7.5 分的情况，细则要求向学院工作组说明原因。");
+  if (gpa > maxGpa) warnings.push("本人绩点高于最高绩点，智育基础分已按 38 分封顶。");
+  const bonusRows = [...collectQualityAutoBonusRows(values), ...collectQualityRows("bonus")];
+  const deductRows = collectQualityRows("deduct");
+  const parts = QUALITY_SCORE_RULES.modules.map((module) => {
+    const rawBonus = bonusRows.filter((row) => row.module === module.id).reduce((sum, row) => sum + row.total, 0);
+    const rawDeduct = deductRows.filter((row) => row.module === module.id).reduce((sum, row) => sum + row.total, 0);
+    const bonus = Math.min(module.bonusMax, rawBonus);
+    const deduct = Math.min(module.deductMax, rawDeduct);
+    if (rawBonus > module.bonusMax) warnings.push(`${module.short}加分 ${rawBonus.toFixed(1)} 分超过上限，已按 ${module.bonusMax} 分计。`);
+    if (rawDeduct > module.deductMax) warnings.push(`${module.short}扣分 ${rawDeduct.toFixed(1)} 分超过上限，已按 ${module.deductMax} 分计。`);
+    const score = clampNumber((base[module.id] || 0) + bonus - deduct, module.min, module.max);
+    return {
+      ...module,
+      base: Number((base[module.id] || 0).toFixed(2)),
+      rawBonus: Number(rawBonus.toFixed(2)),
+      rawDeduct: Number(rawDeduct.toFixed(2)),
+      bonus: Number(bonus.toFixed(2)),
+      deduct: Number(deduct.toFixed(2)),
+      score: Number(score.toFixed(2)),
+      capped: rawBonus > module.bonusMax || rawDeduct > module.deductMax
+    };
+  });
+  const zeroHits = values.getAll("zeroRule").map((index) => QUALITY_SCORE_RULES.zeroRules[Number(index)]).filter(Boolean);
+  const fakeMaterial = values.get("fakeMaterial") === "on";
+  let total = parts.reduce((sum, item) => sum + item.score, 0);
+  if (zeroHits.length) {
+    total = 0;
+    warnings.push("存在综合测评记零事项，系统已将总分按 0 分提示。");
+  }
+  if (fakeMaterial) {
+    const moral = parts.find((item) => item.id === "moral");
+    if (moral) moral.score = 0;
+    total = parts.reduce((sum, item) => sum + item.score, 0);
+    warnings.push("勾选了弄虚作假：细则要求德育素质测评记零。");
+  }
+  const grade = total >= 90 ? "优秀" : total >= 80 ? "良好" : total >= 70 ? "中等" : total >= 60 ? "合格" : "需提升";
+  const proofList = [...bonusRows, ...deductRows].filter((item) => item.proof).map((item) => `${qualityModule(item.module).short}：${item.name} - ${item.proof}`);
+  return {
+    total: Number(clampNumber(total, 0, 100).toFixed(2)),
+    grade,
+    parts,
+    bonusRows,
+    deductRows,
+    warnings,
+    zeroHits,
+    proofList
+  };
+}
+
+function renderQualityResult(resultBox, result) {
+  resultBox.innerHTML = `
+    <div class="quality-score-main">
+      <span>综合测评总分</span>
+      <strong>${result.total}</strong>
+      <em>${result.grade}</em>
+    </div>
+    <div class="quality-result-body">
+      <div class="quality-module-grid">
+        ${result.parts.map((item) => `
+          <article style="--score:${Math.max(0, item.score / item.max * 100)}%">
+            <header><strong>${item.short}</strong><span>${item.score}/${item.max}</span></header>
+            <p>基础 ${item.base} · 加 ${item.bonus} · 扣 ${item.deduct}</p>
+            <i></i>
+          </article>
+        `).join("")}
+      </div>
+      <div class="quality-alerts ${result.warnings.length ? "" : "is-ok"}">
+        <strong>${result.warnings.length ? "核算提醒" : "核算状态良好"}</strong>
+        ${(result.warnings.length ? result.warnings : ["未触发封顶、记零或特殊风险提醒。"]).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+      <div class="quality-proof-list">
+        <strong>证明材料清单</strong>
+        ${(result.proofList.length ? result.proofList : ["暂无材料项，请为加扣分项目补充证明材料。"]).slice(0, 8).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+      <div class="quality-proof-list quality-completion-list">
+        <strong>完整度建议</strong>
+        ${qualityCompletionHints(result).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function exportQualityResult(result) {
+  const rows = [
+    ["模块", "基础分", "加分", "扣分", "模块得分"],
+    ...result.parts.map((item) => [item.name, item.base, item.bonus, item.deduct, item.score]),
+    [],
+    ["项目类型", "模块", "名称", "单项分", "次数", "合计", "证明材料"],
+    ...result.bonusRows.map((item) => ["加分", qualityModule(item.module).short, item.name, item.points, item.count, item.total, item.proof]),
+    ...result.deductRows.map((item) => ["扣分", qualityModule(item.module).short, item.name, item.points, item.count, item.total, item.proof]),
+    [],
+    ["总分", result.total, "等级", result.grade]
+  ];
+  const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `综测核算明细-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+function bindQualityScoreTool() {
+  const form = document.querySelector("#qualityScoreForm");
+  const resultBox = document.querySelector("#qualityScoreResult");
+  if (!form || !resultBox) return;
+  const render = () => {
+    try {
+      const result = computeQualityScore(new FormData(form));
+      renderQualityResult(resultBox, result);
+      return result;
+    } catch (error) {
+      toast(error.message || "综测核算失败");
+      return null;
+    }
+  };
+  const addRow = (type, item = {}) => {
+    document.querySelector(`[data-quality-list="${type}"]`)?.insertAdjacentHTML("beforeend", qualityRowHtml(type, item));
+  };
+  const setActiveModule = (moduleId) => {
+    form.dataset.activeQualityModule = moduleId;
+    document.querySelectorAll("[data-quality-focus]").forEach((card) => {
+      card.classList.toggle("active", card.dataset.qualityFocus === moduleId);
+    });
+  };
+  const loadSaved = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(QUALITY_SCORE_STORAGE_KEY) || "null");
+      if (!saved) return false;
+      Object.entries(saved.fields || {}).forEach(([key, value]) => {
+        const node = form.elements[key];
+        if (!node) return;
+        if (!("type" in node)) return;
+        if (node.type === "checkbox") node.checked = Boolean(value);
+        else node.value = value;
+      });
+      (saved.bonusRows || []).forEach((row) => addRow("bonus", row));
+      (saved.deductRows || []).forEach((row) => addRow("deduct", row));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!loadSaved()) {
+    addRow("bonus", QUALITY_SCORE_RULES.presets.bonus[20]);
+    addRow("deduct", {});
+  }
+  setActiveModule("moral");
+  document.querySelectorAll("[data-quality-focus-button]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveModule(button.dataset.qualityFocusButton);
+      document.querySelector("#qualityBonusList")?.closest(".quality-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      toast(`已切换到${qualityModule(button.dataset.qualityFocusButton).short}模块，新增项目会默认归入该模块`);
+    });
+  });
+  const evidenceFile = document.querySelector("#qualityEvidenceFile");
+  const evidenceChoose = document.querySelector("#qualityEvidenceChoose");
+  const evidencePreview = document.querySelector("#qualityEvidencePreview");
+  const evidenceSuggestions = document.querySelector("#qualityEvidenceSuggestions");
+  evidenceChoose?.addEventListener("click", () => evidenceFile?.click());
+  evidenceFile?.addEventListener("change", () => {
+    const file = evidenceFile.files?.[0];
+    if (!file || !evidencePreview || !evidenceSuggestions) return;
+    const suggestions = qualitySuggestEvidence(file.name);
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        evidencePreview.innerHTML = `<img src="${reader.result}" alt="证明材料预览" /><strong>${escapeHtml(file.name)}</strong><span>已生成待确认识别建议，请核对后加入。</span>`;
+      };
+      reader.readAsDataURL(file);
+    } else {
+      evidencePreview.innerHTML = `<strong>${escapeHtml(file.name)}</strong><span>PDF 或文档材料已读取文件名，后续接 OCR 后可读取正文。</span><small>请先按建议确认模块和分值。</small>`;
+    }
+    renderQualityEvidenceSuggestions(evidenceSuggestions, suggestions);
+    toast("已生成材料识别建议，请确认后加入加分项");
+  });
+  evidenceSuggestions?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-quality-apply-suggestion]");
+    if (!button) return;
+    const item = evidenceSuggestions.__qualitySuggestions?.[Number(button.dataset.qualityApplySuggestion)];
+    if (!item) return;
+    setActiveModule(item.module);
+    addRow("bonus", item);
+    render();
+    toast("识别建议已加入加分项目，请核对分值和证明材料");
+  });
+  form.addEventListener("input", render);
+  form.addEventListener("change", (event) => {
+    const row = event.target.closest("[data-quality-row]");
+    if (event.target.classList.contains("quality-preset") && row) {
+      const type = row.dataset.qualityRow;
+      const preset = QUALITY_SCORE_RULES.presets[type][Number(event.target.value)];
+      if (preset) {
+        row.querySelector(".quality-module").value = preset.module;
+        row.querySelector(".quality-desc").value = preset.name;
+        row.querySelector(".quality-points").value = preset.points;
+        row.querySelector(".quality-count").value = 1;
+        row.querySelector(".quality-proof").value = preset.proof;
+      }
+    }
+    render();
+  });
+  form.addEventListener("click", (event) => {
+    const addType = event.target.closest("[data-add-quality-row]")?.dataset.addQualityRow;
+    if (addType) addRow(addType, { module: form.dataset.activeQualityModule || "moral" });
+    if (event.target.closest(".quality-remove")) event.target.closest("[data-quality-row]")?.remove();
+    const action = event.target.closest("[data-quality-action]")?.dataset.qualityAction;
+    if (action === "sample") {
+      document.querySelector("#qualityBonusList").innerHTML = "";
+      document.querySelector("#qualityDeductList").innerHTML = "";
+      [1, 5, 20, 28].forEach((index) => addRow("bonus", QUALITY_SCORE_RULES.presets.bonus[index]));
+      [6].forEach((index) => addRow("deduct", QUALITY_SCORE_RULES.presets.deduct[index]));
+      toast("已填入示例项目");
+    }
+    if (action === "save") {
+      const fields = Object.fromEntries([...new FormData(form).entries()].filter(([key]) => key !== "zeroRule"));
+      form.querySelectorAll("input[type='checkbox']").forEach((input) => {
+        if (input.name !== "zeroRule") fields[input.name] = input.checked;
+      });
+      localStorage.setItem(QUALITY_SCORE_STORAGE_KEY, JSON.stringify({ fields, bonusRows: collectQualityRows("bonus"), deductRows: collectQualityRows("deduct") }));
+      toast("综测草稿已保存");
+    }
+    if (action === "export") {
+      const result = render();
+      if (result) exportQualityResult(result);
+    }
+    if (action === "reset" && confirm("确定清空当前综测核算内容？")) {
+      localStorage.removeItem(QUALITY_SCORE_STORAGE_KEY);
+      form.reset();
+      document.querySelector("#qualityBonusList").innerHTML = "";
+      document.querySelector("#qualityDeductList").innerHTML = "";
+      addRow("bonus", {});
+      addRow("deduct", {});
+      toast("已清空");
+    }
+    render();
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    render();
+  });
+  render();
+}
+
 const routes = {
   async dashboard() {
     const [data, timetable] = await Promise.all([api("/api/dashboard"), getUnifiedTimetable()]);
-    const notices = data.latestNotifications;
+    const recentCampusNews = data.recentCampusNews || [];
+    const reservationSummary = data.reservationSummary || { approvedHours: 0, approvedCount: 0, pendingCount: 0, totalCount: 0, approvalRate: 0 };
+    const recentReservations = data.recentReservations || [];
+    setUnreadNotificationCount(data.summary?.unreadNotifications || 0);
     const today = currentDateInfo();
     const isDayTheme = document.documentElement.dataset.theme === "day";
     const weekInfo = currentWeekInfo();
@@ -2282,7 +4093,7 @@ const routes = {
         </section>
         <section class="dashboard-grid">
           <article class="dash-card schedule-card">
-            <h2 class="section-title"><span>▣ 我的课表 · ${todayCourses.length} 门</span><button data-route="timetable">查看全部 ›</button></h2>
+            <h2 class="section-title"><span>${iconSvg("calendar")} 我的课表 · ${todayCourses.length} 门</span><button data-route="timetable">查看全部 ›</button></h2>
             <div class="week-row">
               ${weekInfo
                 .map((item) => `<span class="${item.active ? "active" : ""}">${item.active ? item.label.replace(item.day, "今天") : item.label}</span>`)
@@ -2295,10 +4106,10 @@ const routes = {
             </div>
           </article>
           <article class="dash-card apps-card">
-            <h2 class="section-title"><span>⌘ 服务分区</span></h2>
+            <h2 class="section-title"><span>${iconSvg("grid")} 服务分区</span></h2>
             <div class="module-groups">
               ${visibleModuleGroups()
-                .filter((group) => group.title !== "总览")
+                .filter((group) => !["总览", "个人服务", "权限管理"].includes(group.title))
                 .map(
                   (group) => `
                     <section class="module-group">
@@ -2311,7 +4122,7 @@ const routes = {
                           .map(
                             (item) => `
                               <button class="module-card" data-route="${item.id}">
-                                <span class="module-icon">${item.icon}</span>
+                                <span class="module-icon">${iconSvg(item.icon)}</span>
                                 <strong>${item.label}</strong>
                                 <em>${item.desc}</em>
                               </button>
@@ -2325,37 +4136,34 @@ const routes = {
                 .join("")}
             </div>
           </article>
-          <article class="dash-card notice-card">
-            <h2 class="section-title"><span>▤ 校园通知</span><button data-route="notifications">查看全部 ›</button></h2>
+          <article class="dash-card notice-card campus-news-preview">
+            <h2 class="section-title"><span>${iconSvg("news")} 校园资讯</span><button data-route="news">查看全部 ›</button></h2>
             <div class="notice-list">
-              ${[
-                ["关于做好端午节放假安排的通知", "05-28"],
-                ["智慧校园系统升级维护公告", "05-27"],
-                ["2026届毕业生校招宣讲会安排", "05-26"],
-                ["图书馆新书推荐（2026年第5期）", "05-25"],
-                ["关于开展心理健康月系列活动的通知", "05-24"]
-              ]
-                .map((item) => `<div><span></span><p>${item[0]}</p><time>${item[1]}</time></div>`)
-                .join("")}
+              ${recentCampusNews
+                .map((item) => `<div><span></span><p><b>${escapeHtml(item.title || "校园资讯")}</b><small>${escapeHtml(item.source || item.category || "泰州学院")}</small></p><time>${escapeHtml(item.date || String(item.fullDate || "").slice(5) || "--")}</time></div>`)
+                .join("") || `<div class="empty">近 3 天暂无校园资讯</div>`}
             </div>
           </article>
           <article class="dash-card reserve-card">
-            <h2 class="section-title"><span>▣ 实验室预约</span><button data-route="labs">查看全部 ›</button></h2>
+            <h2 class="section-title"><span>${iconSvg("lab")} 实验室预约</span><button data-route="labs">查看全部 ›</button></h2>
             <div class="reserve-layout">
               <div class="reserve-summary">
-                <div class="ring">
-                  <div class="ring-value"><strong>12.5</strong><span>小时</span></div>
+                <div class="ring" style="--reserve-progress:${Math.max(0, Math.min(100, Number(reservationSummary.approvalRate || 0)))}%">
+                  <div class="ring-value"><strong>${Number(reservationSummary.approvedHours || 0).toFixed(1)}</strong><span>小时</span></div>
                 </div>
                 <div class="reserve-summary-copy">
-                  <span>本周预约时长</span>
-                  <strong>较上周增加 15%</strong>
-                  <small>本周目标 16 小时</small>
+                  <span>已通过预约时长</span>
+                  <strong>${reservationSummary.approvedCount} 项已通过</strong>
+                  <small>${reservationSummary.pendingCount} 项待审核 · 共 ${reservationSummary.totalCount} 项</small>
                 </div>
               </div>
               <div class="reserve-list">
-                <div><span><time>05-30 · 14:00-16:00</time><b>人工智能实验室（A区501）</b></span><em>已预约</em></div>
-                <div><span><time>05-31 · 09:00-11:30</time><b>网络安全实验室（B区205）</b></span><em class="warn">待使用</em></div>
-                <div><span><time>06-02 · 15:30-17:30</time><b>大数据实验室（C区403）</b></span><em>已预约</em></div>
+                ${recentReservations.map((item) => `
+                  <div>
+                    <span><time>${escapeHtml(item.slot || "时段待定")}</time><b>${escapeHtml(item.labName || "实验室")}</b></span>
+                    <em class="${statusClass(item.status)}">${escapeHtml(statusText(item.status))}</em>
+                  </div>
+                `).join("") || `<div class="empty">暂无实验室预约记录</div>`}
               </div>
             </div>
           </article>
@@ -2415,7 +4223,7 @@ const routes = {
         document.querySelectorAll(".pay-entry").forEach((button) => {
           button.addEventListener("click", async () => {
             try {
-              await api("/api/payments/create", {
+              const payment = await api("/api/payments/create", {
                 method: "POST",
                 body: JSON.stringify({
                   provider: button.dataset.provider,
@@ -2423,6 +4231,11 @@ const routes = {
                   amount: Number(button.dataset.amount)
                 })
               });
+              if (payment.checkoutUrl) {
+                location.assign(payment.checkoutUrl);
+                return;
+              }
+              if (payment.message) toast(payment.message);
               toast(`${paymentName(button.dataset.provider)}支付单已创建`);
             } catch (error) {
               toast(error.message);
@@ -2483,7 +4296,94 @@ const routes = {
                 })
               });
               toast("预约申请已提交");
-              setRoute("progress");
+              renderShell();
+            } catch (error) {
+              toast(error.message);
+            }
+          });
+        });
+      }
+    };
+  },
+
+  async "lab-approval"() {
+    if (!canAccessStudentAdmin()) throw new Error("仅管理员可访问预约审批");
+    const data = await api("/api/admin/reservations");
+    const reservations = data.reservations || [];
+    const counts = {
+      all: reservations.length,
+      pending: reservations.filter((item) => item.status === "pending").length,
+      approved: reservations.filter((item) => item.status === "approved").length,
+      rejected: reservations.filter((item) => item.status === "rejected").length
+    };
+    return {
+      title: "预约审批",
+      subtitle: "集中审核实验室预约申请",
+      content: `
+        <section class="card lab-approval-page">
+          <div class="lab-approval-heading">
+            <div>
+              <span class="eyebrow">教学服务 · 管理员专属</span>
+              <h2>实验室预约审批</h2>
+              <p class="muted">核对申请人、预约时段与使用用途后完成审批。</p>
+            </div>
+            <span class="badge warning">${counts.pending} 项待处理</span>
+          </div>
+          <div class="lab-approval-stats">
+            <button class="lab-approval-filter active" type="button" data-approval-filter="all"><strong>${counts.all}</strong><span>全部申请</span></button>
+            <button class="lab-approval-filter" type="button" data-approval-filter="pending"><strong>${counts.pending}</strong><span>待审核</span></button>
+            <button class="lab-approval-filter" type="button" data-approval-filter="approved"><strong>${counts.approved}</strong><span>已通过</span></button>
+            <button class="lab-approval-filter" type="button" data-approval-filter="rejected"><strong>${counts.rejected}</strong><span>未通过</span></button>
+          </div>
+          <div class="list lab-approval-list">
+            ${reservations.map((item) => `
+              <article class="row lab-approval-row" data-approval-status="${escapeHtml(item.status)}">
+                <div class="row-main">
+                  <p class="row-title">${escapeHtml(item.labName)} <span class="badge ${statusClass(item.status)}">${statusText(item.status)}</span></p>
+                  <p class="row-meta">${escapeHtml(item.slot)} · ${escapeHtml(item.reason || "未填写用途")}</p>
+                  <p class="row-meta">申请人：${escapeHtml(item.userName || item.studentNo || item.userId)} · 学号/工号：${escapeHtml(item.studentNo || "-")} · ${escapeHtml(item.updatedAt || "")}</p>
+                  ${item.adminNote ? `<p class="row-meta">审批意见：${escapeHtml(item.adminNote)}</p>` : ""}
+                </div>
+                ${item.status === "pending" ? `
+                  <div class="row-actions">
+                    <button class="ghost-btn" type="button" data-reservation-review="${item.id}" data-review-status="approved">通过</button>
+                    <button class="ghost-btn danger" type="button" data-reservation-review="${item.id}" data-review-status="rejected">驳回</button>
+                  </div>
+                ` : ""}
+              </article>
+            `).join("") || `<div class="empty">暂无预约申请</div>`}
+            <div class="empty lab-approval-filter-empty" hidden>该分类暂无预约申请</div>
+          </div>
+        </section>
+      `,
+      afterRender() {
+        document.querySelectorAll("[data-approval-filter]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const filter = button.dataset.approvalFilter;
+            let visibleCount = 0;
+            document.querySelectorAll("[data-approval-filter]").forEach((item) => item.classList.toggle("active", item === button));
+            document.querySelectorAll("[data-approval-status]").forEach((row) => {
+              const visible = filter === "all" || row.dataset.approvalStatus === filter;
+              row.hidden = !visible;
+              if (visible) visibleCount += 1;
+            });
+            const empty = document.querySelector(".lab-approval-filter-empty");
+            if (empty) empty.hidden = visibleCount !== 0;
+          });
+        });
+        document.querySelectorAll("[data-reservation-review]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            try {
+              await api("/api/admin/reservations/review", {
+                method: "POST",
+                body: JSON.stringify({
+                  id: button.dataset.reservationReview,
+                  status: button.dataset.reviewStatus,
+                  adminNote: button.dataset.reviewStatus === "approved" ? "管理员已通过预约申请" : "管理员已驳回预约申请"
+                })
+              });
+              toast(button.dataset.reviewStatus === "approved" ? "预约已通过" : "预约已驳回");
+              renderShell();
             } catch (error) {
               toast(error.message);
             }
@@ -2627,42 +4527,108 @@ const routes = {
 
   async notifications() {
     const data = await api("/api/notifications");
+    const notifications = data.notifications || [];
+    const unreadCount = Number(data.unreadCount ?? notifications.filter((item) => !item.read).length);
+    setUnreadNotificationCount(unreadCount);
     return {
       title: "消息通知",
-      subtitle: "集中查看系统、预约、维修和外卖通知",
+      subtitle: "查看预约审批与校园服务消息",
       content: `
-        <section class="card">
-          <div class="list">
-            ${data.notifications
+        <section class="card notification-center">
+          <header class="notification-toolbar">
+            <div>
+              <strong>消息通知</strong>
+              <span>未读 <b id="notificationUnreadCount">${unreadCount}</b> 条 · 保存最近 ${data.retentionDays || 14} 天，最多 ${data.maxItems || 100} 条</span>
+            </div>
+            <button type="button" class="ghost-btn" id="markAllNotificationsRead" ${unreadCount ? "" : "disabled"}>全部标为已读</button>
+          </header>
+          <div class="list notification-list">
+            ${notifications
               .map(
                 (item) => `
-                  <article class="row">
+                  <article class="row notification-row ${item.read ? "" : "unread"}" data-notification-id="${escapeHtml(item.id)}" data-read="${item.read ? "1" : "0"}" ${item.read ? "" : 'role="button" tabindex="0"'}>
+                    <span class="notification-status-dot" aria-hidden="true"></span>
                     <div class="row-main">
-                      <p class="row-title">${item.title}</p>
-                      <p class="row-meta">${item.body} · ${item.createdAt}</p>
+                      <p class="row-title">${escapeHtml(item.title)}</p>
+                      <p class="row-meta">${escapeHtml(item.body)} · ${escapeHtml(item.createdAt)}</p>
                     </div>
                     <span class="badge ${item.read ? "" : "warning"}">${item.read ? "已读" : "未读"}</span>
                   </article>
                 `
               )
-              .join("")}
+              .join("") || `<div class="empty">暂无消息通知</div>`}
           </div>
         </section>
-      `
+      `,
+      afterRender() {
+        const unreadNode = document.querySelector("#notificationUnreadCount");
+        const allButton = document.querySelector("#markAllNotificationsRead");
+        const applyUnreadCount = (count) => {
+          setUnreadNotificationCount(count);
+          if (unreadNode) unreadNode.textContent = String(count);
+          if (allButton) allButton.disabled = count === 0;
+        };
+        const markRowRead = async (row) => {
+          if (!row || row.dataset.read === "1") return;
+          const result = await api("/api/notifications/read", {
+            method: "POST",
+            body: JSON.stringify({ id: row.dataset.notificationId })
+          });
+          row.dataset.read = "1";
+          row.classList.remove("unread");
+          row.removeAttribute("role");
+          row.removeAttribute("tabindex");
+          const badge = row.querySelector(".badge");
+          if (badge) {
+            badge.classList.remove("warning");
+            badge.textContent = "已读";
+          }
+          applyUnreadCount(Number(result.unreadCount || 0));
+        };
+        document.querySelectorAll(".notification-row").forEach((row) => {
+          row.addEventListener("click", () => markRowRead(row));
+          row.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            markRowRead(row);
+          });
+        });
+        allButton?.addEventListener("click", async () => {
+          allButton.disabled = true;
+          const result = await api("/api/notifications/read", {
+            method: "POST",
+            body: JSON.stringify({ all: true })
+          });
+          document.querySelectorAll(".notification-row").forEach((row) => {
+            row.dataset.read = "1";
+            row.classList.remove("unread");
+            row.removeAttribute("role");
+            row.removeAttribute("tabindex");
+            const badge = row.querySelector(".badge");
+            if (badge) {
+              badge.classList.remove("warning");
+              badge.textContent = "已读";
+            }
+          });
+          applyUnreadCount(Number(result.unreadCount || 0));
+          toast("消息已全部标为已读");
+        });
+      }
     };
   },
 
   async news() {
     const data = await api("/api/campus-news");
     const liveCount = (data.sources || []).filter((item) => item.status === "live").length;
-    const officialStatus = data.sourceStatus === "live" ? "官网已连接" : data.sourceStatus === "partial-no-official" ? "官网异常，显示其他公开源" : "兜底";
+    const officialStatus = data.sourceStatus === "live" ? "全部官网已连接" : data.sourceStatus === "partial-no-official" ? "部分来源暂不可达" : "官网暂不可达";
+    const newsCategories = [...new Set((data.items || []).map((item) => item.category).filter(Boolean))];
     return {
       title: "校园资讯",
-      subtitle: "强制优先读取泰州学院官网，并聚合微信镜像、二级学院、团委和社团公开资讯",
+      subtitle: "聚合泰州学院官网、二级学院、团委与职能部门公开资讯",
       content: `
         <section class="news-page">
           <div class="dash-card news-source-card">
-            <h2 class="section-title"><span>☷ 泰州学院多源校园资讯</span><button id="refreshCampusNews">刷新资讯</button></h2>
+            <h2 class="section-title"><span>${iconSvg("news")} 泰州学院多源校园资讯</span><button id="refreshCampusNews">刷新资讯</button></h2>
             <div class="source-meta">
               <span>强制官网源：https://www.tzu.edu.cn</span>
               <span>更新状态：${officialStatus}</span>
@@ -2670,11 +4636,11 @@ const routes = {
               <span>更新时间：${data.updatedAt}</span>
               <span>缓存：${Math.round(data.cacheSeconds / 60)} 分钟</span>
             </div>
-            <p class="muted">本页聚合泰州学院官网、微泰院/官方微信镜像、团委社团、二级学院与部门公开页面。微信小程序私有内容需学校提供官方接口或后台审核导入，不抓取登录态和私有接口。</p>
+            <p class="muted">本页聚合泰州学院官网、二级学院、团委和职能部门公开页面，只读取公开文章链接；登录态、内部门户与私有接口不参与抓取。</p>
             <div class="news-source-grid">
               ${(data.sources || []).map((source) => `
-                <a class="news-source-chip ${source.status === "live" ? "ok" : source.status === "requires-official-api" ? "locked" : "error"}" href="${source.url || data.source}" target="_blank" rel="noreferrer">
-                  <strong>${source.name}</strong>
+                <a class="news-source-chip ${source.status === "live" ? "ok" : source.status === "requires-official-api" ? "locked" : "error"}" href="${escapeHtml(source.url || data.source)}" target="_blank" rel="noreferrer">
+                  <strong>${escapeHtml(source.name)}</strong>
                   <span>${source.status === "live" ? `${source.count || 0} 条` : source.status === "requires-official-api" ? "需官方接口" : "暂不可达"}</span>
                 </a>
               `).join("")}
@@ -2692,22 +4658,52 @@ const routes = {
               <button class="ghost-btn" type="submit">导入审核稿件</button>
             </form>
           </div>
+          <div class="dash-card news-filter-bar">
+            <label class="news-filter-search"><span>${iconSvg("search")}</span><input id="campusNewsSearch" placeholder="搜索标题或来源..." /></label>
+            <select id="campusNewsCategory" aria-label="按类别筛选">
+              <option value="">全部类别</option>
+              ${newsCategories.map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join("")}
+            </select>
+            <span id="campusNewsResultCount">共 ${(data.items || []).length} 条</span>
+          </div>
           <div class="news-list-grid">
-            ${data.items.map((item) => `
-              <article class="news-item dash-card">
+            ${(data.items || []).map((item) => `
+              <article class="news-item dash-card" data-news-category="${escapeHtml(item.category || "")}" data-news-search="${escapeHtml(`${item.title || ""} ${item.source || ""}`.toLowerCase())}">
                 <div>
-                  <span class="badge">${item.category}</span>
-                  <time>${item.date || "最新"}</time>
+                  <span class="badge">${escapeHtml(item.category || "校园资讯")}</span>
+                  <time>${escapeHtml(item.date || "最新")}</time>
                 </div>
-                <h3>${item.title}</h3>
-                <p>${item.source}</p>
-                <a href="${item.url}" target="_blank" rel="noreferrer">查看原文</a>
+                <h3>${escapeHtml(item.title)}</h3>
+                <p>${escapeHtml(item.source)}</p>
+                <a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">查看原文</a>
               </article>
             `).join("")}
           </div>
+          <button type="button" class="ghost-btn news-load-more" id="campusNewsLoadMore">加载更多资讯</button>
         </section>
       `,
       afterRender() {
+        const newsSearch = document.querySelector("#campusNewsSearch");
+        const newsCategory = document.querySelector("#campusNewsCategory");
+        const newsCount = document.querySelector("#campusNewsResultCount");
+        const loadMore = document.querySelector("#campusNewsLoadMore");
+        let visibleLimit = 30;
+        const filterNews = () => {
+          const query = newsSearch.value.trim().toLowerCase();
+          const category = newsCategory.value;
+          const matches = [...document.querySelectorAll(".news-item")].filter((card) => {
+            const matched = (!query || card.dataset.newsSearch.includes(query)) && (!category || card.dataset.newsCategory === category);
+            card.hidden = !matched;
+            return matched;
+          });
+          matches.forEach((card, index) => { card.hidden = index >= visibleLimit; });
+          newsCount.textContent = `共 ${matches.length} 条，当前显示 ${Math.min(matches.length, visibleLimit)} 条`;
+          loadMore.hidden = matches.length <= visibleLimit;
+        };
+        newsSearch.addEventListener("input", () => { visibleLimit = 30; filterNews(); });
+        newsCategory.addEventListener("change", () => { visibleLimit = 30; filterNews(); });
+        loadMore.addEventListener("click", () => { visibleLimit += 30; filterNews(); });
+        filterNews();
         document.querySelector("#refreshCampusNews").addEventListener("click", async () => {
           toast("正在刷新泰州学院官网资讯");
           await api("/api/campus-news?refresh=1");
@@ -2773,7 +4769,7 @@ const routes = {
 
           <div class="exam-toolbar dash-card">
             <div class="exam-search">
-              <span>⌕</span>
+              <span class="search-icon">${iconSvg("search")}</span>
               <input id="examSearch" type="search" placeholder="搜索考试、类别、官方源..." />
             </div>
             <label class="exam-sort">
@@ -2900,58 +4896,158 @@ const routes = {
 
   async timetable() {
     const data = await getUnifiedTimetable();
-    const importedCourses = getStoredCourses();
-    const allCourses = data.courses;
-    const todayDay = weekDays[(new Date().getDay() + 6) % 7];
-    const todayCourses = allCourses.filter((course) => course.day === todayDay);
-    const conflicts = courseConflicts(allCourses);
+    const settings = getTimetableSettings();
+    const importedCourses = currentPersonalCourses();
+    const importedImage = getTimetableImage();
+    const allCourses = data.courses.map((course) => ({
+      ...course,
+      time: courseTimeLabel(course, settings.schedule)
+    }));
+    const coursePalette = new Map(
+      [...new Set(allCourses.map((course) => String(course.course || course.id)))].sort((a, b) => a.localeCompare(b, "zh-CN"))
+        .map((name, index) => [name, index])
+    );
+    const visibleCourses = allCourses.filter((course) => courseMatchesTimetable(course, settings));
+    const todayDay = todayDayName();
+    const todayCourses = visibleCourses.filter((course) => course.day === todayDay);
+    const conflicts = courseConflicts(visibleCourses);
+    const dateLabels = dayDateLabels(settings.week, settings.weekOneStart);
+    const scheduleTimes = TIMETABLE_SCHEDULES[settings.schedule] || TIMETABLE_SCHEDULES.summer;
+    const sectionOptions = Array.from({ length: 12 }, (_, index) => index + 1);
+    const canManageTimetableCalendar = canAccessStudentAdmin();
+    window.__currentTimetableCourses = allCourses;
     return {
       title: "课表查询",
-      subtitle: "智能课表、冲突检测、外部课程表导入",
+      subtitle: "学期周次、夏冬作息、中文导入与自定义课程管理",
       content: `
         <section class="timetable-page">
           <div class="timetable-main">
-            <section class="timetable-summary">
-              <div class="dash-card"><span>今日课程</span><strong>${todayCourses.length}</strong><p>${todayDay} 课程安排</p></div>
-              <div class="dash-card"><span>本周课程</span><strong>${allCourses.length}</strong><p>含外部导入课程</p></div>
-              <div class="dash-card"><span>智能提醒</span><strong>${conflicts.length}</strong><p>${conflicts.length ? "存在时间冲突" : "暂无时间冲突"}</p></div>
-            </section>
-            <section class="smart-timetable dash-card">
-              <h2 class="section-title"><span>▦ 周课表</span><span class="timetable-toolbar"><button id="openTimetableImport">外部导入</button><button id="exportTimetable">导出 Excel</button></span></h2>
-              <div class="week-board">
-                ${weekDays.map((day) => `
-                  <div class="day-column ${day === todayDay ? "today" : ""}">
-                    <h3>${day}</h3>
-                    <div class="day-courses">
-                      ${allCourses.filter((course) => course.day === day).sort((a, b) => minutesOf(a.time) - minutesOf(b.time)).map((course) => `
-                        <button type="button" class="course-block" data-course-edit="${escapeHtml(course.id)}" title="点击修改课程">
-                          <time>${escapeHtml(course.time)}</time>
-                          <strong>${escapeHtml(course.course)}</strong>
-                          <span>${escapeHtml(course.location || "未填写教室")}</span>
-                          <small>${escapeHtml(course.teacher || course.source || "")}</small>
-                          <em>点击修改</em>
-                        </button>
-                      `).join("") || `<div class="empty-day">暂无课程</div>`}
-                    </div>
+            <section class="timetable-studio dash-card">
+              <div class="timetable-studio-copy">
+                <h2>我的课表</h2>
+              </div>
+              <div class="timetable-control-grid">
+                <label>
+                  <span>学期</span>
+                  <select id="timetableSemester">
+                    ${TIMETABLE_SEMESTERS.map((semester) => `<option value="${semester}" ${semester === settings.semester ? "selected" : ""}>${semester}</option>`).join("")}
+                  </select>
+                </label>
+                <label>
+                  <span>周数</span>
+                  <div class="week-switcher">
+                    <button type="button" data-timetable-week-step="-1">‹</button>
+                    <select id="timetableWeek">
+                      ${TIMETABLE_WEEKS.map((week) => `<option value="${week}" ${week === settings.week ? "selected" : ""}>第 ${week} 周</option>`).join("")}
+                    </select>
+                    <button type="button" data-timetable-week-step="1">›</button>
                   </div>
-                `).join("")}
+                </label>
+                ${canManageTimetableCalendar ? `
+                  <label class="week-one-start-field">
+                    <span>第一周周一</span>
+                    <div class="week-one-start-control">
+                      <input id="timetableWeekOneStart" type="date" value="${escapeHtml(settings.weekOneStart)}" />
+                      <button id="saveTimetableWeekOneStart" class="ghost-btn" type="button">保存并同步</button>
+                    </div>
+                    <small>管理员指定后，所有周次日期按此推算</small>
+                  </label>
+                ` : ""}
+                <div class="schedule-switch">
+                  <span>作息</span>
+                  <div>
+                    <button type="button" class="${settings.schedule === "summer" ? "active" : ""}" data-timetable-schedule="summer">夏季 14:30</button>
+                    <button type="button" class="${settings.schedule === "winter" ? "active" : ""}" data-timetable-schedule="winter">冬季 14:00</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+            ${importedImage ? `
+              <section class="dash-card timetable-image-panel">
+                <div class="timetable-image-head">
+                  <div>
+                    <span class="timetable-board-kicker">图片课表参考</span>
+                    <h2>${escapeHtml(importedImage.name || "我的课表截图")}</h2>
+                    <p>${escapeHtml(importedImage.importedAt || "")} 导入，可对照下方网格点击添加课程。</p>
+                  </div>
+                  <button class="ghost-btn" data-timetable-action="clear-image" type="button">移除图片</button>
+                </div>
+                <div class="timetable-image-frame">
+                  <img src="${importedImage.dataUrl}" alt="导入的课表截图" />
+                </div>
+              </section>
+            ` : ""}
+            <section class="smart-timetable dash-card">
+              <div class="timetable-board-head">
+                <div>
+                  <span class="timetable-board-kicker">第 ${settings.week} 周 · ${settings.semester}</span>
+                  <h2>${iconSvg("calendar")} 周课表</h2>
+                </div>
+                <span class="timetable-toolbar">
+                  <button id="addTimetableCourse" type="button">添加课程</button>
+                  <button id="openTimetableImport" type="button">导入课表</button>
+                  <button id="exportTimetable" type="button">导出 Excel</button>
+                </span>
+              </div>
+              <div class="timetable-note-row">
+                <span>第一周：${escapeHtml(settings.weekOneStart)}</span>
+                <span>${settings.schedule === "summer" ? "夏季作息：下午第 6 节 14:30 开始" : "冬季作息：下午第 6 节 14:00 开始"} · 晚课第 10-12 节固定 19:00 开始</span>
+                <span>点击空白格添加课程，点击课程块修改</span>
+              </div>
+              <div class="timetable-grid-wrap">
+                <div class="timetable-grid">
+                  <div class="grid-corner">节次</div>
+                  ${dateLabels.map(({ day, date }) => `<div class="grid-day ${day === todayDay ? "today" : ""}"><strong>${day}</strong><span>${date}</span></div>`).join("")}
+                  ${sectionOptions.map((section) => `
+                    <div class="grid-time" style="grid-column: 1; grid-row: ${section + 1};">
+                      <strong>${section}</strong>
+                      <span>${scheduleTimes[section - 1]}</span>
+                    </div>
+                    ${weekDays.map((day, dayIndex) => `
+                      <button type="button" class="grid-slot" data-course-add data-day="${day}" data-section="${section}" style="grid-column: ${dayIndex + 2}; grid-row: ${section + 1};" aria-label="添加 ${day} 第 ${section} 节课程"></button>
+                    `).join("")}
+                  `).join("")}
+                  ${visibleCourses.map((course) => {
+                    const dayIndex = Math.max(0, weekDays.indexOf(normalizeDay(course.day)));
+                    const start = Math.min(12, Math.max(1, Number(course.startSection || 1)));
+                    const span = Math.min(Number(course.sectionCount || 2), 13 - start);
+                    return `
+                      <button type="button" class="timetable-course-card" data-course-edit="${escapeHtml(course.id)}" style="grid-column: ${dayIndex + 2}; grid-row: ${start + 1} / span ${span}; ${timetableCourseGradient(course, coursePalette.get(String(course.course || course.id)) || 0)}">
+                        <span>${escapeHtml(courseTimeLabel(course, settings.schedule))}</span>
+                        <strong>${escapeHtml(course.course)}</strong>
+                        <em>${escapeHtml(course.location || "未填写教室")}</em>
+                        <small class="course-teacher">任课教师：${escapeHtml(course.teacher || "待补充")}</small>
+                      </button>
+                    `;
+                  }).join("")}
+                </div>
               </div>
             </section>
           </div>
           <div class="timetable-edit-modal timetable-import-modal hidden" id="timetableImportModal">
             <div class="timetable-edit-card timetable-import-card">
               <div class="modal-title-row">
-                <h2>外部导入</h2>
+                <h2>中文课表导入</h2>
                 <button type="button" data-timetable-import-close>×</button>
               </div>
-              <p class="muted">请使用《智慧校园课表.xlsx》模板导入，表头固定为 day、time、course、location、teacher。</p>
-              <input id="timetableFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
-              <button class="primary-btn" id="chooseTimetableFile">选择文件导入</button>
+              <p class="muted">支持 Excel / CSV 导入，也支持上传手机课表截图自动识别。图片识别需要服务端已配置 AI 视觉模型。</p>
+              <div class="import-format-card">
+                <strong>示例</strong>
+                <span>2025-2026学年第二学期｜1-16｜周一｜1｜2｜高等数学｜明德楼301｜刘老师｜可空</span>
+                <span>周次支持：1-20、1,3,5、1-8；连续节数可填 2 或 3。</span>
+              </div>
+              <input id="timetableFile" type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden />
+              <input id="timetableImageFile" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+              <div class="import-action-row">
+                <button class="primary-btn" id="chooseTimetableFile" type="button">选择 Excel 导入</button>
+                <button class="ghost-btn" id="chooseTimetableImage" type="button">图片自动识别</button>
+                <button class="ghost-btn" id="downloadTimetableExample" type="button">下载导入示例</button>
+              </div>
               <div class="actions">
-                <button class="ghost-btn" id="clearTimetable" data-timetable-action="clear">清空外部课表</button>
+                <button class="ghost-btn" id="clearTimetable" data-timetable-action="clear" type="button">清空本地课表</button>
               </div>
               <div class="import-stats">
-                <span><strong>${importedCourses.length}</strong> 外部课程</span>
+                <span><strong>${importedCourses.length}</strong> 本地课程</span>
                 <span><strong>${conflicts.length}</strong> 冲突提醒</span>
               </div>
             </div>
@@ -2959,51 +5055,80 @@ const routes = {
           <div class="timetable-edit-modal hidden" id="timetableEditModal">
             <form class="timetable-edit-card" id="timetableEditForm">
               <div class="modal-title-row">
-                <h2>修改课程</h2>
+                <h2>添加 / 修改课程</h2>
                 <button type="button" data-timetable-edit-close>×</button>
               </div>
               <input type="hidden" name="id" />
+              <label class="field">
+                <span>学期</span>
+                <select name="semester">
+                  ${TIMETABLE_SEMESTERS.map((semester) => `<option value="${semester}">${semester}</option>`).join("")}
+                </select>
+              </label>
+              <label class="field">
+                <span>周次</span>
+                <input name="weeks" placeholder="例如：1-16 或 1,3,5" />
+              </label>
               <label class="field">
                 <span>星期</span>
                 <select name="day">
                   ${weekDays.map((day) => `<option value="${day}">${day}</option>`).join("")}
                 </select>
               </label>
+              <div class="field-pair">
+                <label class="field">
+                  <span>开始节次</span>
+                  <select name="startSection">
+                    ${sectionOptions.map((section) => `<option value="${section}">第 ${section} 节</option>`).join("")}
+                  </select>
+                </label>
+                <label class="field">
+                  <span>连续节数</span>
+                  <select name="sectionCount">
+                    <option value="1">1 节</option>
+                    <option value="2">2 节</option>
+                    <option value="3">3 节</option>
+                    <option value="4">4 节</option>
+                  </select>
+                </label>
+              </div>
               <label class="field">
-                <span>时间</span>
-                <input name="time" placeholder="08:00-09:40" required />
+                <span>课程名称</span>
+                <input name="course" placeholder="请输入课程名称" required />
               </label>
               <label class="field">
-                <span>课程</span>
-                <input name="course" placeholder="课程名称" required />
-              </label>
-              <label class="field">
-                <span>地点</span>
+                <span>上课地点</span>
                 <input name="location" placeholder="教学楼 / 教室" />
               </label>
               <label class="field">
-                <span>教师</span>
+                <span>任课教师</span>
                 <input name="teacher" placeholder="教师姓名" />
               </label>
+              <label class="field">
+                <span>备注</span>
+                <input name="note" placeholder="单双周、实验课、考试周等" />
+              </label>
               <div class="modal-actions">
+                <button type="button" class="ghost-btn hidden" id="deleteTimetableCourse">删除课程</button>
                 <button type="button" class="ghost-btn" data-timetable-edit-close>取消</button>
-                <button type="submit" class="primary-btn">保存修改</button>
+                <button type="submit" class="primary-btn">保存课程</button>
               </div>
             </form>
           </div>
         </section>
       `,
       afterRender() {
+        bindTimetableControls();
         bindTimetableImportModal();
         bindTimetableEditor();
         document.querySelector("#exportTimetable").addEventListener("click", async () => {
           const result = await api("/api/timetable/export", {
             method: "POST",
-            body: JSON.stringify({ courses: allCourses })
+            body: JSON.stringify({ courses: visibleCourses })
           });
           const link = document.createElement("a");
           link.href = `/downloads/conversions/${encodeURIComponent(result.filename)}`;
-          link.download = "智慧校园课表.xlsx";
+          link.download = "智慧校园中文课表.xlsx";
           link.click();
         });
       }
@@ -3236,7 +5361,7 @@ const routes = {
             event.preventDefault();
             const formData = new FormData(form);
             try {
-              await api("/api/canteen/orders", {
+              const orderResult = await api("/api/canteen/orders", {
                 method: "POST",
                 body: JSON.stringify({
                   foodId: form.dataset.foodId,
@@ -3244,14 +5369,19 @@ const routes = {
                   paymentMethod: formData.get("paymentMethod")
                 })
               });
-              await api("/api/payments/create", {
+              const payment = await api("/api/payments/create", {
                 method: "POST",
                 body: JSON.stringify({
                   provider: formData.get("paymentMethod"),
                   scene: "食堂外卖",
-                  amount: 0
+                  orderId: orderResult.order.id
                 })
               });
+              if (payment.checkoutUrl) {
+                location.assign(payment.checkoutUrl);
+                return;
+              }
+              if (payment.message) toast(payment.message);
               toast(`${paymentName(formData.get("paymentMethod"))}支付入口已创建，外卖订单已提交`);
             } catch (error) {
               toast(error.message);
@@ -3359,13 +5489,26 @@ const routes = {
       localStorage.setItem("smart_campus_ai_schema", AI_PANEL_SCHEMA);
     }
     const storedConfig = JSON.parse(localStorage.getItem(AI_CONFIG_KEY) || "{}");
-    const activeProvider = aiProviderPresets.find((item) => item.id === serverAi.provider)
-      || aiProviderPresets.find((item) => item.id === storedConfig.provider)
+    const activeProvider = aiProviderPresets.find((item) => item.id === storedConfig.provider)
+      || aiProviderPresets.find((item) => item.id === serverAi.provider)
       || aiProviderPresets.find((item) => item.id === "deepseek")
       || aiProviderPresets[0];
-    const storedMessages = JSON.parse(localStorage.getItem(AI_MESSAGES_KEY) || "[]");
+    const conversations = loadAiConversations();
+    let activeConversationId = localStorage.getItem(AI_ACTIVE_CONVERSATION_KEY);
+    let activeConversation = conversations.find((item) => item.id === activeConversationId);
+    if (!activeConversation) {
+      activeConversation = conversations[0];
+      activeConversationId = activeConversation.id;
+      localStorage.setItem(AI_ACTIVE_CONVERSATION_KEY, activeConversationId);
+    }
+    const storedMessages = Array.isArray(activeConversation.messages) ? activeConversation.messages : [];
     const hasMessages = storedMessages.length > 0;
-    const greetingName = state.user?.name || "同学";
+    let trashedConversations = [];
+    try {
+      trashedConversations = JSON.parse(localStorage.getItem(AI_TRASH_KEY) || "[]");
+    } catch {
+      trashedConversations = [];
+    }
     const providerOptions = aiProviderPresets
       .map((provider) => `<option value="${provider.id}" ${provider.id === activeProvider.id ? "selected" : ""}>${provider.name} · ${provider.region}</option>`)
       .join("");
@@ -3373,124 +5516,105 @@ const routes = {
       title: "AI 助手",
       subtitle: "真实模型驱动的通用问答、写作、编程、学习与分析助手",
       content: `
-        <section class="ai-page">
+        <section class="ai-page ai-agent-workspace">
           <aside class="ai-side-panel dash-card">
-            <div class="ai-brand-row">
-              <span class="ai-orbit">✦</span>
-              <div><strong>全能 AI 助手</strong><p>${activeProvider.name} · ${serverAi.model}</p></div>
+            <div class="ai-conversation-head">
+              <div><span class="ai-panel-icon">${iconSvg("sparkles")}</span><strong>会话</strong></div>
+              <button type="button" title="收起会话栏">${iconSvg("grid")}</button>
             </div>
-            <button class="ai-side-action active" data-ai-new-chat><span>＋</span>新对话</button>
-            <button class="ai-side-action"><span>◷</span>历史会话</button>
-            <div class="ai-capability-list">
-              ${[
-                ["知识库", "课程、论文、制度资料"],
-                ["图片", "海报、头像、宣传图"],
-                ["学习工具", "总结、PPT、润色、辅导"],
-                ["AI 工作台", "模型、插件、自动化"]
-              ]
-                .map((item) => `<button><strong>${item[0]}</strong><span>${item[1]}</span></button>`)
-                .join("")}
-            </div>
-            <div class="ai-vip-card">
-              <strong>尊享版</strong>
-              <span>解锁更多高级模型与权益</span>
-              <button type="button">升级会员</button>
-            </div>
+            <button class="ai-side-action active" data-ai-new-chat><span>＋</span>新建对话</button>
             <div class="ai-recents">
               <p>最近会话</p>
-              ${["你好！有什么可以帮您？", "PDF与图片数据分析请求", "论文主题与写作建议", "考试报名时间整理", "服务站选址与网络图"].map((item, index) => `<button class="${index === 0 ? "active" : ""}">${item}</button>`).join("")}
+              ${conversations.map((conversation) => `
+                <div class="ai-conversation-item ${conversation.id === activeConversationId ? "active" : ""}">
+                  <button type="button" data-ai-conversation="${conversation.id}"><span>${escapeHtml(conversation.title || "新对话")}</span><time>${new Date(conversation.updatedAt || Date.now()).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })}</time></button>
+                  <button type="button" data-ai-delete-conversation="${conversation.id}" title="移入回收站">×</button>
+                </div>
+              `).join("")}
             </div>
-            <div class="ai-user-footer">
-              <span class="avatar">${state.user?.name?.slice(0, 1) || "张"}</span>
-              <strong>${state.user?.name || "张同学"}</strong>
-              <em>校园版</em>
-            </div>
+            <button class="ai-recycle-action" type="button" data-ai-empty-trash>${iconSvg("database")}<span>回收站${trashedConversations.length ? ` · ${trashedConversations.length}` : ""}</span></button>
           </aside>
 
           <main class="ai-chat-panel dash-card">
             <header class="ai-chat-head">
-              <div>
-                <h2>AI 助手 <button class="ai-config-button" data-ai-config-open>⚙ 服务状态</button></h2>
-                <p>当前：${activeProvider.name} / ${serverAi.model}。${serverAi.configured ? "真实 API 已连接，可处理通用问题。" : "尚未配置服务端 API Key。"}</p>
+              <div class="ai-active-model">
+                <span class="ai-model-mark">${iconSvg("sparkles")}</span>
+                <div><h2>全能 AI 助手</h2><p>${activeProvider.name} · ${storedConfig.model || serverAi.model}</p></div>
               </div>
-              <div class="ai-status-stack">
-                <span>${serverAi.configured ? "在线" : "未配置"}</span>
-                <strong>${serverAi.provider}</strong>
-              </div>
+              <button class="ai-service-pill" type="button" data-ai-config-open><i class="${storedConfig.apiKey || serverAi.configured ? "online" : ""}"></i>${storedConfig.apiKey || serverAi.configured ? "服务正常" : "等待配置"}</button>
             </header>
-            <div class="ai-top-icons">
-              <button type="button">♮</button>
-              <button type="button" data-ai-config-open>⚙</button>
-              <span></span>
-            </div>
 
             <div class="ai-message-stage ${hasMessages ? "has-messages" : "empty"}" id="aiMessageStage">
-              <div class="ai-glow-core">${hasMessages ? "你好" : ""}</div>
               <div class="ai-landing">
+                <span class="ai-landing-mark">${iconSvg("sparkles")}</span>
                 <h3>今天想让我帮你做什么？</h3>
-                <p>学习、工作、创作，我都能为你提供专业的帮助</p>
+                <p>学习、工作、创作与分析，都可以从这里开始</p>
               </div>
               <div class="ai-messages" id="aiMessages">
-                ${storedMessages
-                  .map(
-                    (message) => `
-                      <article class="ai-message ${message.role}">
-                        <span>${message.role === "assistant" ? "AI" : "我"}</span>
-                        <div><p>${escapeHtml(message.text)}</p><em>${message.time}</em></div>
-                      </article>
-                    `
-                  )
-                  .join("")}
+                ${storedMessages.map((message) => `
+                  <article class="ai-message ${message.role}">
+                    <span>${message.role === "assistant" ? "AI" : "我"}</span>
+                    <div><p>${escapeHtml(message.text)}</p><em>${message.time}</em></div>
+                  </article>
+                `).join("")}
               </div>
             </div>
 
             <div class="ai-suggestion-row">
-              ${[
-                ["📄", "总结文档"],
-                ["🖼", "生成PPT"],
-                ["✒", "润色文本"],
-                ["🎓", "学习辅导"]
-              ].map((item) => `<button data-ai-prompt="${item[1]}"><span>${item[0]}</span>${item[1]}</button>`).join("")}
+              ${[["总结文档", "news"], ["生成 PPT", "grid"], ["润色文本", "sparkles"], ["学习辅导", "award"]].map(([label, icon]) => `<button data-ai-prompt="${label}">${iconSvg(icon)}<span>${label}</span></button>`).join("")}
             </div>
 
             <form class="ai-composer" id="aiComposer">
-              <button type="button" title="上传文件">✦</button>
-              <textarea name="prompt" rows="1" placeholder="输入问题、总结文档、生成方案、编写代码……" autocomplete="off"></textarea>
-              <select name="scene">
-                <option value="pro">专业版</option>
-                <option value="study">学习</option>
-                <option value="campus">校园</option>
-                <option value="data">资料分析</option>
-              </select>
-              <button type="submit">➤</button>
+              <textarea name="prompt" rows="2" placeholder="输入问题，或使用 / 唤起指令" autocomplete="off"></textarea>
+              <div class="ai-composer-tools">
+                <button type="button" data-ai-mode="chat" class="active">${iconSvg("news")}聊天</button>
+                <button type="button" data-ai-prompt="图片生成">${iconSvg("grid")}图片生成</button>
+                <button type="button" data-ai-file-open>${iconSvg("toolbox")}文件上传</button>
+                <button type="button" data-ai-prompt="制定学习规划">${iconSvg("calendar")}学习规划</button>
+                <button type="button" data-ai-prompt="生成 PPT">${iconSvg("chart")}生成 PPT</button>
+              </div>
+              <input id="aiFileInput" type="file" accept=".txt,.md,.csv,.json,.js,.ts,.html,.css" hidden />
+              <button class="ai-send-button" type="submit" title="发送">${iconSvg("sparkles")}</button>
             </form>
-            <p class="ai-disclaimer">AI 可能出错；报名、缴费、考试时间和学校通知以官方系统为准。</p>
+            <p class="ai-disclaimer">内容由 AI 生成，请注意甄别参考。</p>
           </main>
 
-          <div class="ai-config-modal hidden" id="aiConfigModal">
+          <aside class="ai-config-modal" id="aiConfigModal">
             <form class="ai-config-card" id="aiConfigForm">
               <div class="ai-config-head">
-                <div><strong>AI 服务状态</strong><p>密钥仅保存在服务端环境变量中，不会发送到浏览器。</p></div>
-                <button type="button" data-ai-config-close>×</button>
+                <div><strong>模型与 API 配置</strong><p>当前浏览器的个人配置</p></div>
+                <button type="button" data-ai-config-close title="收起配置">×</button>
               </div>
-              <label class="field">
-                <span>AI 厂商</span>
-                <select name="provider" id="aiProviderSelect">${providerOptions}</select>
-              </label>
-              <div class="form-row">
-                <label class="field"><span>接口协议</span><input name="protocol" value="${storedConfig.protocol || activeProvider.protocol}" /></label>
-                <label class="field"><span>模型名称</span><input name="model" value="${storedConfig.model || activeProvider.model}" /></label>
+              <section class="ai-current-model-card">
+                <span class="ai-provider-avatar">${activeProvider.name.slice(0, 1)}</span>
+                <div><strong>${activeProvider.name}</strong><p>${storedConfig.model || activeProvider.model}</p></div>
+                <span class="badge success">当前</span>
+              </section>
+              <label class="field"><span>模型服务商</span><select name="provider" id="aiProviderSelect">${providerOptions}</select></label>
+              <div class="ai-provider-list">
+                ${aiProviderPresets.filter((provider) => ["openai", "anthropic", "gemini", "deepseek", "qwen", "kimi", "zhipu", "doubao"].includes(provider.id)).map((provider) => `
+                  <button type="button" class="${provider.id === activeProvider.id ? "active" : ""}" data-ai-provider="${provider.id}">
+                    <span>${provider.name.slice(0, 1)}</span><strong>${provider.name.replace(/\s*\/.*$/, "")}</strong><i></i>
+                  </button>
+                `).join("")}
               </div>
+              <label class="field"><span>API Key</span><input name="apiKey" type="password" value="${escapeHtml(storedConfig.apiKey || "")}" placeholder="输入你的 API Key" autocomplete="off" /></label>
+              <label class="field"><span>模型名称</span><input name="model" value="${storedConfig.model || activeProvider.model}" /></label>
               <label class="field"><span>Base URL</span><input name="baseUrl" value="${storedConfig.baseUrl || activeProvider.baseUrl}" /></label>
-              <label class="field"><span>服务端连接</span><input value="${serverAi.configured ? "已配置真实 API" : "未配置 AI_API_KEY"}" readonly /></label>
-              <label class="field"><span>能力范围</span><textarea readonly>通用知识、写作、编程、数据分析、学习辅导、职业规划与校园生活，不局限于校园。</textarea></label>
+              <input name="protocol" type="hidden" value="${storedConfig.protocol || activeProvider.protocol}" />
               <div class="ai-config-actions">
-                <button class="ghost-btn" type="button" id="aiTestConfig">测试配置</button>
-                <button class="primary-btn" type="submit">保存显示偏好</button>
+                <button class="ghost-btn" type="button" id="aiTestConfig">检查连接</button>
+                <button class="primary-btn" type="submit">保存个人配置</button>
               </div>
-              <p class="muted">请在服务器 .env 中配置 AI_PROVIDER、AI_BASE_URL、AI_API_KEY 和 AI_MODEL，重启服务后生效。</p>
+              <div class="ai-connection-status">
+                <strong>连接状态</strong>
+                <p><span>API 调用</span><b>${storedConfig.apiKey || serverAi.configured ? "可测试" : "待配置"}</b></p>
+                <p><span>密钥存储</span><b>当前浏览器</b></p>
+                <p><span>Agent 能力</span><b>持续扩展</b></p>
+              </div>
+              <p class="ai-key-note">密钥保存在此浏览器中，调用时经本站服务器转发，不会写入项目代码或管理员配置。</p>
             </form>
-          </div>
+          </aside>
         </section>
       `,
       afterRender() {
@@ -3500,32 +5624,105 @@ const routes = {
         const composer = document.querySelector("#aiComposer");
         const messageList = document.querySelector("#aiMessages");
         const stage = document.querySelector("#aiMessageStage");
-        const getMessages = () => JSON.parse(localStorage.getItem(AI_MESSAGES_KEY) || "[]");
-        const saveMessages = (messages) => localStorage.setItem(AI_MESSAGES_KEY, JSON.stringify(messages));
+        const fileInput = document.querySelector("#aiFileInput");
+        const getActiveConversation = () => {
+          const list = loadAiConversations();
+          const id = localStorage.getItem(AI_ACTIVE_CONVERSATION_KEY);
+          return list.find((item) => item.id === id) || list[0];
+        };
+        const getMessages = () => getActiveConversation()?.messages || [];
+        const saveMessages = (messages) => {
+          const list = loadAiConversations();
+          const id = localStorage.getItem(AI_ACTIVE_CONVERSATION_KEY);
+          const conversation = list.find((item) => item.id === id) || list[0];
+          conversation.messages = messages;
+          conversation.updatedAt = new Date().toISOString();
+          const firstPrompt = messages.find((item) => item.role === "user")?.text?.trim();
+          if (firstPrompt && (!conversation.title || conversation.title === "新对话")) conversation.title = firstPrompt.slice(0, 24);
+          saveAiConversations(list.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)));
+          localStorage.setItem(AI_MESSAGES_KEY, JSON.stringify(messages));
+        };
         const renderMessages = (messages) => {
           messageList.innerHTML = messages
             .map(
-              (message) => `
+              (message, index) => `
                 <article class="ai-message ${message.role}">
                   <span>${message.role === "assistant" ? "AI" : "我"}</span>
-                  <div><p>${escapeHtml(message.text)}</p><em>${message.time}</em></div>
+                  <div>
+                    ${message.pending ? `
+                      <div class="ai-thinking-progress" role="status" aria-live="polite">
+                        <div><span class="ai-thinking-spinner"></span><strong>${message.text || "正在处理"}</strong></div>
+                        <ol><li>理解问题</li><li>读取会话上下文</li><li>组织回答</li></ol>
+                      </div>
+                    ` : `
+                      ${message.role === "assistant" && message.durationMs
+                        ? `<div class="ai-thinking-summary">${iconSvg("sparkles")}<span>思考了 ${(message.durationMs / 1000).toFixed(1)} 秒</span></div>`
+                        : ""}
+                      <p>${escapeHtml(message.text)}</p>
+                      <div class="ai-message-meta"><em>${message.time}</em></div>
+                      <div class="ai-message-actions">
+                        <button type="button" data-ai-copy-message="${index}" title="复制" aria-label="复制">${iconSvg("copy")}</button>
+                        ${message.role === "assistant" ? `<button type="button" data-ai-regenerate="${index}" title="重新生成" aria-label="重新生成">${iconSvg("refresh")}</button>` : ""}
+                      </div>
+                    `}
+                  </div>
                 </article>
               `
             )
             .join("");
           stage.classList.toggle("has-messages", messages.length > 0);
           stage.classList.toggle("empty", messages.length === 0);
-          messageList.scrollTop = messageList.scrollHeight;
+          requestAnimationFrame(() => {
+            stage.scrollTop = stage.scrollHeight;
+          });
+        };
+        const requestAssistant = async (messages, pendingMessage) => {
+          try {
+            const result = await api("/api/ai/chat", {
+              method: "POST",
+              body: JSON.stringify({
+                config: JSON.parse(localStorage.getItem(AI_CONFIG_KEY) || "{}"),
+                messages: messages.filter((item) => item !== pendingMessage)
+              })
+            });
+            pendingMessage.text = result.reply;
+            pendingMessage.pending = false;
+            pendingMessage.durationMs = Date.now() - pendingMessage.startedAt;
+            pendingMessage.time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+            saveMessages(messages);
+            renderMessages(messages);
+            if (result.warning) toast(result.warning);
+          } catch (error) {
+            pendingMessage.text = `AI 调用失败：${error.message}`;
+            pendingMessage.pending = false;
+            pendingMessage.durationMs = Date.now() - pendingMessage.startedAt;
+            pendingMessage.time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+            saveMessages(messages);
+            renderMessages(messages);
+          }
         };
         document.querySelectorAll("[data-ai-config-open]").forEach((button) => {
-          button.addEventListener("click", () => modal.classList.remove("hidden"));
+          button.addEventListener("click", () => {
+            modal.classList.remove("hidden");
+            modal.classList.add("drawer-open");
+          });
         });
-        document.querySelector("[data-ai-config-close]").addEventListener("click", () => modal.classList.add("hidden"));
+        document.querySelector("[data-ai-config-close]").addEventListener("click", () => {
+          modal.classList.remove("drawer-open");
+          modal.classList.add("hidden");
+        });
         providerSelect.addEventListener("change", () => {
           const provider = aiProviderPresets.find((item) => item.id === providerSelect.value);
           configForm.protocol.value = provider.protocol;
           configForm.baseUrl.value = provider.baseUrl;
           configForm.model.value = provider.model;
+          document.querySelectorAll("[data-ai-provider]").forEach((button) => button.classList.toggle("active", button.dataset.aiProvider === provider.id));
+        });
+        document.querySelectorAll("[data-ai-provider]").forEach((button) => {
+          button.addEventListener("click", () => {
+            providerSelect.value = button.dataset.aiProvider;
+            providerSelect.dispatchEvent(new Event("change"));
+          });
         });
         configForm.baseUrl.addEventListener("input", () => {
           if (configForm.baseUrl.value.includes("api.deepseek.com")) {
@@ -3539,6 +5736,7 @@ const routes = {
         configForm.addEventListener("submit", (event) => {
           event.preventDefault();
           localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(Object.fromEntries(new FormData(configForm).entries())));
+          modal.classList.remove("drawer-open");
           modal.classList.add("hidden");
           toast("AI 配置已保存");
           renderShell();
@@ -3556,15 +5754,107 @@ const routes = {
             .catch((error) => toast(error.message));
         });
         document.querySelector("[data-ai-new-chat]").addEventListener("click", () => {
-          const messages = [];
-          saveMessages(messages);
-          renderMessages(messages);
+          const list = loadAiConversations();
+          const now = new Date().toISOString();
+          const conversation = { id: aiConversationId(), title: "新对话", messages: [], createdAt: now, updatedAt: now };
+          list.unshift(conversation);
+          saveAiConversations(list);
+          localStorage.setItem(AI_ACTIVE_CONVERSATION_KEY, conversation.id);
+          renderShell();
+        });
+        document.querySelectorAll("[data-ai-conversation]").forEach((button) => {
+          button.addEventListener("click", () => {
+            localStorage.setItem(AI_ACTIVE_CONVERSATION_KEY, button.dataset.aiConversation);
+            renderShell();
+          });
+        });
+        document.querySelectorAll("[data-ai-delete-conversation]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const list = loadAiConversations();
+            if (list.length === 1) {
+              toast("至少保留一个会话");
+              return;
+            }
+            const index = list.findIndex((item) => item.id === button.dataset.aiDeleteConversation);
+            if (index < 0) return;
+            const [removed] = list.splice(index, 1);
+            let trash = [];
+            try { trash = JSON.parse(localStorage.getItem(AI_TRASH_KEY) || "[]"); } catch { trash = []; }
+            localStorage.setItem(AI_TRASH_KEY, JSON.stringify([removed, ...trash].slice(0, 30)));
+            if (localStorage.getItem(AI_ACTIVE_CONVERSATION_KEY) === removed.id) localStorage.setItem(AI_ACTIVE_CONVERSATION_KEY, list[0].id);
+            saveAiConversations(list);
+            toast("会话已移入回收站");
+            renderShell();
+          });
+        });
+        document.querySelector("[data-ai-empty-trash]")?.addEventListener("click", () => {
+          const trash = JSON.parse(localStorage.getItem(AI_TRASH_KEY) || "[]");
+          if (!trash.length) {
+            toast("回收站为空");
+            return;
+          }
+          localStorage.removeItem(AI_TRASH_KEY);
+          toast("回收站已清空");
+          renderShell();
         });
         document.querySelectorAll("[data-ai-prompt]").forEach((button) => {
           button.addEventListener("click", () => {
             composer.prompt.value = button.dataset.aiPrompt;
+            composer.prompt.dispatchEvent(new Event("input"));
             composer.prompt.focus();
           });
+        });
+        document.querySelector("[data-ai-file-open]")?.addEventListener("click", () => fileInput.click());
+        fileInput?.addEventListener("change", async () => {
+          const file = fileInput.files?.[0];
+          if (!file) return;
+          if (file.size > 2 * 1024 * 1024) {
+            toast("文本文件不能超过 2MB");
+            fileInput.value = "";
+            return;
+          }
+          try {
+            const text = await file.text();
+            composer.prompt.value = `请分析文件《${file.name}》并给出重点、结论和建议：\n\n${text.slice(0, 16000)}`;
+            composer.prompt.dispatchEvent(new Event("input"));
+            composer.prompt.focus();
+            toast(`已读取 ${file.name}`);
+          } catch {
+            toast("无法读取该文件");
+          }
+          fileInput.value = "";
+        });
+        composer.prompt.addEventListener("input", () => {
+          composer.prompt.style.height = "auto";
+          composer.prompt.style.height = `${Math.min(150, Math.max(40, composer.prompt.scrollHeight))}px`;
+        });
+        messageList.addEventListener("click", async (event) => {
+          const copyButton = event.target.closest("[data-ai-copy-message]");
+          if (copyButton) {
+            const message = getMessages()[Number(copyButton.dataset.aiCopyMessage)];
+            if (!message) return;
+            try {
+              await navigator.clipboard.writeText(message.text);
+              toast("内容已复制");
+            } catch {
+              toast("复制失败，请手动选择文字");
+            }
+            return;
+          }
+          const regenerateButton = event.target.closest("[data-ai-regenerate]");
+          if (!regenerateButton) return;
+          const messages = getMessages();
+          const assistantIndex = Number(regenerateButton.dataset.aiRegenerate);
+          let userIndex = assistantIndex - 1;
+          while (userIndex >= 0 && messages[userIndex].role !== "user") userIndex -= 1;
+          if (userIndex < 0) return;
+          messages.splice(userIndex + 1);
+          const time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+          const pendingMessage = { role: "assistant", text: "正在重新生成", time, pending: true, startedAt: Date.now() };
+          messages.push(pendingMessage);
+          saveMessages(messages);
+          renderMessages(messages);
+          requestAssistant(messages, pendingMessage);
         });
         composer.prompt.addEventListener("keydown", (event) => {
           if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -3579,30 +5869,12 @@ const routes = {
           const messages = getMessages();
           const time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
           messages.push({ role: "user", text: prompt, time });
-          const pendingMessage = { role: "assistant", text: "正在思考中，请稍后", time };
+          const pendingMessage = { role: "assistant", text: "正在思考并组织回答", time, pending: true, startedAt: Date.now() };
           messages.push(pendingMessage);
           saveMessages(messages);
           composer.reset();
           renderMessages(messages);
-          api("/api/ai/chat", {
-            method: "POST",
-            body: JSON.stringify({
-              messages: messages.filter((item) => item !== pendingMessage)
-            })
-          })
-            .then((result) => {
-              pendingMessage.text = result.reply;
-              pendingMessage.time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-              saveMessages(messages);
-              renderMessages(messages);
-              if (result.warning) toast(result.warning);
-            })
-            .catch((error) => {
-              pendingMessage.text = `AI 调用失败：${error.message}`;
-              pendingMessage.time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-              saveMessages(messages);
-              renderMessages(messages);
-            });
+          requestAssistant(messages, pendingMessage);
         });
         renderMessages(storedMessages);
       }
@@ -3610,7 +5882,7 @@ const routes = {
   },
 
   async software() {
-    const softwareCatalog = await fetch("/assets/software-catalog.json?v=codex-official-icon-v47-20260609").then((response) => {
+    const softwareCatalog = await fetch("/assets/software-catalog.json?v=software-real-icons-v107-20260619").then((response) => {
       if (!response.ok) throw new Error("软件目录加载失败");
       return response.json();
     });
@@ -3627,7 +5899,7 @@ const routes = {
       content: `
         <section class="software-page">
           <div class="dash-card software-toolbar">
-            <label class="software-search"><span>⌕</span><input id="softwareKeyword" placeholder="搜索软件名称、用途、平台或版本..." /></label>
+            <label class="software-search"><span class="search-icon">${iconSvg("search")}</span><input id="softwareKeyword" placeholder="搜索软件名称、用途、平台或版本..." /></label>
           </div>
           <div class="software-browser">
             <aside class="dash-card software-category-nav">
@@ -3639,7 +5911,7 @@ const routes = {
             <div class="software-grid" id="softwareGrid">
               ${softwareCatalog.map((item) => `
                 <article class="dash-card software-card" data-software-id="${item.id}" data-software-text="${escapeHtml(`${item.name} ${item.category} ${item.description} ${platformLabel(item)} ${(item.versions || []).map((version) => version.version).join(" ")}`)}" data-software-category="${item.category}">
-                  <div class="software-icon image"><img src="${item.icon}" alt="${escapeHtml(item.name)} 图标" loading="lazy" /></div>
+                  <div class="software-icon image">${softwareIconMarkup(item)}</div>
                   <div class="software-card-copy">
                     <div class="software-card-head"><h3>${escapeHtml(item.name)}</h3><span>${item.category}</span></div>
                     <p>${escapeHtml(item.description)}</p>
@@ -3660,6 +5932,7 @@ const routes = {
         </section>
       `,
       afterRender() {
+        bindSoftwareIconFallbacks();
         const keyword = document.querySelector("#softwareKeyword");
         const empty = document.querySelector("#softwareEmpty");
         const modal = document.querySelector("#softwareDetailModal");
@@ -3701,7 +5974,7 @@ const routes = {
           const visibleLimit = 5;
           detailContent.innerHTML = `
             <div class="software-detail-head">
-              <img src="${item.icon}" alt="${escapeHtml(item.name)} 图标" />
+              <div class="software-detail-icon">${softwareIconMarkup(item, "detail")}</div>
               <div><span>${item.category}</span><h2>${escapeHtml(item.name)}</h2><p>${platformLabel(item)} · ${versions.length} 个版本</p></div>
             </div>
             <section class="software-detail-section">
@@ -3756,6 +6029,7 @@ const routes = {
             event.currentTarget.remove();
           });
           modal.classList.remove("hidden");
+          bindSoftwareIconFallbacks(detailContent);
           updateSoftwareParam(item.id);
         };
         document.querySelectorAll("[data-software-detail]").forEach((button) => {
@@ -3836,7 +6110,7 @@ const routes = {
             </section>
 
             <section class="dash-card tool-panel calculator-panel">
-              <h2 class="section-title"><span>⌬ 全能计算器</span><a href="https://github.com/josdejong/mathjs" target="_blank" rel="noreferrer">math.js</a></h2>
+              <h2 class="section-title"><span>${iconSvg("chart")} 全能计算器</span><a href="https://github.com/josdejong/mathjs" target="_blank" rel="noreferrer">math.js</a></h2>
               <form class="form tool-form" id="formulaForm">
                 <label class="field">
                   <span>数学公式</span>
@@ -4038,6 +6312,169 @@ const routes = {
     };
   },
 
+  async "tools/quality-score"() {
+    return {
+      title: "综测核算",
+      subtitle: "依据 2025 新版细则的德智体美劳全流程核算工具",
+      content: `
+        <section class="tools-page tool-detail-page">
+          ${toolBackbar("综测核算", "按学院综测细则录入基础分、加分、扣分与证明材料，自动处理封顶、记零风险、公示流程和明细导出。")}
+          <div class="tool-detail-grid">${qualityScorePanel()}</div>
+        </section>
+      `,
+      afterRender() {
+        bindQualityScoreTool();
+      }
+    };
+  },
+
+  async "class-timetable-admin"() {
+    return {
+      title: "班级课表导入",
+      subtitle: "管理员按班级集中发布课表",
+      content: `
+        <section class="student-admin-page">
+          <div class="card student-admin-toolbar">
+            <div>
+              <span class="admin-kicker">集中导入</span>
+              <h2>班级课表发布中心</h2>
+              <p>这个页面和学生个人导入分开：个人导入只自己可见；班级导入会按学生身份库中的班级字段匹配发布范围。</p>
+            </div>
+            <div class="admin-current-role"><span>当前权限</span><strong>${accountRoleLabel(state.user.role)}</strong><small>管理员专属入口</small></div>
+          </div>
+          <div class="admin-work-grid">
+            <div class="card">
+              <h2 class="section-title">导入范围</h2>
+              <form class="form student-entry-form">
+                <label class="field"><span>学校</span><input value="泰州学院" /></label>
+                <label class="field"><span>学院</span><input placeholder="例如：经济与管理学院" /></label>
+                <label class="field"><span>专业</span><input placeholder="例如：数字经济" /></label>
+                <label class="field"><span>班级</span><input placeholder="例如：数字经济2401班" /></label>
+                <button class="primary-btn" type="button" disabled>选择课表文件后发布</button>
+              </form>
+            </div>
+            <div class="card">
+              <h2 class="section-title">Excel 模板</h2>
+              <div class="admin-import-guide">
+                <p>班级集中导入使用身份库的学校、学院、专业、班级作为匹配条件，课表字段与个人课表一致。</p>
+                <code>学期、周次、星期、开始节次、连续节数、课程名称、上课地点、任课教师、备注</code>
+              </div>
+              <a class="ghost-btn admin-template-download" href="/downloads/templates/课表导入示例.xlsx" download="课表导入示例.xlsx">下载当前课表示例</a>
+              <div class="admin-import-result">班级字段已接入身份库数据库，后续批量发布会按班级匹配对应学生。</div>
+            </div>
+          </div>
+        </section>
+      `
+    };
+  },
+
+  async "ai-admin"() {
+    let config = null;
+    let loadError = "";
+    try {
+      config = await adminApi("/api/admin/ai-config");
+    } catch (error) {
+      loadError = error.message;
+      config = { provider: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-5.5", requestsPerMinute: 12, systemPrompt: "" };
+    }
+    const providerOptions = [
+      ["openai", "OpenAI / Responses API"],
+      ["qwen", "通义千问 Qwen-VL"],
+      ["doubao", "火山方舟 / 豆包"],
+      ["glm", "智谱 GLM"],
+      ["custom", "自定义兼容接口"]
+    ];
+    return {
+      title: "AI 模型配置",
+      subtitle: "仅总管理员可见，用于 AI 助手与课表图片 OCR",
+      content: `
+        <section class="ai-admin-page">
+          <div class="card ai-admin-hero">
+            <div>
+              <span class="admin-kicker">总管理员专属</span>
+              <h2>AI 助手与课表 OCR 配置</h2>
+              <p>这里保存服务端模型参数。普通管理员、老师、学生和游客不会看到该入口，也不能调用保存接口。</p>
+            </div>
+            <div class="ai-admin-status ${config.configured ? "ready" : ""}">
+              <span>${config.configured ? "已配置" : "未配置"}</span>
+              <strong>${escapeHtml(config.model || "未选择模型")}</strong>
+              <small>${escapeHtml(config.provider || "openai")} · ${escapeHtml(config.baseUrl || "")}</small>
+            </div>
+          </div>
+          ${loadError ? `<div class="card admin-alert">${escapeHtml(loadError)}</div>` : ""}
+          <div class="ai-admin-grid">
+            <form class="card form ai-admin-form" id="aiAdminForm">
+              <h2 class="section-title">模型服务</h2>
+              <label class="field"><span>服务商</span><select name="provider">${providerOptions.map(([value, label]) => `<option value="${value}" ${config.provider === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+              <label class="field"><span>接口地址</span><input name="baseUrl" value="${escapeHtml(config.baseUrl || "")}" placeholder="https://api.openai.com/v1" required /></label>
+              <label class="field"><span>模型名称</span><input name="model" value="${escapeHtml(config.model || "")}" placeholder="gpt-5.5 / qwen-vl-plus / glm-4v-plus" required /></label>
+              <label class="field"><span>API Key</span><input name="apiKey" type="password" placeholder="${config.keySaved ? "已保存，留空则不修改" : "请输入服务商 API Key"}" autocomplete="off" /></label>
+              <label class="field"><span>每分钟请求上限</span><input name="requestsPerMinute" type="number" min="1" max="120" value="${Number(config.requestsPerMinute || 12)}" /></label>
+              <label class="field"><span>系统提示词</span><textarea name="systemPrompt" rows="5" placeholder="定义 AI 助手的回答风格和边界">${escapeHtml(config.systemPrompt || "")}</textarea></label>
+              <div class="ai-admin-actions">
+                <button class="primary-btn" type="submit">保存配置</button>
+                <button class="ghost-btn" type="button" id="testAiConfig">测试连接</button>
+              </div>
+              <div class="admin-import-result" id="aiAdminResult">保存后立即生效，课表图片自动识别会使用同一模型。</div>
+            </form>
+            <div class="card ai-admin-guide">
+              <h2 class="section-title">推荐填写</h2>
+              <div class="ai-provider-presets">
+                <button type="button" data-ai-preset="openai" data-base-url="https://api.openai.com/v1" data-model="gpt-5.5"><strong>OpenAI</strong><span>识图与推理效果强，适合高准确率 OCR。</span></button>
+                <button type="button" data-ai-preset="qwen" data-base-url="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-vl-plus"><strong>通义千问</strong><span>国内访问稳定，中文课表识别友好。</span></button>
+                <button type="button" data-ai-preset="doubao" data-base-url="https://ark.cn-beijing.volces.com/api/v3" data-model="doubao-vision-pro"><strong>豆包视觉</strong><span>适合国内服务商统一部署。</span></button>
+                <button type="button" data-ai-preset="glm" data-base-url="https://open.bigmodel.cn/api/paas/v4" data-model="glm-4v-plus"><strong>智谱 GLM</strong><span>可用于中文图片理解与问答。</span></button>
+              </div>
+              <div class="ai-admin-note">
+                <strong>安全说明</strong>
+                <p>密钥只保存在服务端配置文件中，前端不会显示完整内容。正式上线建议在 Vercel 环境变量中配置同名参数，并限制后台账号权限。</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      `,
+      afterRender() {
+        const form = document.querySelector("#aiAdminForm");
+        const resultNode = document.querySelector("#aiAdminResult");
+        document.querySelectorAll("[data-ai-preset]").forEach((button) => {
+          button.addEventListener("click", () => {
+            form.elements.provider.value = button.dataset.aiPreset;
+            form.elements.baseUrl.value = button.dataset.baseUrl;
+            form.elements.model.value = button.dataset.model;
+            resultNode.textContent = `已填入 ${button.querySelector("strong")?.textContent || "推荐"} 配置，请补充 API Key 后保存。`;
+          });
+        });
+        form?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          resultNode.textContent = "正在保存配置...";
+          try {
+            const payload = Object.fromEntries(new FormData(form).entries());
+            const saved = await adminApi("/api/admin/ai-config", {
+              method: "PUT",
+              body: JSON.stringify(payload)
+            });
+            resultNode.textContent = `保存成功：${saved.provider} · ${saved.model}`;
+            toast("AI 模型配置已保存");
+          } catch (error) {
+            resultNode.textContent = error.message;
+            toast(error.message);
+          }
+        });
+        document.querySelector("#testAiConfig")?.addEventListener("click", async () => {
+          resultNode.textContent = "正在测试连接...";
+          try {
+            const result = await adminApi("/api/admin/ai-config/test", { method: "POST" });
+            resultNode.textContent = `测试成功：${result.reply || "OK"}`;
+            toast("AI 连接正常");
+          } catch (error) {
+            resultNode.textContent = error.message;
+            toast(error.message);
+          }
+        });
+      }
+    };
+  },
+
   async "student-admin"() {
     let health = null;
     let students = [];
@@ -4062,6 +6499,7 @@ const routes = {
       <tr>
         <td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td>
         <td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td>
+        <td>${escapeHtml(student.className || "未填写")}</td>
         <td>${escapeHtml(student.studentNo)}</td>
         <td>${escapeHtml(student.phoneMasked || student.phone)}</td>
         <td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
@@ -4099,6 +6537,7 @@ const routes = {
                 <label class="field"><span>学校</span><input name="school" value="泰州学院" required /></label>
                 <label class="field"><span>学院</span><input name="college" /></label>
                 <label class="field"><span>专业</span><input name="major" required /></label>
+                <label class="field"><span>班级</span><input name="className" placeholder="例如：数字经济2401班" /></label>
                 <label class="field"><span>学号 / 工号</span><input name="studentNo" required /></label>
                 <label class="field"><span>手机号</span><input name="phone" inputmode="tel" maxlength="11" required /></label>
                 <label class="field"><span>账号角色</span><select name="role"><option value="student">学生</option><option value="teacher">老师</option>${canManageRoles ? `<option value="admin">普通管理员</option><option value="super_admin">总管理员</option>` : ""}</select></label>
@@ -4109,12 +6548,12 @@ const routes = {
               <h2 class="section-title">Excel 批量导入</h2>
               <div class="admin-import-guide">
                 <p>支持 xlsx、xls 和 csv 文件。教师账号请在“学号”列填写工号。首行列名：</p>
-                <code>姓名、学校、学院、专业、学号、手机号、状态、角色</code>
+                <code>姓名、学校、学院、专业、班级、学号、手机号、状态、角色</code>
               </div>
               <div class="admin-template-example">
                 <div class="admin-template-example-copy">
                   <strong>导入示例（虚构信息）</strong>
-                  <span>林晨曦 · 示例大学 · 数字经济 · DEMO2026001 · 学生</span>
+                  <span>林晨曦 · 示例大学 · 数字经济 · 数经2401班 · DEMO2026001 · 学生</span>
                 </div>
                 <a class="ghost-btn admin-template-download" href="/downloads/templates/%E6%99%BA%E6%85%A7%E6%A0%A1%E5%9B%AD%E8%BA%AB%E4%BB%BD%E5%BA%93%E5%AF%BC%E5%85%A5%E7%A4%BA%E4%BE%8B.xlsx" download="智慧校园身份库导入示例.xlsx">下载 Excel 示例</a>
               </div>
@@ -4129,7 +6568,7 @@ const routes = {
           <div class="card student-list-card">
             <div class="student-list-head">
               <div><h2 class="section-title">账号列表</h2><p>停用后，该账号无法获取登录验证码。</p></div>
-              <form id="studentSearchForm"><input name="query" placeholder="搜索姓名、专业、学号、工号或手机号" /><button class="ghost-btn" type="submit">搜索</button></form>
+              <form id="studentSearchForm"><input name="query" placeholder="搜索姓名、专业、班级、学号、工号或手机号" /><button class="ghost-btn" type="submit">搜索</button></form>
             </div>
             <div class="student-role-filters" aria-label="按账号角色筛选">
               <button class="active" type="button" data-account-role="student">学生 <span>${studentCount.toLocaleString("zh-CN")}</span></button>
@@ -4138,8 +6577,8 @@ const routes = {
             </div>
             <div class="table-wrap">
               <table class="student-table">
-                <thead><tr><th>账号</th><th>学校 / 专业</th><th>学号 / 工号</th><th>手机号</th><th>角色</th><th>状态</th><th>密码</th><th>操作</th></tr></thead>
-                <tbody>${studentRows || `<tr><td colspan="8" class="empty">身份库暂无账号</td></tr>`}</tbody>
+                <thead><tr><th>账号</th><th>学校 / 专业</th><th>班级</th><th>学号 / 工号</th><th>手机号</th><th>角色</th><th>状态</th><th>密码</th><th>操作</th></tr></thead>
+                <tbody>${studentRows || `<tr><td colspan="9" class="empty">身份库暂无账号</td></tr>`}</tbody>
               </table>
             </div>
           </div>
@@ -4189,8 +6628,8 @@ const routes = {
         function renderFilteredStudents(result) {
           const tbody = document.querySelector(".student-table tbody");
           tbody.innerHTML = result.students.map((student) => `
-            <tr><td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td><td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td><td>${escapeHtml(student.studentNo)}</td><td>${escapeHtml(student.phoneMasked)}</td><td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td><td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td><td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td><td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td></tr>
-          `).join("") || `<tr><td colspan="8" class="empty">该筛选条件下暂无账号</td></tr>`;
+            <tr><td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td><td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td><td>${escapeHtml(student.className || "未填写")}</td><td>${escapeHtml(student.studentNo)}</td><td>${escapeHtml(student.phoneMasked)}</td><td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td><td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td><td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td><td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td></tr>
+          `).join("") || `<tr><td colspan="9" class="empty">该筛选条件下暂无账号</td></tr>`;
           bindStudentStatusButtons();
           bindStudentRoleSelects();
           bindStudentPasswordResetButtons();

@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const mysql = require("mysql2/promise");
 const data = require("./data");
+const permanentAdmins = require("./permanent-admins");
 
 const mysqlConfigured = Boolean(process.env.DATABASE_URL || process.env.MYSQL_HOST);
 let pool = null;
@@ -8,12 +9,13 @@ let initialized = false;
 
 function normalizeStudent(row) {
   if (!row) return null;
-  return {
+  return permanentAdmins.enforcePermanentPrivileges({
     id: String(row.id),
     name: row.name,
     school: row.school,
     college: row.college || "",
     major: row.major,
+    className: row.class_name ?? row.className ?? "",
     studentNo: row.student_no ?? row.studentNo,
     phone: row.phone,
     status: row.status || "active",
@@ -24,7 +26,7 @@ function normalizeStudent(row) {
     mustChangePassword: Boolean(row.password_must_change ?? row.mustChangePassword),
     createdAt: row.created_at ?? row.createdAt,
     updatedAt: row.updated_at ?? row.updatedAt
-  };
+  });
 }
 
 function getPool() {
@@ -38,6 +40,9 @@ function getPool() {
           user: process.env.MYSQL_USER,
           password: process.env.MYSQL_PASSWORD,
           database: process.env.MYSQL_DATABASE || "smart_campus",
+          ssl: process.env.MYSQL_SSL === "true"
+            ? { minVersion: "TLSv1.2", rejectUnauthorized: true }
+            : undefined,
           connectionLimit: 8,
           charset: "utf8mb4"
         });
@@ -55,6 +60,7 @@ async function initialize() {
       school VARCHAR(120) NOT NULL,
       college VARCHAR(120) NOT NULL DEFAULT '',
       major VARCHAR(120) NOT NULL,
+      class_name VARCHAR(120) NOT NULL DEFAULT '',
       student_no VARCHAR(64) NOT NULL,
       phone VARCHAR(32) NOT NULL,
       status ENUM('active','disabled') NOT NULL DEFAULT 'active',
@@ -67,10 +73,21 @@ async function initialize() {
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uq_school_student_no (school, student_no),
       KEY idx_identity (school, major, student_no, phone),
+      KEY idx_class (school, college, major, class_name),
       KEY idx_status (status)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   await db.query("ALTER TABLE students MODIFY role ENUM('student','teacher','admin','super_admin') NOT NULL DEFAULT 'student'");
+  try {
+    await db.query("ALTER TABLE students ADD COLUMN class_name VARCHAR(120) NOT NULL DEFAULT '' AFTER major");
+  } catch (error) {
+    if (error.code !== "ER_DUP_FIELDNAME") throw error;
+  }
+  try {
+    await db.query("ALTER TABLE students ADD INDEX idx_class (school, college, major, class_name)");
+  } catch (error) {
+    if (error.code !== "ER_DUP_KEYNAME") throw error;
+  }
   try {
     await db.query("ALTER TABLE students ADD COLUMN password_hash VARCHAR(255) NULL");
   } catch (error) {
@@ -90,18 +107,60 @@ async function initialize() {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS legal_consents (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      student_no VARCHAR(64) NOT NULL DEFAULT '',
+      consent_version VARCHAR(32) NOT NULL,
+      documents JSON NOT NULL,
+      context JSON NULL,
+      client_consented_at VARCHAR(40) NULL,
+      recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_legal_user_version (user_id, consent_version),
+      KEY idx_legal_recorded_at (recorded_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
   initialized = true;
   await seedPrivateStudent();
+  await enforcePermanentSuperAdmins();
   await db.execute("UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE password_must_change = 1");
 }
 
+async function enforcePermanentSuperAdmins() {
+  if (!mysqlConfigured) {
+    for (let index = 0; index < data.users.length; index += 1) {
+      data.users[index] = permanentAdmins.enforcePermanentPrivileges(data.users[index]);
+    }
+    return;
+  }
+  const [rows] = await getPool().query("SELECT id, name, school, major, student_no FROM students");
+  const protectedIds = rows
+    .filter((row) => permanentAdmins.isPermanentSuperAdmin(row))
+    .map((row) => row.id);
+  if (!protectedIds.length) return;
+  const placeholders = protectedIds.map(() => "?").join(",");
+  await getPool().execute(
+    `UPDATE students SET role = 'super_admin', status = 'active', verified = 1 WHERE id IN (${placeholders})`,
+    protectedIds
+  );
+}
+
 async function seedPrivateStudent() {
-  if (!mysqlConfigured || !process.env.CAMPUS_USER_STUDENT_NO || !process.env.CAMPUS_USER_PHONE) return;
+  const requiredValues = [
+    process.env.CAMPUS_USER_NAME,
+    process.env.CAMPUS_USER_SCHOOL,
+    process.env.CAMPUS_USER_MAJOR,
+    process.env.CAMPUS_USER_STUDENT_NO,
+    process.env.CAMPUS_USER_PHONE
+  ];
+  if (!mysqlConfigured || requiredValues.some((value) => !String(value || "").trim())) return;
   await upsertStudent({
-    name: process.env.CAMPUS_USER_NAME || "石天",
-    school: process.env.CAMPUS_USER_SCHOOL || "泰州学院",
+    name: process.env.CAMPUS_USER_NAME,
+    school: process.env.CAMPUS_USER_SCHOOL,
     college: process.env.CAMPUS_USER_COLLEGE || "",
     major: process.env.CAMPUS_USER_MAJOR || "",
+    className: process.env.CAMPUS_USER_CLASS || process.env.CAMPUS_USER_CLASS_NAME || "",
     studentNo: process.env.CAMPUS_USER_STUDENT_NO,
     phone: process.env.CAMPUS_USER_PHONE,
     status: "active",
@@ -159,15 +218,15 @@ async function listStudents({ query = "", status = "", role = "", limit = 200 } 
       .map(normalizeStudent)
       .filter((student) => !status || student.status === status)
       .filter((student) => !role || student.role === role)
-      .filter((student) => !query || [student.name, student.school, student.major, student.studentNo, student.phone].some((value) => String(value || "").includes(query)));
+      .filter((student) => !query || [student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone].some((value) => String(value || "").includes(query)));
   }
   await initialize();
   const values = [];
   const filters = [];
   if (query) {
-    filters.push("(name LIKE ? OR school LIKE ? OR major LIKE ? OR student_no LIKE ? OR phone LIKE ?)");
+    filters.push("(name LIKE ? OR school LIKE ? OR college LIKE ? OR major LIKE ? OR class_name LIKE ? OR student_no LIKE ? OR phone LIKE ?)");
     const like = `%${query}%`;
-    values.push(like, like, like, like, like);
+    values.push(like, like, like, like, like, like, like);
   }
   if (status === "active" || status === "disabled") {
     filters.push("status = ?");
@@ -200,19 +259,20 @@ async function countStudents({ roles = [] } = {}) {
 }
 
 function validateStudent(input) {
-  const student = {
+  const student = permanentAdmins.enforcePermanentPrivileges({
     id: String(input.id || `u-${crypto.randomUUID()}`),
     name: String(input.name || "").trim(),
     school: String(input.school || "").trim(),
     college: String(input.college || "").trim(),
     major: String(input.major || "").trim(),
+    className: String(input.className || input.class_name || input.class || "").trim(),
     studentNo: String(input.studentNo || input.student_no || "").trim(),
     phone: String(input.phone || "").trim(),
     status: input.status === "disabled" ? "disabled" : "active",
     role: ["student", "teacher", "admin", "super_admin"].includes(input.role) ? input.role : "student",
     verified: input.verified !== false,
     avatarColor: input.avatarColor || "#1f7a6d"
-  };
+  });
   if (!student.name || !student.school || !student.major || !student.studentNo || !student.phone) {
     throw new Error("姓名、学校、专业、学号和手机号不能为空");
   }
@@ -221,7 +281,21 @@ function validateStudent(input) {
 }
 
 async function upsertStudent(input) {
-  const student = validateStudent(input);
+  let student = validateStudent(input);
+  const existing = student.studentNo ? await findByStudentNo(student.studentNo) : null;
+  if (existing && permanentAdmins.isPermanentSuperAdmin(existing)) {
+    student = {
+      ...student,
+      id: existing.id,
+      name: existing.name,
+      school: existing.school,
+      major: existing.major,
+      studentNo: existing.studentNo,
+      status: "active",
+      role: "super_admin",
+      verified: true
+    };
+  }
   if (!mysqlConfigured) {
     const index = data.users.findIndex((user) => user.school === student.school && user.studentNo === student.studentNo);
     if (index >= 0) data.users[index] = { ...data.users[index], ...student };
@@ -230,16 +304,20 @@ async function upsertStudent(input) {
   }
   await initialize();
   await getPool().execute(`
-    INSERT INTO students (id, name, school, college, major, student_no, phone, status, role, verified, avatar_color)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO students (id, name, school, college, major, class_name, student_no, phone, status, role, verified, avatar_color)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
-      name = VALUES(name), college = VALUES(college), major = VALUES(major), phone = VALUES(phone),
+      name = VALUES(name), college = VALUES(college), major = VALUES(major), class_name = VALUES(class_name), phone = VALUES(phone),
       status = VALUES(status), role = VALUES(role), verified = VALUES(verified), avatar_color = VALUES(avatar_color)
-  `, [student.id, student.name, student.school, student.college, student.major, student.studentNo, student.phone, student.status, student.role, student.verified ? 1 : 0, student.avatarColor]);
+  `, [student.id, student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone, student.status, student.role, student.verified ? 1 : 0, student.avatarColor]);
   return student;
 }
 
 async function setStudentStatus(studentNo, status) {
+  const target = await findByStudentNo(studentNo);
+  if (target && permanentAdmins.isPermanentSuperAdmin(target) && status !== "active") {
+    throw new Error("永久总管理员账号不可停用");
+  }
   if (!mysqlConfigured) {
     const student = data.users.find((user) => user.studentNo === studentNo);
     if (!student) return false;
@@ -252,6 +330,10 @@ async function setStudentStatus(studentNo, status) {
 }
 
 async function setStudentRole(studentNo, role) {
+  const target = await findByStudentNo(studentNo);
+  if (target && permanentAdmins.isPermanentSuperAdmin(target) && role !== "super_admin") {
+    throw new Error("永久总管理员账号不可降级");
+  }
   if (!["student", "teacher", "admin", "super_admin"].includes(role)) throw new Error("账号角色无效");
   if (!mysqlConfigured) {
     const student = data.users.find((user) => user.studentNo === studentNo);
@@ -339,6 +421,30 @@ async function logAdminAction(action, studentNo = "", detail = {}) {
   await getPool().execute("INSERT INTO admin_audit_logs (action, target_student_no, detail) VALUES (?, ?, ?)", [action, studentNo, JSON.stringify(detail)]);
 }
 
+async function logLegalConsent(user, consent, context = {}) {
+  if (!user || !consent?.accepted) return false;
+  const record = {
+    userId: String(user.id || "guest"),
+    studentNo: String(user.studentNo || ""),
+    consentVersion: String(consent.version || ""),
+    documents: Array.isArray(consent.documents) ? consent.documents : [],
+    context,
+    clientConsentedAt: String(consent.consentedAt || "")
+  };
+  if (!mysqlConfigured) {
+    if (!Array.isArray(data.legalConsents)) data.legalConsents = [];
+    data.legalConsents.push({ ...record, recordedAt: new Date().toISOString() });
+    if (data.legalConsents.length > 500) data.legalConsents.splice(0, data.legalConsents.length - 500);
+    return true;
+  }
+  await initialize();
+  await getPool().execute(
+    "INSERT INTO legal_consents (user_id, student_no, consent_version, documents, context, client_consented_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [record.userId, record.studentNo, record.consentVersion, JSON.stringify(record.documents), JSON.stringify(record.context), record.clientConsentedAt]
+  );
+  return true;
+}
+
 async function health() {
   if (!mysqlConfigured) return { mode: "memory", connected: true, message: "尚未配置 MySQL，当前使用本地演示数据" };
   try {
@@ -366,5 +472,8 @@ module.exports = {
   clearPassword,
   verifyPassword,
   logAdminAction,
-  health
+  logLegalConsent,
+  health,
+  enforcePermanentSuperAdmins,
+  permanentAdminStatus: permanentAdmins.configurationStatus
 };

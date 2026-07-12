@@ -1,0 +1,13 @@
+.env
+.env.*
+.wrangler/
+functions/
+output/
+design-qa.md
+*.pid
+*.jobid
+*.log
+server/ai-runtime.json
+server/payment-orders.json
+server/user-timetable-preferences.json
+server/user-timetables.json

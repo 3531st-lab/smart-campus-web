@@ -17,6 +17,12 @@ loadLocalEnv();
 const data = require("./data");
 const XLSX = require("xlsx");
 const studentStore = require("./student-store");
+const timetableStore = require("./timetable-store");
+const reservationStore = require("./reservation-store");
+const notificationStore = require("./notification-store");
+const paymentStore = require("./payment-store");
+const integrations = require("./integrations");
+const campusNewsService = require("./campus-news");
 const examCatalog = require("./exams-data.json");
 
 const PORT = Number(process.env.PORT || 5173);
@@ -28,15 +34,59 @@ const TOKEN_SECRET = process.env.AUTH_SECRET || "smart-campus-public-demo-v1";
 const SMS_TOKEN_SECRET = process.env.SMS_TOKEN_SECRET || TOKEN_SECRET;
 const SMS_CODE_TTL_MS = 5 * 60 * 1000;
 const SMS_RESEND_MS = 60 * 1000;
-const AI_PROVIDER = String(process.env.AI_PROVIDER || "openai").toLowerCase();
-const AI_BASE_URL = String(process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-const AI_API_KEY = String(process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "");
-const AI_MODEL = String(process.env.AI_MODEL || "gpt-5.5");
-const AI_SYSTEM_PROMPT = String(process.env.AI_SYSTEM_PROMPT || "你是一个能力全面、准确、实用的 AI 助手。你可以回答通用知识、学习、写作、编程、数据分析、职业规划和校园生活等问题。请直接解决用户问题，不要把回答局限于校园场景。");
-const AI_MAX_REQUESTS_PER_MINUTE = Math.max(1, Number(process.env.AI_MAX_REQUESTS_PER_MINUTE || 12));
+const AUTH_TOKEN_TTL_MS = Math.max(Number(process.env.AUTH_TOKEN_TTL_MS || 8 * 60 * 60 * 1000), 30 * 60 * 1000);
+const MAX_JSON_BODY_BYTES = Number(process.env.MAX_JSON_BODY_BYTES || 1024 * 1024);
+const MAX_UPLOAD_BODY_BYTES = Number(process.env.MAX_UPLOAD_BODY_BYTES || 8 * 1024 * 1024);
+const URL_MAX_LENGTH = Number(process.env.URL_MAX_LENGTH || 2048);
+const SECURITY_BUILD = "security-hardening-v89-20260617";
+const LEGAL_CONSENT_VERSION = "2026.06.20";
+const PUBLIC_APP_URL = String(process.env.PUBLIC_APP_URL || "https://zhihueixiaoyuan.pages.dev").replace(/\/+$/, "");
+const rateLimits = new Map();
+const authFailures = new Map();
+const AI_RUNTIME_CONFIG_PATH = path.join(__dirname, "ai-runtime.json");
+let AI_PROVIDER = String(process.env.AI_PROVIDER || "openai").toLowerCase();
+let AI_BASE_URL = String(process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+let AI_API_KEY = String(process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "");
+let AI_MODEL = String(process.env.AI_MODEL || "gpt-5.5");
+let AI_SYSTEM_PROMPT = String(process.env.AI_SYSTEM_PROMPT || "你是一个能力全面、准确、实用的 AI 助手。你可以回答通用知识、学习、写作、编程、数据分析、职业规划和校园生活等问题。请直接解决用户问题，不要把回答局限于校园场景。");
+let AI_MAX_REQUESTS_PER_MINUTE = Math.max(1, Number(process.env.AI_MAX_REQUESTS_PER_MINUTE || 12));
 const aiRateLimits = new Map();
+
+function applyAiRuntimeConfig(config = {}) {
+  if (config.provider) AI_PROVIDER = String(config.provider).trim().toLowerCase();
+  if (config.baseUrl) AI_BASE_URL = String(config.baseUrl).trim().replace(/\/+$/, "");
+  if (config.apiKey) AI_API_KEY = String(config.apiKey).trim();
+  if (config.model) AI_MODEL = String(config.model).trim();
+  if (config.systemPrompt) AI_SYSTEM_PROMPT = String(config.systemPrompt).trim();
+  if (config.requestsPerMinute) AI_MAX_REQUESTS_PER_MINUTE = Math.max(1, Number(config.requestsPerMinute || 12));
+}
+
+function loadAiRuntimeConfig() {
+  if (!fs.existsSync(AI_RUNTIME_CONFIG_PATH)) return;
+  try {
+    applyAiRuntimeConfig(JSON.parse(fs.readFileSync(AI_RUNTIME_CONFIG_PATH, "utf8")));
+  } catch (error) {
+    console.warn("Failed to load AI runtime config:", error.message);
+  }
+}
+
+function saveAiRuntimeConfig(config = {}) {
+  const nextConfig = {
+    provider: String(config.provider || AI_PROVIDER || "openai").trim().toLowerCase(),
+    baseUrl: String(config.baseUrl || AI_BASE_URL || "https://api.openai.com/v1").trim().replace(/\/+$/, ""),
+    apiKey: config.apiKey ? String(config.apiKey).trim() : AI_API_KEY,
+    model: String(config.model || AI_MODEL || "gpt-5.5").trim(),
+    systemPrompt: String(config.systemPrompt || AI_SYSTEM_PROMPT || "").trim(),
+    requestsPerMinute: Math.max(1, Number(config.requestsPerMinute || AI_MAX_REQUESTS_PER_MINUTE || 12)),
+    updatedAt: new Date().toISOString()
+  };
+  applyAiRuntimeConfig(nextConfig);
+  fs.writeFileSync(AI_RUNTIME_CONFIG_PATH, JSON.stringify(nextConfig, null, 2));
+  return nextConfig;
+}
+
+loadAiRuntimeConfig();
 const libraryReservations = [];
-const paymentOrders = [];
 const importedNews = [];
 const conversionJobs = [];
 
@@ -60,12 +110,6 @@ const librarySeats = libraryZones.flatMap((zone) => Array.from({ length: Math.mi
   x: zone.x + 4 + (index % 6) * 6,
   y: zone.y + 5 + Math.floor(index / 6) * 8
 })));
-const campusNews = [
-  { title: "泰州学院智慧校园服务持续升级", source: "泰州学院", category: "官网公告", date: "06-14", url: "https://www.tzu.edu.cn/" },
-  { title: "数字经济专业实践周活动安排", source: "经济与管理学院", category: "二级学院", date: "06-13", url: "https://www.tzu.edu.cn/" },
-  { title: "青年志愿服务项目开始招募", source: "校团委", category: "团委社团", date: "06-12", url: "https://www.tzu.edu.cn/" }
-];
-
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -75,22 +119,147 @@ const mimeTypes = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".mp3": "audio/mpeg",
   ".wav": "audio/wav",
   ".ico": "image/x-icon"
 };
 
+function requestContext(res) {
+  return res.__securityReq || {};
+}
+
+function allowedCorsOrigin(req) {
+  const headers = req.headers || {};
+  const origin = String(headers.origin || "");
+  if (!origin) return "";
+  const proto = String(headers["x-forwarded-proto"] || (req.socket && req.socket.encrypted ? "https" : "http")).split(",")[0].trim();
+  const host = String(headers["x-forwarded-host"] || headers.host || "").split(",")[0].trim();
+  const sameHostOrigin = host ? `${proto}://${host}` : "";
+  const allowed = new Set([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    sameHostOrigin,
+    ...String(process.env.CORS_ORIGINS || "").split(",").map((item) => item.trim()).filter(Boolean)
+  ]);
+  return allowed.has(origin) ? origin : "";
+}
+
+function securityHeaders(req, extra = {}) {
+  const corsOrigin = allowedCorsOrigin(req || {});
+  const headers = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Content-Security-Policy": [
+      "default-src 'self'",
+      "base-uri 'self'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob: https://images.unsplash.com",
+      "font-src 'self' data:",
+      "media-src 'self' data: blob:",
+      "connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com https://api.bigdatacloud.net"
+    ].join("; "),
+    "X-Security-Build": SECURITY_BUILD,
+    ...extra
+  };
+  if (corsOrigin) {
+    headers["Access-Control-Allow-Origin"] = corsOrigin;
+    headers["Vary"] = "Origin";
+    headers["Access-Control-Allow-Credentials"] = "true";
+  }
+  return headers;
+}
+
 function sendJson(res, status, payload) {
-  res.writeHead(status, {
+  res.writeHead(status, securityHeaders(requestContext(res), {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type,Authorization"
-  });
+  }));
   res.end(JSON.stringify(payload, null, 2));
 }
 
 function sendError(res, status, message) {
   sendJson(res, status, { error: message });
+}
+
+function requireLegalConsent(res, body) {
+  const consent = body?.legalConsent;
+  const valid = consent
+    && consent.accepted === true
+    && consent.version === LEGAL_CONSENT_VERSION
+    && Array.isArray(consent.documents)
+    && consent.documents.includes("user_agreement")
+    && consent.documents.includes("privacy_policy");
+  if (!valid) sendError(res, 428, "请先阅读并同意当前版本的用户协议与隐私政策");
+  return valid;
+}
+
+function clientIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.socket.remoteAddress || "unknown";
+}
+
+function consumeRateLimit(key, limit, windowMs) {
+  const now = Date.now();
+  const recent = (rateLimits.get(key) || []).filter((time) => now - time < windowMs);
+  if (recent.length >= limit) {
+    const error = new Error("请求过于频繁，请稍后再试");
+    error.statusCode = 429;
+    throw error;
+  }
+  recent.push(now);
+  rateLimits.set(key, recent);
+}
+
+function guardRequest(req, route) {
+  if (String(req.url || "").length > URL_MAX_LENGTH) {
+    const error = new Error("请求地址过长");
+    error.statusCode = 414;
+    throw error;
+  }
+  const ip = clientIp(req);
+  const isAuthRoute = route.includes("/api/auth/");
+  consumeRateLimit(`${ip}:${isAuthRoute ? "auth" : route}`, isAuthRoute ? 20 : 120, 60 * 1000);
+}
+
+function authFailureKey(req, body = {}) {
+  const identity = [body.school, body.major, body.studentId || body.teacherId || body.workId, body.phone]
+    .filter(Boolean)
+    .join("|")
+    .toLowerCase();
+  return `${clientIp(req)}:${identity || "unknown"}`;
+}
+
+function blockIfAuthThrottled(req, body = {}) {
+  const key = authFailureKey(req, body);
+  const now = Date.now();
+  const recent = (authFailures.get(key) || []).filter((time) => now - time < 10 * 60 * 1000);
+  if (recent.length >= 8) {
+    const error = new Error("登录失败次数过多，请稍后再试");
+    error.statusCode = 429;
+    throw error;
+  }
+}
+
+function recordAuthFailure(req, body = {}) {
+  const key = authFailureKey(req, body);
+  const now = Date.now();
+  const recent = (authFailures.get(key) || []).filter((time) => now - time < 10 * 60 * 1000);
+  recent.push(now);
+  authFailures.set(key, recent);
+  blockIfAuthThrottled(req, body);
+}
+
+function clearAuthFailures(req, body = {}) {
+  authFailures.delete(authFailureKey(req, body));
 }
 
 function aiStatus() {
@@ -99,6 +268,8 @@ function aiStatus() {
     provider: AI_PROVIDER,
     model: AI_MODEL,
     baseUrl: AI_BASE_URL.replace(/:\/\/([^/@]+)@/, "://***@"),
+    keySaved: Boolean(AI_API_KEY),
+    systemPrompt: AI_SYSTEM_PROMPT,
     requestsPerMinute: AI_MAX_REQUESTS_PER_MINUTE
   };
 }
@@ -123,15 +294,35 @@ function normalizeAiMessages(messages) {
     .map((item) => ({ role: item.role, content: String(item.text || item.content).slice(0, 20000) }));
 }
 
-async function requestAi(messages) {
-  if (!AI_API_KEY) throw new Error("AI 服务尚未配置：请在服务端 .env 中填写 AI_API_KEY");
+async function requestAi(messages, personalConfig = {}) {
+  const provider = String(personalConfig.provider || AI_PROVIDER || "openai").trim().toLowerCase();
+  const baseUrl = String(personalConfig.baseUrl || AI_BASE_URL || "").trim().replace(/\/+$/, "");
+  const apiKey = String(personalConfig.apiKey || AI_API_KEY || "").trim();
+  const model = String(personalConfig.model || AI_MODEL || "").trim();
+  const systemPrompt = String(personalConfig.systemPrompt || AI_SYSTEM_PROMPT || "").trim();
+  if (!apiKey) throw new Error("AI 服务尚未配置：请在右侧填写个人 API Key");
+  if (!model) throw new Error("请填写模型名称");
+  if (!/^https:\/\//i.test(baseUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(baseUrl)) {
+    throw new Error("Base URL 必须使用 HTTPS，或指向本机服务");
+  }
+  const endpoint = new URL(baseUrl);
+  const allowedHosts = new Set([
+    "api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "api.deepseek.com",
+    "dashscope.aliyuncs.com", "api.moonshot.ai", "open.bigmodel.cn", "api.baiduqianfan.ai",
+    "api.hunyuan.cloud.tencent.com", "spark-api-open.xf-yun.com", "api.minimax.chat",
+    "ark.cn-beijing.volces.com", "api.siliconflow.cn", "openrouter.ai", "api.x.ai", "api.groq.com",
+    "localhost", "127.0.0.1"
+  ]);
+  if (!allowedHosts.has(endpoint.hostname) && !endpoint.hostname.endsWith(".openai.azure.com")) {
+    throw new Error("该 API 域名尚未列入安全允许清单");
+  }
   const signal = AbortSignal.timeout(90000);
-  if (AI_PROVIDER === "openai" || AI_PROVIDER === "responses") {
-    const response = await fetch(`${AI_BASE_URL}/responses`, {
+  if (provider === "openai" || provider === "responses") {
+    const response = await fetch(`${baseUrl}/responses`, {
       method: "POST",
       signal,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${AI_API_KEY}` },
-      body: JSON.stringify({ model: AI_MODEL, instructions: AI_SYSTEM_PROMPT, input: messages })
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, instructions: systemPrompt, input: messages })
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error?.message || `AI 服务请求失败（${response.status}）`);
@@ -140,13 +331,42 @@ async function requestAi(messages) {
     if (!reply) throw new Error("AI 服务未返回可显示的文本");
     return reply;
   }
-  const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
+  if (provider === "anthropic") {
+    const response = await fetch(`${baseUrl}/messages`, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model, system: systemPrompt, max_tokens: 4096, messages })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error?.message || `AI 服务请求失败（${response.status}）`);
+    const reply = payload.content?.find((item) => item.type === "text")?.text;
+    if (!reply) throw new Error("AI 服务未返回可显示的文本");
+    return reply;
+  }
+  if (provider === "gemini") {
+    const response = await fetch(`${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: messages.map((item) => ({ role: item.role === "assistant" ? "model" : "user", parts: [{ text: item.content }] }))
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error?.message || `AI 服务请求失败（${response.status}）`);
+    const reply = payload.candidates?.[0]?.content?.parts?.map((item) => item.text || "").join("");
+    if (!reply) throw new Error("AI 服务未返回可显示的文本");
+    return reply;
+  }
+  const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     signal,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${AI_API_KEY}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
-      model: AI_MODEL,
-      messages: [{ role: "system", content: AI_SYSTEM_PROMPT }, ...messages],
+      model,
+      messages: [{ role: "system", content: systemPrompt }, ...messages],
       temperature: 0.7
     })
   });
@@ -157,12 +377,90 @@ async function requestAi(messages) {
   return reply;
 }
 
-function parseBody(req) {
+function parseAiJsonArray(text) {
+  const raw = String(text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  const start = raw.indexOf("[");
+  const end = raw.lastIndexOf("]");
+  if (start < 0 || end < start) return [];
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeOcrCourse(row, index, defaults = {}) {
+  const read = (...keys) => {
+    for (const key of keys) {
+      if (row && row[key] !== undefined && row[key] !== null && row[key] !== "") return row[key];
+    }
+    return "";
+  };
+  return {
+    id: `ocr-${Date.now()}-${index}`,
+    semester: read("semester", "学期") || defaults.semester || "2025-2026学年第二学期",
+    weeks: read("weeks", "week", "周次") || defaults.week || "1-20",
+    day: read("day", "weekday", "星期") || "",
+    startSection: Number(read("startSection", "section", "开始节次", "起始节次") || 1),
+    sectionCount: Number(read("sectionCount", "duration", "连续节数", "节数") || 2),
+    course: String(read("course", "title", "课程名称", "课程") || "").trim(),
+    location: String(read("location", "room", "上课地点", "地点", "教室") || "").trim(),
+    teacher: String(read("teacher", "任课教师", "教师") || "").trim(),
+    note: String(read("note", "备注") || "图片OCR识别").trim(),
+    source: "图片OCR"
+  };
+}
+
+async function requestTimetableOcr(imageData, defaults = {}) {
+  if (!AI_API_KEY) throw new Error("AI OCR 尚未配置：请先在服务端 .env 配置 AI_API_KEY / OPENAI_API_KEY");
+  if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(String(imageData || ""))) {
+    throw new Error("请上传 JPG、PNG 或 WebP 课表图片");
+  }
+  const prompt = [
+    "请从这张中文课表截图中识别课程信息，只输出 JSON 数组，不要输出解释。",
+    "每一项字段必须使用：semester, weeks, day, startSection, sectionCount, course, location, teacher, note。",
+    "day 使用 周一/周二/周三/周四/周五/周六/周日。",
+    "startSection 是课程开始节次数字，sectionCount 是连续节数。",
+    "如果截图显示第几周，请把 weeks 填为该周数字；如果无法判断，用传入默认周次。",
+    "课程名、校区、教室、老师尽量从色块文字中提取；不确定的内容可放到 note。",
+    `默认学期：${defaults.semester || "2025-2026学年第二学期"}；默认周次：${defaults.week || "1-20"}。`
+  ].join("\n");
+  const signal = AbortSignal.timeout(120000);
+  const response = await fetch(`${AI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${AI_API_KEY}` },
+    body: JSON.stringify({
+      model: AI_MODEL,
+      temperature: 0,
+      messages: [
+        { role: "system", content: "你是课表 OCR 结构化助手。只返回合法 JSON 数组。" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: imageData } }
+          ]
+        }
+      ]
+    })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error?.message || payload.message || `AI OCR 识别失败（${response.status}）`);
+  const text = payload.choices?.[0]?.message?.content || "";
+  return parseAiJsonArray(text)
+    .map((row, index) => normalizeOcrCourse(row, index, defaults))
+    .filter((course) => course.course && course.day);
+}
+
+function parseBody(req, options = {}) {
+  const limitBytes = options.limitBytes || MAX_JSON_BODY_BYTES;
   return new Promise((resolve, reject) => {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 12 * 1024 * 1024) {
+      if (Buffer.byteLength(body) > limitBytes) {
         reject(new Error("请求体过大"));
         req.destroy();
       }
@@ -185,11 +483,37 @@ async function getCurrentUser(req) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   const userId = verifyToken(token) || sessions.get(token);
+  if (!userId) return null;
   return studentStore.findById(userId);
 }
 
+function parseRawBody(req, options = {}) {
+  const limitBytes = options.limitBytes || MAX_JSON_BODY_BYTES;
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > limitBytes) {
+        reject(new Error("Request body is too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
 function createToken(userId) {
-  const payload = Buffer.from(userId, "utf8").toString("base64url");
+  const now = Date.now();
+  const payload = Buffer.from(JSON.stringify({
+    sub: userId,
+    iat: now,
+    exp: now + AUTH_TOKEN_TTL_MS,
+    jti: crypto.randomUUID()
+  }), "utf8").toString("base64url");
   const signature = crypto.createHmac("sha256", TOKEN_SECRET).update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }
@@ -202,7 +526,10 @@ function verifyToken(token) {
   const expectedBuffer = Buffer.from(expected);
   if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return "";
   try {
-    return Buffer.from(payload, "base64url").toString("utf8");
+    const decoded = Buffer.from(payload, "base64url").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed.sub || !parsed.exp || Date.now() > parsed.exp) return "";
+    return String(parsed.sub);
   } catch {
     return "";
   }
@@ -226,6 +553,7 @@ function publicUser(user) {
     role: user.role,
     college: user.college,
     major: user.major,
+    className: user.className,
     studentNo: user.studentNo,
     verified: user.verified,
     avatarColor: user.avatarColor,
@@ -331,6 +659,67 @@ function nextId(prefix) {
   return `${prefix}-${Date.now()}-${crypto.randomBytes(2).toString("hex")}`;
 }
 
+function courseIdentity(course = {}) {
+  return [
+    course.semester,
+    Array.isArray(course.weeks) ? course.weeks.join(",") : course.weeks,
+    course.day,
+    course.startSection,
+    course.sectionCount,
+    course.course,
+    course.location
+  ].map((value) => String(value || "").trim()).join("|");
+}
+
+function dedupeCourses(courses = []) {
+  const seen = new Set();
+  return courses.filter((course) => {
+    const key = courseIdentity(course);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function buildUserNotifications(user) {
+  const reservations = await reservationStore.listForUser(user);
+  const retentionDays = 14;
+  const cutoff = Date.now() - retentionDays * 86400000;
+  const notifications = reservations
+    .filter((item) => {
+      const timestamp = Date.parse(item.updatedAt || item.createdAt || "");
+      return !Number.isFinite(timestamp) || timestamp >= cutoff;
+    })
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+    .slice(0, 100)
+    .map((item) => {
+    const statusTitle = item.status === "approved"
+      ? "实验室预约已通过"
+      : item.status === "rejected"
+      ? "实验室预约未通过"
+      : "实验室预约待审批";
+    const statusBody = item.status === "approved"
+      ? `${item.labName} 已为你保留 ${item.slot} 时段。`
+      : item.status === "rejected"
+      ? `${item.labName} ${item.slot} 预约未通过${item.adminNote ? `，原因：${item.adminNote}` : "。"}`
+      : `${item.labName} ${item.slot} 预约已提交，等待管理员审批。`;
+    const revision = Buffer.from(`${item.status}|${item.updatedAt || item.createdAt || ""}`).toString("base64url").slice(0, 24);
+    return {
+      id: `reservation-${item.id}-${revision}`,
+      title: statusTitle,
+      type: "预约通知",
+      body: statusBody,
+      read: false,
+      createdAt: item.updatedAt || item.createdAt || "",
+      sourceId: item.id,
+      status: item.status
+    };
+  });
+  await notificationStore.cleanup(retentionDays);
+  const readIds = await notificationStore.readIds(user.id, notifications.map((item) => item.id));
+  return notifications.map((item) => ({ ...item, read: readIds.has(item.id) }));
+}
+
 function maskPhone(phone) {
   const value = String(phone || "");
   return value.length >= 7 ? `${value.slice(0, 3)}****${value.slice(-4)}` : value;
@@ -347,6 +736,7 @@ function importedStudent(row) {
     school: row["学校"] ?? row.school,
     college: row["学院"] ?? row.college ?? "",
     major: row["专业"] ?? row.major,
+    className: row["班级"] ?? row["行政班"] ?? row["班级名称"] ?? row.className ?? row.class_name ?? "",
     studentNo: row["学号"] ?? row["工号"] ?? row.studentNo ?? row.student_no,
     phone: String(row["手机号"] ?? row.phone ?? "").replace(/\.0$/, ""),
     status: ["停用", "disabled"].includes(row["状态"] ?? row.status) ? "disabled" : "active",
@@ -359,11 +749,22 @@ function importedStudent(row) {
 }
 
 function handleStatic(req, res) {
-  const requestPath = decodeURIComponent(new URL(req.url, `http://${req.headers.host}`).pathname);
+  let requestPath = "/";
+  try {
+    requestPath = decodeURIComponent(new URL(req.url, `http://${req.headers.host}`).pathname);
+  } catch {
+    sendError(res, 400, "请求地址无效");
+    return;
+  }
+  if (requestPath.includes("\0")) {
+    sendError(res, 400, "请求地址无效");
+    return;
+  }
   const safePath = path.normalize(requestPath).replace(/^(\.\.[/\\])+/, "");
   let filePath = path.join(PUBLIC_DIR, safePath === "/" ? "index.html" : safePath);
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  const relativePath = path.relative(PUBLIC_DIR, filePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     sendError(res, 403, "禁止访问");
     return;
   }
@@ -373,7 +774,15 @@ function handleStatic(req, res) {
   }
 
   const ext = path.extname(filePath).toLowerCase();
-  res.writeHead(200, { "Content-Type": mimeTypes[ext] || "application/octet-stream" });
+  const isHtml = ext === ".html";
+  res.writeHead(200, securityHeaders(req, {
+    "Content-Type": mimeTypes[ext] || "application/octet-stream",
+    "Cache-Control": isHtml ? "no-store" : "public, max-age=3600"
+  }));
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
   fs.createReadStream(filePath).pipe(res);
 }
 
@@ -386,14 +795,34 @@ async function handleApi(req, res) {
     return;
   }
 
+  guardRequest(req, route);
+
+  if (route === "POST /api/webhooks/stripe") {
+    const rawBody = await parseRawBody(req);
+    const event = integrations.verifyStripeWebhook(rawBody, req.headers["stripe-signature"]);
+    if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
+      await paymentStore.markStripeSession(event.data?.object?.id || "", "paid", {
+        paymentStatus: event.data?.object?.payment_status || "paid",
+        eventId: event.id || ""
+      });
+    }
+    sendJson(res, 200, { received: true });
+    return;
+  }
+
   if (route === "POST /api/auth/sms/send") {
     const body = await parseBody(req);
+    if (!requireLegalConsent(res, body)) return;
+    blockIfAuthThrottled(req, body);
     const user = await studentStore.findIdentity(body);
     const identityMatches = body.identityType === "teacher" ? user?.role === "teacher" : user?.role !== "teacher";
     if (!user || !identityMatches) {
+      recordAuthFailure(req, body);
       sendError(res, 404, body.identityType === "teacher" ? "学校、专业、工号或手机号与教师档案不一致" : "学校、专业、学号或手机号与校园档案不一致");
       return;
     }
+    clearAuthFailures(req, body);
+    await studentStore.logLegalConsent(user, body.legalConsent, { loginMode: "sms_request" });
 
     const now = Date.now();
     const lastSentAt = smsRateLimits.get(user.phone) || 0;
@@ -426,6 +855,8 @@ async function handleApi(req, res) {
 
   if (route === "POST /api/auth/login") {
     const body = await parseBody(req);
+    if (!requireLegalConsent(res, body)) return;
+    blockIfAuthThrottled(req, body);
     const user = await studentStore.findIdentity(body);
     const identityMatches = body.identityType === "teacher" ? user?.role === "teacher" : user?.role !== "teacher";
     const challenge = verifyPayload(body.challenge, SMS_TOKEN_SECRET);
@@ -437,35 +868,48 @@ async function handleApi(req, res) {
       && challenge.expiresAt > Date.now()
       && challenge.codeDigest === codeDigest(String(body.code || ""), challenge.phone, challenge.expiresAt);
     if (!user || !validCode) {
+      recordAuthFailure(req, body);
       sendError(res, 401, "校园身份或短信验证码错误，请重新核验");
       return;
     }
+    clearAuthFailures(req, body);
+    await studentStore.logLegalConsent(user, body.legalConsent, { loginMode: "sms_login" });
     const token = createToken(user.id);
     sendJson(res, 200, { token, user: publicUser(user), requiresPasswordSetup: !user.hasPassword });
     return;
   }
 
   if (route === "POST /api/auth/guest") {
+    const body = await parseBody(req);
+    if (!requireLegalConsent(res, body)) return;
     const guest = data.users.find((user) => user.role === "guest");
     if (!guest) {
       sendError(res, 503, "游客体验暂不可用");
       return;
     }
+    await studentStore.logLegalConsent(guest, body.legalConsent, { loginMode: "guest" });
+    void integrations.captureAnalytics("guest_login", guest);
     sendJson(res, 200, { token: createToken(guest.id), user: publicUser(guest), readOnly: true });
     return;
   }
 
   if (route === "POST /api/auth/password/login") {
     const body = await parseBody(req);
+    if (!requireLegalConsent(res, body)) return;
+    blockIfAuthThrottled(req, body);
     const user = await studentStore.findIdentity(body);
     const identityMatches = body.identityType === "teacher" ? user?.role === "teacher" : user?.role !== "teacher";
     const hasBoundPhone = /^1\d{10}$/.test(String(user?.phone || ""));
     const passwordMatches = user && await studentStore.verifyPassword(user.studentNo, body.password);
     if (!user || !identityMatches || !hasBoundPhone || !user.hasPassword || user.mustChangePassword || !passwordMatches) {
+      recordAuthFailure(req, body);
       sendError(res, 401, "账号、密码或登录身份错误；密码登录需要账号已绑定手机号");
       return;
     }
+    clearAuthFailures(req, body);
+    await studentStore.logLegalConsent(user, body.legalConsent, { loginMode: "password" });
     const token = createToken(user.id);
+    void integrations.captureAnalytics("password_login", user);
     sendJson(res, 200, { token, user: publicUser(user) });
     return;
   }
@@ -479,8 +923,88 @@ async function handleApi(req, res) {
     }
     const isSuperAdmin = adminUser.role === "super_admin";
 
+    if (route === "GET /api/admin/ai-config") {
+      if (!isSuperAdmin) {
+        sendError(res, 403, "仅总管理员可以查看 AI 模型配置");
+        return;
+      }
+      sendJson(res, 200, aiStatus());
+      return;
+    }
+
+    if (route === "PUT /api/admin/ai-config") {
+      if (!isSuperAdmin) {
+        sendError(res, 403, "仅总管理员可以修改 AI 模型配置");
+        return;
+      }
+      const body = await parseBody(req);
+      const provider = String(body.provider || "").trim().toLowerCase();
+      const baseUrl = String(body.baseUrl || "").trim();
+      const model = String(body.model || "").trim();
+      const requestsPerMinute = Math.max(1, Number(body.requestsPerMinute || AI_MAX_REQUESTS_PER_MINUTE || 12));
+      if (!provider || !baseUrl || !model) {
+        sendError(res, 400, "请填写服务商、接口地址和模型名称");
+        return;
+      }
+      const config = saveAiRuntimeConfig({
+        provider,
+        baseUrl,
+        model,
+        requestsPerMinute,
+        systemPrompt: String(body.systemPrompt || AI_SYSTEM_PROMPT || "").trim(),
+        apiKey: String(body.apiKey || "").trim() || AI_API_KEY
+      });
+      await studentStore.logAdminAction("update_ai_config", adminUser.studentNo, { operator: adminUser.studentNo, provider: config.provider, model: config.model });
+      sendJson(res, 200, aiStatus());
+      return;
+    }
+
+    if (route === "POST /api/admin/ai-config/test") {
+      if (!isSuperAdmin) {
+        sendError(res, 403, "仅总管理员可以测试 AI 模型配置");
+        return;
+      }
+      consumeAiRequest(`admin-test-${adminUser.id}`);
+      const reply = await requestAi([{ role: "user", content: "请只回复 OK，用于测试连接。" }]);
+      sendJson(res, 200, { ok: true, reply, ...aiStatus() });
+      return;
+    }
+
     if (route === "GET /api/admin/health") {
-      sendJson(res, 200, await studentStore.health());
+      sendJson(res, 200, {
+        identity: await studentStore.health(),
+        permanentAdmin: studentStore.permanentAdminStatus(),
+        reservations: await reservationStore.health(),
+        timetable: await timetableStore.health(),
+        payments: await paymentStore.health(),
+        integrations: integrations.configured()
+      });
+      return;
+    }
+
+    if (route === "GET /api/admin/reservations") {
+      const status = url.searchParams.get("status") || "";
+      sendJson(res, 200, { reservations: await reservationStore.listAll({ status }) });
+      return;
+    }
+
+    if (route === "POST /api/admin/reservations/review") {
+      const body = await parseBody(req);
+      const reservation = await reservationStore.reviewReservation(String(body.id || ""), {
+        status: body.status,
+        adminNote: String(body.adminNote || "")
+      }, adminUser);
+      if (!reservation) {
+        sendError(res, 404, "未找到该预约申请");
+        return;
+      }
+      await studentStore.logAdminAction("review_lab_reservation", reservation.id, {
+        operator: adminUser.studentNo,
+        status: reservation.status,
+        labName: reservation.labName,
+        slot: reservation.slot
+      });
+      sendJson(res, 200, { reservation });
       return;
     }
 
@@ -525,7 +1049,7 @@ async function handleApi(req, res) {
         return;
       }
       const student = await studentStore.upsertStudent(body);
-      await studentStore.logAdminAction("upsert_student", student.studentNo, { operator: adminUser.studentNo, school: student.school, major: student.major });
+      await studentStore.logAdminAction("upsert_student", student.studentNo, { operator: adminUser.studentNo, school: student.school, major: student.major, className: student.className });
       sendJson(res, 200, { student: adminStudent(student) });
       return;
     }
@@ -604,7 +1128,7 @@ async function handleApi(req, res) {
     }
 
     if (route === "POST /api/admin/students/import") {
-      const body = await parseBody(req);
+      const body = await parseBody(req, { limitBytes: MAX_UPLOAD_BODY_BYTES });
       let rows = Array.isArray(body.rows) ? body.rows : [];
       if (body.fileBase64) {
         const workbook = XLSX.read(Buffer.from(body.fileBase64, "base64"), { type: "buffer" });
@@ -623,7 +1147,7 @@ async function handleApi(req, res) {
           if (!isSuperAdmin && existing && !["student", "teacher"].includes(existing.role)) throw new Error("普通管理员不能修改其他管理员");
           const student = await studentStore.upsertStudent(input);
           result.success += 1;
-          await studentStore.logAdminAction("import_student", student.studentNo, { operator: adminUser.studentNo, row: index + 2 });
+          await studentStore.logAdminAction("import_student", student.studentNo, { operator: adminUser.studentNo, row: index + 2, className: student.className });
         } catch (error) {
           result.failed += 1;
           result.errors.push(`第 ${index + 2} 行：${error.message}`);
@@ -642,6 +1166,11 @@ async function handleApi(req, res) {
 
   if (route === "GET /api/me") {
     sendJson(res, 200, { user: publicUser(user), readOnly: user.role === "guest" });
+    return;
+  }
+
+  if (route === "GET /api/integrations/status") {
+    sendJson(res, 200, { services: integrations.configured() });
     return;
   }
 
@@ -709,18 +1238,8 @@ async function handleApi(req, res) {
   }
 
   if (route === "GET /api/campus-news") {
-    sendJson(res, 200, {
-      source: "https://www.tzu.edu.cn/",
-      sourceStatus: "live",
-      updatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
-      cacheSeconds: 300,
-      sources: [
-        { name: "泰州学院官网", url: "https://www.tzu.edu.cn/", status: "live", count: campusNews.length + importedNews.length },
-        { name: "经济与管理学院", url: "https://www.tzu.edu.cn/", status: "live", count: 1 },
-        { name: "校团委与社团", url: "https://www.tzu.edu.cn/", status: "live", count: 1 }
-      ],
-      items: [...importedNews, ...campusNews]
-    });
+    const liveNews = await campusNewsService.getCampusNews(url.searchParams.get("refresh") === "1");
+    sendJson(res, 200, { ...liveNews, items: [...importedNews, ...liveNews.items] });
     return;
   }
 
@@ -733,9 +1252,52 @@ async function handleApi(req, res) {
 
   if (route === "POST /api/payments/create") {
     const body = await parseBody(req);
-    const order = { id: nextId("pay"), userId: user.id, ...body, status: "created" };
-    paymentOrders.unshift(order);
-    sendJson(res, 201, { order });
+    const scene = String(body.scene || "智慧校园服务").slice(0, 160);
+    let amount = Number(body.amount || 0);
+    if (body.orderId) {
+      const sourceOrder = data.orders.find((item) => item.id === body.orderId && item.userId === user.id);
+      if (!sourceOrder) {
+        sendError(res, 404, "关联订单不存在");
+        return;
+      }
+      amount = Number(sourceOrder.price || 0);
+    }
+    if (!Number.isFinite(amount) || amount < 0.5 || amount > 50000) {
+      sendError(res, 400, "支付金额无效");
+      return;
+    }
+    const order = {
+      id: nextId("pay"),
+      userId: user.id,
+      provider: String(body.provider || "stripe"),
+      scene,
+      amount,
+      currency: "cny",
+      status: "created",
+      metadata: { sourceOrderId: String(body.orderId || "") }
+    };
+    await paymentStore.create(order);
+    const checkout = await integrations.createStripeCheckout({
+      orderId: order.id,
+      user,
+      scene,
+      amount,
+      successUrl: `${PUBLIC_APP_URL}/#profile?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${PUBLIC_APP_URL}/#profile?payment=cancelled`
+    });
+    if (checkout.configured) {
+      order.status = "checkout_created";
+      order.stripeSessionId = checkout.id;
+      order.checkoutUrl = checkout.url;
+      await paymentStore.update(order.id, order);
+    }
+    void integrations.captureAnalytics("payment_order_created", user, { scene, amount, stripe: checkout.configured });
+    sendJson(res, 201, {
+      order,
+      checkoutUrl: checkout.url || "",
+      paymentMode: checkout.configured ? "stripe" : "configuration_required",
+      message: checkout.configured ? "" : "Stripe 尚未配置，订单已保存但未发起扣款"
+    });
     return;
   }
 
@@ -746,27 +1308,105 @@ async function handleApi(req, res) {
     return;
   }
 
-  if (route === "POST /api/timetable/import") {
+  if (route === "GET /api/timetable/personal") {
+    sendJson(res, 200, { courses: await timetableStore.listCourses(user) });
+    return;
+  }
+
+  if (route === "POST /api/timetable/personal") {
+    const body = await parseBody(req, { limitBytes: MAX_UPLOAD_BODY_BYTES });
+    const courses = await timetableStore.saveCourses(user, dedupeCourses(Array.isArray(body.courses) ? body.courses : []));
+    sendJson(res, 200, { courses, count: courses.length });
+    return;
+  }
+
+  if (route === "POST /api/timetable/personal/course") {
     const body = await parseBody(req);
+    const result = await timetableStore.upsertCourse(user, body.course || body);
+    sendJson(res, 200, { course: result.course, courses: result.courses });
+    return;
+  }
+
+  if (route === "POST /api/timetable/personal/delete") {
+    const body = await parseBody(req);
+    const courses = await timetableStore.deleteCourse(user, body.id);
+    const hiddenCourseIds = await timetableStore.setCourseHidden(user, body.id, true);
+    sendJson(res, 200, { courses, count: courses.length, hiddenCourseIds });
+    return;
+  }
+
+  if (route === "POST /api/timetable/settings") {
+    const body = await parseBody(req);
+    const canManageCalendar = ["admin", "super_admin"].includes(user.role);
+    const settings = await timetableStore.savePreferences(user, body, canManageCalendar);
+    sendJson(res, 200, { settings });
+    return;
+  }
+
+  if (route === "POST /api/timetable/import") {
+    const body = await parseBody(req, { limitBytes: MAX_UPLOAD_BODY_BYTES });
     const workbook = XLSX.read(Buffer.from(body.fileData || "", "base64"), { type: "buffer" });
     const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
+    const read = (row, ...keys) => {
+      for (const key of keys) {
+        if (row[key] !== undefined && row[key] !== "") return row[key];
+      }
+      return "";
+    };
     const courses = rows.map((row, index) => ({
       id: `import-${Date.now()}-${index}`,
-      day: row.day || row["星期"] || row["周次"] || "周一",
-      time: row.time || row["时间"] || "08:00-09:40",
-      course: row.course || row["课程"] || row["课程名称"] || "未命名课程",
-      location: row.location || row["地点"] || row["教室"] || "",
-      teacher: row.teacher || row["教师"] || row["老师"] || "",
-      source: "外部导入"
-    }));
+      semester: read(row, "semester", "学期") || "2025-2026学年第二学期",
+      weeks: read(row, "weeks", "week", "周次", "上课周次") || "1-20",
+      day: read(row, "day", "weekday", "星期", "周几") || "周一",
+      startSection: Number(read(row, "startSection", "section", "开始节次", "起始节次", "节次") || 1),
+      sectionCount: Number(read(row, "sectionCount", "duration", "连续节数", "节数") || 2),
+      course: read(row, "course", "title", "课程", "课程名称", "科目") || "未命名课程",
+      location: read(row, "location", "room", "地点", "上课地点", "教室") || "",
+      teacher: read(row, "teacher", "教师", "老师", "任课教师") || "",
+      note: read(row, "note", "remark", "备注") || "",
+      source: "中文课表导入"
+    })).filter((course) => course.course);
     sendJson(res, 200, { courses, count: courses.length });
+    return;
+  }
+
+  if (route === "POST /api/timetable/image/import") {
+    const body = await parseBody(req, { limitBytes: MAX_UPLOAD_BODY_BYTES });
+    consumeAiRequest(user.id);
+    const courses = await requestTimetableOcr(body.imageData, {
+      semester: body.semester,
+      week: body.week
+    });
+    const currentCourses = await timetableStore.listCourses(user);
+    const savedCourses = courses.length
+      ? await timetableStore.saveCourses(user, dedupeCourses([...currentCourses, ...courses]))
+      : currentCourses;
+    sendJson(res, 200, {
+      courses,
+      count: courses.length,
+      savedCourses,
+      model: AI_MODEL,
+      provider: AI_PROVIDER,
+      warning: courses.length ? "" : "未能识别到可导入课程，请保留图片后手动添加。"
+    });
     return;
   }
 
   if (route === "POST /api/timetable/export") {
     const body = await parseBody(req);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(body.courses || []), "Timetable");
+    const rows = (body.courses || []).map((course) => ({
+      学期: course.semester || "",
+      周次: Array.isArray(course.weeks) ? course.weeks.join(",") : (course.weeks || ""),
+      星期: course.day || "",
+      开始节次: course.startSection || "",
+      连续节数: course.sectionCount || "",
+      课程名称: course.course || "",
+      上课地点: course.location || "",
+      任课教师: course.teacher || "",
+      备注: course.note || ""
+    }));
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), "中文课表");
     const filename = `timetable-${Date.now()}.xlsx`;
     const downloadDir = path.join(PUBLIC_DIR, "downloads", "conversions");
     fs.mkdirSync(downloadDir, { recursive: true });
@@ -781,7 +1421,7 @@ async function handleApi(req, res) {
   }
 
   if (route === "POST /api/tools/conversions") {
-    const body = await parseBody(req);
+    const body = await parseBody(req, { limitBytes: MAX_UPLOAD_BODY_BYTES });
     const job = {
       id: nextId("convert"),
       filename: body.filename || "未命名文件",
@@ -815,20 +1455,64 @@ async function handleApi(req, res) {
       return;
     }
     consumeAiRequest(user.id);
-    const reply = await requestAi(messages);
+    const reply = await requestAi(messages, body.config || {});
     sendJson(res, 200, { reply, model: AI_MODEL, provider: AI_PROVIDER });
     return;
   }
 
   if (route === "GET /api/dashboard") {
+    const [userReservations, notifications, liveCampusNews] = await Promise.all([
+      reservationStore.listForUser(user),
+      buildUserNotifications(user),
+      campusNewsService.getCampusNews(false)
+    ]);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const recentCutoff = new Date(todayStart);
+    recentCutoff.setDate(recentCutoff.getDate() - 2);
+    const currentYear = todayStart.getFullYear();
+    const recentCampusNews = [...importedNews, ...(liveCampusNews.items || [])]
+      .map((item) => {
+        const fullDate = item.fullDate || (/^\d{2}-\d{2}$/.test(String(item.date || "")) ? `${currentYear}-${item.date}` : "");
+        return { ...item, fullDate };
+      })
+      .filter((item) => {
+        const publishedAt = new Date(`${item.fullDate}T00:00:00`);
+        return item.fullDate && !Number.isNaN(publishedAt.getTime()) && publishedAt >= recentCutoff && publishedAt <= todayStart;
+      })
+      .sort((a, b) => String(b.fullDate).localeCompare(String(a.fullDate)))
+      .slice(0, 5);
+    const reservationDurationHours = (slot) => {
+      const match = String(slot || "").match(/(\d{1,2}):(\d{2})\s*[-–—至]\s*(\d{1,2}):(\d{2})/);
+      if (!match) return 0;
+      const start = Number(match[1]) * 60 + Number(match[2]);
+      const end = Number(match[3]) * 60 + Number(match[4]);
+      return end > start ? (end - start) / 60 : 0;
+    };
+    const approvedReservations = userReservations.filter((item) => item.status === "approved");
+    const pendingReservations = userReservations.filter((item) => item.status === "pending");
+    const approvedHours = approvedReservations.reduce((sum, item) => sum + reservationDurationHours(item.slot), 0);
+    const reservationSummary = {
+      approvedHours: Number(approvedHours.toFixed(1)),
+      approvedCount: approvedReservations.length,
+      pendingCount: pendingReservations.length,
+      totalCount: userReservations.length,
+      approvalRate: userReservations.length ? Math.round((approvedReservations.length / userReservations.length) * 100) : 0
+    };
+    const recentReservations = [...userReservations]
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
+      .slice(0, 3);
     sendJson(res, 200, {
       stats: {
-        pendingReservations: data.reservations.filter((item) => item.userId === user.id && item.status === "pending").length,
-        unreadNotifications: data.notifications.filter((item) => !item.read).length,
+        pendingReservations: userReservations.filter((item) => item.status === "pending").length,
+        unreadNotifications: notifications.filter((item) => !item.read).length,
         activeRepairs: data.repairs.filter((item) => item.userId === user.id && item.status !== "closed").length,
         todayCourses: data.timetable.length
       },
-      latestNotifications: data.notifications.slice(0, 3),
+      latestNotifications: notifications.slice(0, 5),
+      recentCampusNews,
+      reservationSummary,
+      recentReservations,
       recommendedLabs: data.labs.filter((lab) => lab.status === "available").slice(0, 2)
     });
     return;
@@ -844,6 +1528,16 @@ async function handleApi(req, res) {
     const lab = data.labs.find((item) => item.id === body.labId);
     if (!lab) {
       sendError(res, 404, "实验室不存在");
+      return;
+    }
+    {
+      const reservation = await reservationStore.createReservation({
+        id: nextId("r"),
+        slot: body.slot,
+        reason: body.reason
+      }, user, lab);
+      void integrations.captureAnalytics("lab_reservation_created", user, { labId: lab.id, slot: body.slot || "" });
+      sendJson(res, 201, { reservation });
       return;
     }
     const reservation = {
@@ -862,6 +1556,8 @@ async function handleApi(req, res) {
   }
 
   if (route === "GET /api/reservations") {
+    sendJson(res, 200, { reservations: await reservationStore.listForUser(user) });
+    return;
     sendJson(res, 200, { reservations: data.reservations.filter((item) => item.userId === user.id) });
     return;
   }
@@ -888,7 +1584,34 @@ async function handleApi(req, res) {
   }
 
   if (route === "GET /api/notifications") {
-    sendJson(res, 200, { notifications: data.notifications });
+    const notifications = await buildUserNotifications(user);
+    sendJson(res, 200, {
+      notifications,
+      unreadCount: notifications.filter((item) => !item.read).length,
+      retentionDays: 14,
+      maxItems: 100
+    });
+    return;
+  }
+
+  if (route === "POST /api/notifications/read") {
+    const body = await parseBody(req);
+    const notifications = await buildUserNotifications(user);
+    const availableIds = new Set(notifications.map((item) => item.id));
+    const ids = body.all
+      ? [...availableIds]
+      : [String(body.id || "")].filter((id) => availableIds.has(id));
+    if (!body.all && !ids.length) {
+      sendError(res, 404, "消息不存在或已被清理");
+      return;
+    }
+    await notificationStore.markRead(user.id, ids);
+    const nextNotifications = notifications.map((item) => ({ ...item, read: item.read || ids.includes(item.id) }));
+    sendJson(res, 200, {
+      success: true,
+      updated: ids.length,
+      unreadCount: nextNotifications.filter((item) => !item.read).length
+    });
     return;
   }
 
@@ -901,7 +1624,21 @@ async function handleApi(req, res) {
     const freeLabs = data.labs
       .filter((lab) => lab.status === "available")
       .map((lab) => ({ id: lab.id, name: lab.name, slots: lab.freeSlots }));
-    sendJson(res, 200, { courses: data.timetable, freeLabs });
+    const courses = data.timetable.filter((course) => !course.ownerStudentNo || course.ownerStudentNo === user.studentNo);
+    const preferences = await timetableStore.getPreferences(user);
+    const personalCourses = await timetableStore.listCourses(user);
+    sendJson(res, 200, {
+      courses,
+      personalCourses,
+      hiddenCourseIds: preferences.hiddenCourseIds,
+      settings: {
+        semester: preferences.semester,
+        week: preferences.week,
+        schedule: preferences.schedule,
+        weekOneStart: preferences.weekOneStart
+      },
+      freeLabs
+    });
     return;
   }
 
@@ -951,7 +1688,19 @@ async function handleApi(req, res) {
       createdAt: new Date().toLocaleString("zh-CN", { hour12: false })
     };
     data.supportTickets.unshift(ticket);
-    sendJson(res, 201, { ticket });
+    let email = { configured: integrations.configured().resend, sent: false };
+    try {
+      email = await integrations.sendEmail({
+        to: process.env.SUPPORT_EMAIL,
+        subject: `智慧校园工单：${ticket.title}`,
+        text: `工单编号：${ticket.id}\n提交角色：${user.role}\n内容：${ticket.content}`,
+        idempotencyKey: `ticket-${ticket.id}`
+      });
+    } catch (error) {
+      void integrations.captureError(error, { route, method: req.method, status: 502, user });
+    }
+    void integrations.captureAnalytics("support_ticket_created", user, { emailSent: email.sent });
+    sendJson(res, 201, { ticket, email });
     return;
   }
 
@@ -964,7 +1713,19 @@ async function handleApi(req, res) {
       createdAt: new Date().toLocaleString("zh-CN", { hour12: false })
     };
     data.feedbackItems.unshift(feedback);
-    sendJson(res, 201, { feedback });
+    let email = { configured: integrations.configured().resend, sent: false };
+    try {
+      email = await integrations.sendEmail({
+        to: process.env.SUPPORT_EMAIL,
+        subject: `智慧校园用户反馈 ${feedback.id}`,
+        text: `提交角色：${user.role}\n反馈内容：${feedback.content}`,
+        idempotencyKey: `feedback-${feedback.id}`
+      });
+    } catch (error) {
+      void integrations.captureError(error, { route, method: req.method, status: 502, user });
+    }
+    void integrations.captureAnalytics("feedback_created", user, { emailSent: email.sent });
+    sendJson(res, 201, { feedback, email });
     return;
   }
 
@@ -972,8 +1733,22 @@ async function handleApi(req, res) {
 }
 
 function requestHandler(req, res) {
+  res.__securityReq = req;
+  if (!["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"].includes(req.method)) {
+    sendError(res, 405, "请求方法不允许");
+    return;
+  }
+  if (String(req.url || "").length > URL_MAX_LENGTH) {
+    sendError(res, 414, "请求地址过长");
+    return;
+  }
   if (req.url.startsWith("/api/")) {
-    handleApi(req, res).catch((error) => sendError(res, error.statusCode || 400, error.message));
+    handleApi(req, res).catch((error) => {
+      const status = error.statusCode || 500;
+      void integrations.captureError(error, { route: req.url.split("?")[0], method: req.method, status });
+      const databaseError = /access denied|econnrefused|etimedout|database|mysql|tidb/i.test(String(error.message || ""));
+      sendError(res, databaseError ? 503 : status, databaseError ? "数据库服务暂时不可用，请稍后重试" : error.message);
+    });
     return;
   }
   handleStatic(req, res);
@@ -983,6 +1758,12 @@ module.exports = requestHandler;
 
 if (require.main === module) {
   const server = http.createServer(requestHandler);
+  server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+  server.headersTimeout = Number(process.env.HEADERS_TIMEOUT_MS || 10000);
+  server.keepAliveTimeout = Number(process.env.KEEP_ALIVE_TIMEOUT_MS || 5000);
+  server.on("clientError", (_error, socket) => {
+    if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+  });
   server.listen(PORT, () => {
   console.log(`智慧泰院网页版已启动：http://localhost:${PORT}`);
   });

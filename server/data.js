@@ -90,7 +90,8 @@ const repairs = [
   }
 ];
 
-const notifications = [
+const notifications = [];
+const legacyNotifications = [
   {
     id: "n-001",
     title: "实验室预约已通过",
@@ -117,30 +118,125 @@ const notifications = [
   }
 ];
 
+const privateTimetableOwner = process.env.CAMPUS_USER_STUDENT_NO || "";
+
 const timetable = [
   {
-    id: "c-001",
+    id: "st-week11-mon-1",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
     day: "周一",
-    time: "08:00-09:40",
-    course: "Java Web 开发",
-    location: "明德楼 301",
-    teacher: "刘老师"
+    startSection: 1,
+    sectionCount: 2,
+    course: "数字货币",
+    location: "济川校区-西区 博雅楼 G4207",
+    teacher: "",
+    note: ""
   },
   {
-    id: "c-002",
+    id: "st-week11-mon-3",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
+    day: "周一",
+    startSection: 3,
+    sectionCount: 3,
+    course: "产业经济学",
+    location: "济川校区-东区 博文楼 A3512",
+    teacher: "",
+    note: ""
+  },
+  {
+    id: "st-week11-tue-1",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
+    day: "周二",
+    startSection: 1,
+    sectionCount: 2,
+    course: "毛泽东思想和中国特色社会主义理论体系概论",
+    location: "济川校区-东区 博文楼 A3202",
+    teacher: "",
+    note: ""
+  },
+  {
+    id: "st-week11-tue-3",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
+    day: "周二",
+    startSection: 3,
+    sectionCount: 3,
+    course: "生产与运营管理",
+    location: "济川校区-西区 博雅楼 G4405",
+    teacher: "",
+    note: ""
+  },
+  {
+    id: "st-week11-tue-6",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
+    day: "周二",
+    startSection: 6,
+    sectionCount: 2,
+    course: "Python 程序设计",
+    location: "济川校区-西区 博雅楼 G4408",
+    teacher: "",
+    note: ""
+  },
+  {
+    id: "st-week11-wed-1",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
     day: "周三",
-    time: "10:00-11:40",
-    course: "数据库应用",
-    location: "知行楼 204",
-    teacher: "王老师"
+    startSection: 1,
+    sectionCount: 2,
+    course: "数字营销",
+    location: "济川校区-西区 博雅楼 G4101",
+    teacher: "",
+    note: ""
   },
   {
-    id: "c-003",
+    id: "st-week11-wed-3",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
+    day: "周三",
+    startSection: 3,
+    sectionCount: 2,
+    course: "大数据分析与应用",
+    location: "济川校区-东区 求索楼 / 实验实训楼",
+    teacher: "",
+    note: ""
+  },
+  {
+    id: "st-week11-thu-6",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
+    day: "周四",
+    startSection: 6,
+    sectionCount: 2,
+    course: "大学体育4",
+    location: "济川校区-东区 艺术楼 1355",
+    teacher: "",
+    note: ""
+  },
+  {
+    id: "st-week11-fri-3",
+    ownerStudentNo: privateTimetableOwner,
+    semester: "2025-2026学年第二学期",
+    weeks: "1-16",
     day: "周五",
-    time: "14:00-15:40",
-    course: "移动应用开发",
-    location: "致远楼 510",
-    teacher: "陈老师"
+    startSection: 3,
+    sectionCount: 3,
+    course: "应用统计学",
+    location: "济川校区-西区 博雅楼 G4205",
+    teacher: "",
+    note: ""
   }
 ];
 
