@@ -10,6 +10,7 @@ function targetUrl(request, params, env) {
 }
 export async function onRequest(context) {
   const { request, params, env } = context;
+  const route = Array.isArray(params.path) ? params.path.join("/") : String(params.path || "");
   const target = targetUrl(request, params, env);
   const headers = new Headers(request.headers);
 
