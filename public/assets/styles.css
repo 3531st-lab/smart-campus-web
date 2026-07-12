@@ -1378,7 +1378,7 @@ html[data-theme="day"] .shell .tools-subnav button.active .tools-subnav-icon {
   border-radius: 8px;
   background:
     linear-gradient(118deg, rgba(7, 54, 82, 0.96), rgba(12, 83, 102, 0.9)),
-    url("/assets/campus-card-youth-v1.png") center / cover;
+    url("/assets/campus-card-youth-v1.webp") center / cover;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 16px 34px rgba(0, 12, 34, 0.28);
 }
 
@@ -6943,7 +6943,7 @@ html[data-theme="day"] .student-card {
   border-color: rgba(29, 135, 135, 0.26);
   background:
     linear-gradient(118deg, rgba(218, 245, 240, 0.96), rgba(204, 235, 241, 0.92)),
-    url("/assets/campus-card-youth-v1.png") center / cover;
+    url("/assets/campus-card-youth-v1.webp") center / cover;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 16px 32px rgba(55, 112, 117, 0.16);
 }
 
@@ -8441,6 +8441,25 @@ html[data-theme="day"] .student-role-filters button.active {
   color: var(--muted);
 }
 
+.student-list-pagination {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+}
+
+.student-list-pagination span {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.student-list-pagination button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 html[data-theme="day"] .admin-kicker,
 html[data-theme="day"] .admin-import-guide code {
   color: #167a78;
@@ -8461,6 +8480,15 @@ html[data-theme="day"] .admin-import-guide code {
   .student-list-head input {
     min-width: 0;
     flex: 1;
+  }
+
+  .student-list-pagination {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .student-list-pagination span {
+    grid-column: 1 / -1;
+    grid-row: 1;
   }
 
   .admin-stat-grid,
@@ -8504,13 +8532,13 @@ html[data-theme="day"] .admin-import-guide code {
 }
 
 /* Independent youth scene themes v50 */
-.youth-intro { --scene: url("/assets/youth-summer.png"); min-height: 100svh; overflow-x: hidden; background: #10251e; color: #fff; }
-.youth-theme-spring { --scene: url("/assets/youth-spring.png"); }
-.youth-theme-summer { --scene: url("/assets/youth-summer.png"); }
-.youth-theme-autumn { --scene: url("/assets/youth-autumn.png"); }
-.youth-theme-winter { --scene: url("/assets/youth-winter.png"); }
-.youth-theme-sunset { --scene: url("/assets/youth-sunset.png"); }
-.youth-theme-starry { --scene: url("/assets/youth-starry.png"); }
+.youth-intro { --scene: url("/assets/youth-summer.webp"); min-height: 100svh; overflow-x: hidden; background: #10251e; color: #fff; }
+.youth-theme-spring { --scene: url("/assets/youth-spring.webp"); }
+.youth-theme-summer { --scene: url("/assets/youth-summer.webp"); }
+.youth-theme-autumn { --scene: url("/assets/youth-autumn.webp"); }
+.youth-theme-winter { --scene: url("/assets/youth-winter.webp"); }
+.youth-theme-sunset { --scene: url("/assets/youth-sunset.webp"); }
+.youth-theme-starry { --scene: url("/assets/youth-starry.webp"); }
 .youth-hero { position: relative; isolation: isolate; min-height: 100svh; overflow: hidden; }
 .youth-scene, .youth-vignette, .youth-atmosphere { position: absolute; inset: 0; }
 .youth-scene { z-index: -4; background: var(--scene) center / cover no-repeat; animation: youth-scene-in 1.4s ease both, youth-scene-breathe 18s 1.4s ease-in-out infinite alternate; will-change: transform; }
@@ -9752,7 +9780,7 @@ html[data-theme="day"] .software-legal-note {
 html[data-theme="day"] .login-wrap {
   background:
     linear-gradient(100deg, rgba(234, 247, 245, 0.95) 0%, rgba(231, 246, 244, 0.63) 52%, rgba(239, 248, 247, 0.88) 100%),
-    url("/assets/campus-hero-day-v26.png") center / cover no-repeat;
+    url("/assets/campus-hero-day-v26.webp") center / cover no-repeat;
 }
 
 html[data-theme="day"] .login-wrap::before {
@@ -10420,7 +10448,7 @@ html[data-theme="day"] .intro-hero {
   background:
     linear-gradient(90deg, rgba(240, 250, 248, 0.98) 0%, rgba(237, 249, 247, 0.84) 47%, rgba(237, 249, 247, 0.22) 100%),
     linear-gradient(180deg, rgba(238, 249, 247, 0.03), #edf7f5 100%),
-    url("/assets/campus-hero-day-v26.png") center / cover no-repeat;
+    url("/assets/campus-hero-day-v26.webp") center / cover no-repeat;
 }
 
 html[data-theme="day"] .intro-hero h1,
@@ -11478,7 +11506,7 @@ html[data-theme="day"] .sidebar-card {
   border-color: rgba(41, 125, 124, 0.26);
   background:
     linear-gradient(180deg, rgba(19, 105, 103, 0.18), rgba(14, 62, 72, 0.58)),
-    url("/assets/campus-hero-day-v26.png") center / cover;
+    url("/assets/campus-hero-day-v26.webp") center / cover;
 }
 
 html[data-theme="day"] .dash-card,
@@ -12273,7 +12301,7 @@ html[data-theme="day"] .shell .topbar .user-chip:hover {
 }
 
 html[data-theme="day"] .home-hero {
-  background: url("/assets/campus-hero-day-v26.png") center / cover no-repeat;
+  background: url("/assets/campus-hero-day-v26.webp") center / cover no-repeat;
   box-shadow: 0 18px 46px rgba(42, 91, 91, 0.18);
 }
 

@@ -119,6 +119,7 @@ const mimeTypes = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
   ".mp3": "audio/mpeg",
   ".wav": "audio/wav",
   ".ico": "image/x-icon"
@@ -1010,28 +1011,46 @@ async function handleApi(req, res) {
 
     if (route === "GET /api/admin/students") {
       const requestedRole = url.searchParams.get("role") || "";
+      const query = String(url.searchParams.get("query") || "").trim().slice(0, 120);
+      const status = url.searchParams.get("status") || "";
+      const pageSize = Math.min(Math.max(10, Number(url.searchParams.get("pageSize")) || 50), 100);
+      const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
       const roleFilter = !isSuperAdmin && requestedRole && !["student", "teacher"].includes(requestedRole) ? "__denied__" : requestedRole;
       if (roleFilter === "__denied__") {
-        sendJson(res, 200, { students: [], count: 0, totalCount: 0, canManageRoles: false });
+        sendJson(res, 200, { students: [], count: 0, totalCount: 0, accountCount: 0, roleCounts: { student: 0, teacher: 0 }, page: 1, pageSize, totalPages: 1, canManageRoles: false });
         return;
       }
-      const [students, totalCount] = await Promise.all([
+      const visibleRoles = isSuperAdmin ? [] : ["student", "teacher"];
+      const [students, totalCount, allRoleCounts] = await Promise.all([
         studentStore.listStudents({
-          query: url.searchParams.get("query") || "",
-          status: url.searchParams.get("status") || "",
-          role: roleFilter
+          query,
+          status,
+          role: roleFilter,
+          limit: pageSize,
+          offset: (page - 1) * pageSize
         }),
         studentStore.countStudents({
-          roles: roleFilter
-            ? [roleFilter]
-            : isSuperAdmin ? [] : ["student", "teacher"]
-        })
+          query,
+          status,
+          role: roleFilter,
+          roles: roleFilter ? [] : visibleRoles
+        }),
+        studentStore.countStudentsByRole({ query, status })
       ]);
       const visibleStudents = isSuperAdmin ? students : students.filter((student) => ["student", "teacher"].includes(student.role));
+      const roleCounts = isSuperAdmin
+        ? allRoleCounts
+        : { student: allRoleCounts.student, teacher: allRoleCounts.teacher };
+      const accountCount = Object.values(roleCounts).reduce((sum, count) => sum + Number(count || 0), 0);
       sendJson(res, 200, {
         students: visibleStudents.map(adminStudent),
         count: visibleStudents.length,
         totalCount,
+        accountCount,
+        roleCounts,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
         canManageRoles: isSuperAdmin
       });
       return;
@@ -1461,10 +1480,12 @@ async function handleApi(req, res) {
   }
 
   if (route === "GET /api/dashboard") {
-    const [userReservations, notifications, liveCampusNews] = await Promise.all([
+    const [userReservations, notifications, liveCampusNews, timetablePreferences, personalCourses] = await Promise.all([
       reservationStore.listForUser(user),
       buildUserNotifications(user),
-      campusNewsService.getCampusNews(false)
+      campusNewsService.getCampusNews(false, { preferCache: true }),
+      timetableStore.getPreferences(user),
+      timetableStore.listCourses(user)
     ]);
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
@@ -1513,6 +1534,17 @@ async function handleApi(req, res) {
       recentCampusNews,
       reservationSummary,
       recentReservations,
+      timetable: {
+        courses: data.timetable.filter((course) => !course.ownerStudentNo || course.ownerStudentNo === user.studentNo),
+        personalCourses,
+        hiddenCourseIds: timetablePreferences.hiddenCourseIds,
+        settings: {
+          semester: timetablePreferences.semester,
+          week: timetablePreferences.week,
+          schedule: timetablePreferences.schedule,
+          weekOneStart: timetablePreferences.weekOneStart
+        }
+      },
       recommendedLabs: data.labs.filter((lab) => lab.status === "available").slice(0, 2)
     });
     return;

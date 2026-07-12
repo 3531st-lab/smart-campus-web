@@ -30,7 +30,21 @@ export async function onRequest(context) {
       redirect: "manual"
     });
     const responseHeaders = new Headers(upstream.headers);
-    responseHeaders.set("cache-control", "no-store");
+    const browserCacheSeconds = request.method === "GET" ? {
+      exams: 1800,
+      labs: 300,
+      "lab-rules": 1800,
+      "library/layout": 300,
+      "canteen/menu": 120,
+      "tools/catalog": 3600,
+      "campus-news": 60
+    }[route] : 0;
+    responseHeaders.set(
+      "cache-control",
+      browserCacheSeconds
+        ? `private, max-age=${browserCacheSeconds}, stale-while-revalidate=60`
+        : "no-store"
+    );
     responseHeaders.set("x-campus-api-origin", "vercel");
     return new Response(upstream.body, {
       status: upstream.status,

@@ -1,10 +1,8 @@
 const crypto = require("crypto");
-const mysql = require("mysql2/promise");
 const data = require("./data");
 const permanentAdmins = require("./permanent-admins");
+const { mysqlConfigured, getPool } = require("./db");
 
-const mysqlConfigured = Boolean(process.env.DATABASE_URL || process.env.MYSQL_HOST);
-let pool = null;
 let initialized = false;
 
 function normalizeStudent(row) {
@@ -27,27 +25,6 @@ function normalizeStudent(row) {
     createdAt: row.created_at ?? row.createdAt,
     updatedAt: row.updated_at ?? row.updatedAt
   });
-}
-
-function getPool() {
-  if (!mysqlConfigured) return null;
-  if (!pool) {
-    pool = process.env.DATABASE_URL
-      ? mysql.createPool(process.env.DATABASE_URL)
-      : mysql.createPool({
-          host: process.env.MYSQL_HOST,
-          port: Number(process.env.MYSQL_PORT || 3306),
-          user: process.env.MYSQL_USER,
-          password: process.env.MYSQL_PASSWORD,
-          database: process.env.MYSQL_DATABASE || "smart_campus",
-          ssl: process.env.MYSQL_SSL === "true"
-            ? { minVersion: "TLSv1.2", rejectUnauthorized: true }
-            : undefined,
-          connectionLimit: 8,
-          charset: "utf8mb4"
-        });
-  }
-  return pool;
 }
 
 async function initialize() {
@@ -74,6 +51,7 @@ async function initialize() {
       UNIQUE KEY uq_school_student_no (school, student_no),
       KEY idx_identity (school, major, student_no, phone),
       KEY idx_class (school, college, major, class_name),
+      KEY idx_role_updated (role, updated_at),
       KEY idx_status (status)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
@@ -85,6 +63,11 @@ async function initialize() {
   }
   try {
     await db.query("ALTER TABLE students ADD INDEX idx_class (school, college, major, class_name)");
+  } catch (error) {
+    if (error.code !== "ER_DUP_KEYNAME") throw error;
+  }
+  try {
+    await db.query("ALTER TABLE students ADD INDEX idx_role_updated (role, updated_at)");
   } catch (error) {
     if (error.code !== "ER_DUP_KEYNAME") throw error;
   }
@@ -211,14 +194,17 @@ async function findLoginAccount({ school, major, studentNo }) {
   return normalizeStudent(rows[0]);
 }
 
-async function listStudents({ query = "", status = "", role = "", limit = 200 } = {}) {
+async function listStudents({ query = "", status = "", role = "", limit = 50, offset = 0 } = {}) {
   if (!mysqlConfigured) {
+    const safeOffset = Math.max(0, Number(offset) || 0);
+    const safeLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
     return data.users
       .filter((user) => user.role !== "guest")
       .map(normalizeStudent)
       .filter((student) => !status || student.status === status)
       .filter((student) => !role || student.role === role)
-      .filter((student) => !query || [student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone].some((value) => String(value || "").includes(query)));
+      .filter((student) => !query || [student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone].some((value) => String(value || "").includes(query)))
+      .slice(safeOffset, safeOffset + safeLimit);
   }
   await initialize();
   const values = [];
@@ -236,26 +222,81 @@ async function listStudents({ query = "", status = "", role = "", limit = 200 } 
     filters.push("role = ?");
     values.push(role);
   }
-  const safeLimit = Math.min(Number(limit) || 200, 1000);
+  const safeLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
+  const safeOffset = Math.max(0, Number(offset) || 0);
   const [rows] = await getPool().execute(
-    `SELECT * FROM students ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} ORDER BY updated_at DESC LIMIT ${safeLimit}`,
+    `SELECT * FROM students ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} ORDER BY updated_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`,
     values
   );
   return rows.map(normalizeStudent);
 }
 
-async function countStudents({ roles = [] } = {}) {
+async function countStudents({ roles = [], query = "", status = "", role = "" } = {}) {
   if (!mysqlConfigured) {
-    return data.users.filter((user) => user.role !== "guest" && (!roles.length || roles.includes(user.role))).length;
+    return data.users
+      .filter((user) => user.role !== "guest")
+      .map(normalizeStudent)
+      .filter((student) => !status || student.status === status)
+      .filter((student) => !role || student.role === role)
+      .filter((student) => !roles.length || roles.includes(student.role))
+      .filter((student) => !query || [student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone].some((value) => String(value || "").includes(query)))
+      .length;
   }
   await initialize();
-  if (!roles.length) {
-    const [rows] = await getPool().query("SELECT COUNT(*) AS total FROM students");
-    return Number(rows[0].total);
+  const values = [];
+  const filters = [];
+  if (query) {
+    filters.push("(name LIKE ? OR school LIKE ? OR college LIKE ? OR major LIKE ? OR class_name LIKE ? OR student_no LIKE ? OR phone LIKE ?)");
+    const like = `%${query}%`;
+    values.push(like, like, like, like, like, like, like);
   }
-  const placeholders = roles.map(() => "?").join(",");
-  const [rows] = await getPool().execute(`SELECT COUNT(*) AS total FROM students WHERE role IN (${placeholders})`, roles);
+  if (status === "active" || status === "disabled") {
+    filters.push("status = ?");
+    values.push(status);
+  }
+  if (["student", "teacher", "admin", "super_admin"].includes(role)) {
+    filters.push("role = ?");
+    values.push(role);
+  } else if (roles.length) {
+    filters.push(`role IN (${roles.map(() => "?").join(",")})`);
+    values.push(...roles);
+  }
+  const [rows] = await getPool().execute(
+    `SELECT COUNT(*) AS total FROM students ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}`,
+    values
+  );
   return Number(rows[0].total);
+}
+
+async function countStudentsByRole({ query = "", status = "" } = {}) {
+  const counts = { student: 0, teacher: 0, admin: 0, super_admin: 0 };
+  if (!mysqlConfigured) {
+    for (const student of data.users.map(normalizeStudent)) {
+      if (!counts.hasOwnProperty(student.role)) continue;
+      if (status && student.status !== status) continue;
+      if (query && ![student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone].some((value) => String(value || "").includes(query))) continue;
+      counts[student.role] += 1;
+    }
+    return counts;
+  }
+  await initialize();
+  const values = [];
+  const filters = [];
+  if (query) {
+    filters.push("(name LIKE ? OR school LIKE ? OR college LIKE ? OR major LIKE ? OR class_name LIKE ? OR student_no LIKE ? OR phone LIKE ?)");
+    const like = `%${query}%`;
+    values.push(like, like, like, like, like, like, like);
+  }
+  if (status === "active" || status === "disabled") {
+    filters.push("status = ?");
+    values.push(status);
+  }
+  const [rows] = await getPool().execute(
+    `SELECT role, COUNT(*) AS total FROM students ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} GROUP BY role`,
+    values
+  );
+  for (const row of rows) if (counts.hasOwnProperty(row.role)) counts[row.role] = Number(row.total);
+  return counts;
 }
 
 function validateStudent(input) {
@@ -464,6 +505,7 @@ module.exports = {
   findLoginAccount,
   listStudents,
   countStudents,
+  countStudentsByRole,
   upsertStudent,
   setStudentStatus,
   setStudentRole,

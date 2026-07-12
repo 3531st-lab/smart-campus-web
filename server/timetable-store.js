@@ -1,11 +1,9 @@
 const fs = require("fs");
 const path = require("path");
-const mysql = require("mysql2/promise");
+const { mysqlConfigured, getPool } = require("./db");
 
 const STORE_PATH = path.join(__dirname, "user-timetables.json");
 const PREFERENCES_PATH = path.join(__dirname, "user-timetable-preferences.json");
-const mysqlConfigured = Boolean(process.env.DATABASE_URL || process.env.MYSQL_HOST);
-let pool = null;
 let initialized = false;
 
 function readJson(filePath, fallback) {
@@ -40,31 +38,6 @@ function writePreferencesStore(store) {
 
 function ownerKey(user) {
   return String(user?.studentNo || user?.id || "guest");
-}
-
-function mysqlOptions() {
-  return {
-    host: process.env.MYSQL_HOST,
-    port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER,
-    password: process.env.MYSQL_PASSWORD,
-    database: process.env.MYSQL_DATABASE || "smart_campus",
-    ssl: process.env.MYSQL_SSL === "true"
-      ? { minVersion: "TLSv1.2", rejectUnauthorized: true }
-      : undefined,
-    connectionLimit: 8,
-    charset: "utf8mb4"
-  };
-}
-
-function getPool() {
-  if (!mysqlConfigured) return null;
-  if (!pool) {
-    pool = process.env.DATABASE_URL
-      ? mysql.createPool(process.env.DATABASE_URL)
-      : mysql.createPool(mysqlOptions());
-  }
-  return pool;
 }
 
 async function initialize() {

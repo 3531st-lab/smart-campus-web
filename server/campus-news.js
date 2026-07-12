@@ -1,5 +1,7 @@
+const { mysqlConfigured, getPool } = require("./db");
+
 const NEWS_CACHE_MS = 5 * 60 * 1000;
-const SOURCE_TIMEOUT_MS = 9000;
+const SOURCE_TIMEOUT_MS = 5000;
 const MAX_ITEMS_PER_SOURCE = 12;
 const MAX_ITEMS = 160;
 
@@ -30,6 +32,56 @@ const sources = [
 
 let cache = null;
 let pendingRefresh = null;
+let persistentCacheInitialized = false;
+let persistentCacheHydrated = false;
+
+function emptyCache() {
+  return {
+    source: "https://www.tzu.edu.cn/",
+    sourceStatus: "warming",
+    updatedAt: "",
+    cacheSeconds: NEWS_CACHE_MS / 1000,
+    sources: sources.map(({ id, name, category, url }) => ({ id, name, category, url, status: "pending", count: 0 })),
+    items: [],
+    expiresAt: 0
+  };
+}
+
+async function initializePersistentCache() {
+  if (!mysqlConfigured || persistentCacheInitialized) return;
+  await getPool().query(`
+    CREATE TABLE IF NOT EXISTS campus_news_cache (
+      cache_key VARCHAR(40) PRIMARY KEY,
+      payload JSON NOT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  persistentCacheInitialized = true;
+}
+
+async function hydratePersistentCache() {
+  if (!mysqlConfigured || persistentCacheHydrated) return cache;
+  persistentCacheHydrated = true;
+  await initializePersistentCache();
+  const [rows] = await getPool().execute("SELECT payload FROM campus_news_cache WHERE cache_key = 'campus' LIMIT 1");
+  if (!rows[0]) return cache;
+  try {
+    const payload = typeof rows[0].payload === "string" ? JSON.parse(rows[0].payload) : rows[0].payload;
+    if (payload && Array.isArray(payload.items)) cache = payload;
+  } catch {
+    cache = null;
+  }
+  return cache;
+}
+
+async function persistCache(value) {
+  if (!mysqlConfigured) return;
+  await initializePersistentCache();
+  await getPool().execute(
+    "INSERT INTO campus_news_cache (cache_key, payload) VALUES ('campus', ?) ON DUPLICATE KEY UPDATE payload = VALUES(payload), updated_at = CURRENT_TIMESTAMP",
+    [JSON.stringify(value)]
+  );
+}
 
 function decodeEntities(value = "") {
   const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
@@ -149,11 +201,19 @@ async function refreshCampusNews() {
     items,
     expiresAt: Date.now() + NEWS_CACHE_MS
   };
+  try {
+    await persistCache(cache);
+  } catch (error) {
+    console.warn("Failed to persist campus news cache:", error.message);
+  }
   return cache;
 }
 
-async function getCampusNews(forceRefresh = false) {
+async function getCampusNews(forceRefresh = false, { preferCache = false } = {}) {
   if (!forceRefresh && cache && cache.expiresAt > Date.now()) return cache;
+  if (!forceRefresh) await hydratePersistentCache();
+  if (!forceRefresh && cache && (preferCache || cache.expiresAt > Date.now())) return cache;
+  if (!forceRefresh && preferCache) return cache || emptyCache();
   if (pendingRefresh) return pendingRefresh;
   pendingRefresh = refreshCampusNews().finally(() => {
     pendingRefresh = null;
@@ -161,4 +221,4 @@ async function getCampusNews(forceRefresh = false) {
   return pendingRefresh;
 }
 
-module.exports = { getCampusNews, sources };
+module.exports = { getCampusNews, sources, refreshCampusNews };

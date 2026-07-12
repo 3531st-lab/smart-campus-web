@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS students (
   UNIQUE KEY uq_school_student_no (school, student_no),
   KEY idx_identity (school, major, student_no, phone),
   KEY idx_class (school, college, major, class_name),
+  KEY idx_role_updated (role, updated_at),
   KEY idx_status (status)
 );
 
@@ -72,4 +73,10 @@ CREATE TABLE IF NOT EXISTS payment_orders (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_payment_user (user_id, created_at),
   UNIQUE KEY uq_stripe_session (stripe_session_id)
+);
+
+CREATE TABLE IF NOT EXISTS campus_news_cache (
+  cache_key VARCHAR(40) PRIMARY KEY,
+  payload JSON NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );

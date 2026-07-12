@@ -1056,7 +1056,7 @@ function startYouthAudio(themeId) {
   if (previous?.themeId === themeId && !previous.element.paused) return;
   const element = new Audio("/assets/music/page-theme.mp3?v=custom-page-music-v128-20260620");
   element.loop = true;
-  element.preload = "auto";
+  element.preload = "none";
   element.volume = 0;
   youthAudio = { element, themeId, fadeFrame: 0 };
   element.play().then(() => {
@@ -1111,8 +1111,8 @@ function updateYouthRadio(themeId) {
   if (icon) icon.textContent = youthAudio ? "Ⅱ" : "▶";
 }
 
-async function getUnifiedTimetable() {
-  const data = await api("/api/timetable");
+async function getUnifiedTimetable(sourceData = null) {
+  const data = sourceData || await api("/api/timetable");
   const serverSettings = Object.fromEntries(Object.entries(data.settings || {}).filter(([, value]) => value !== "" && value !== 0));
   if (Object.keys(serverSettings).length) saveTimetableSettings(serverSettings);
   let personalCourses = mergeCourseLists(data.personalCourses || []);
@@ -2409,7 +2409,7 @@ function renderLegacyIntro() {
 
       <section class="intro-experience" id="introExperience">
         <div class="intro-experience-media">
-          <img src="/assets/campus-card-youth-v1.png" alt="青春校园生活场景" />
+          <img src="/assets/campus-card-youth-v1.webp" alt="青春校园生活场景" decoding="async" />
           <div><span>青春校园</span><strong>不仅是办事，更是探索与成长。</strong></div>
         </div>
         <div class="intro-experience-copy">
@@ -4054,7 +4054,8 @@ function bindQualityScoreTool() {
 
 const routes = {
   async dashboard() {
-    const [data, timetable] = await Promise.all([api("/api/dashboard"), getUnifiedTimetable()]);
+    const data = await api("/api/dashboard");
+    const timetable = await getUnifiedTimetable(data.timetable);
     const recentCampusNews = data.recentCampusNews || [];
     const reservationSummary = data.reservationSummary || { approvedHours: 0, approvedCount: 0, pendingCount: 0, totalCount: 0, approvalRate: 0 };
     const recentReservations = data.recentReservations || [];
@@ -6480,17 +6481,21 @@ const routes = {
     let students = [];
     let totalCount = 0;
     let studentCount = 0;
+    let roleCounts = { student: 0, teacher: 0, admin: 0, super_admin: 0 };
+    let currentAccountState = { query: "", role: "student", page: 1, pageSize: 50, totalPages: 1 };
     let canManageRoles = false;
     let loadError = "";
     try {
-      const [studentResult, allAccountResult] = await Promise.all([
-        adminApi("/api/admin/students?role=student"),
-        adminApi("/api/admin/students")
+      const [studentResult, healthResult] = await Promise.all([
+        adminApi("/api/admin/students?role=student&page=1&pageSize=50"),
+        adminApi("/api/admin/health")
       ]);
-      health = await adminApi("/api/admin/health");
+      health = healthResult.identity || healthResult;
       students = studentResult.students;
+      roleCounts = { ...roleCounts, ...(studentResult.roleCounts || {}) };
       studentCount = studentResult.totalCount ?? studentResult.count ?? students.length;
-      totalCount = allAccountResult.totalCount ?? allAccountResult.count ?? students.length;
+      totalCount = studentResult.accountCount ?? Object.values(roleCounts).reduce((sum, count) => sum + Number(count || 0), 0);
+      currentAccountState.totalPages = studentResult.totalPages || 1;
       canManageRoles = studentResult.canManageRoles;
     } catch (error) {
       loadError = error.message;
@@ -6501,7 +6506,7 @@ const routes = {
         <td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td>
         <td>${escapeHtml(student.className || "未填写")}</td>
         <td>${escapeHtml(student.studentNo)}</td>
-        <td>${escapeHtml(student.phoneMasked || student.phone)}</td>
+        <td>${escapeHtml(student.phoneMasked || "未绑定")}</td>
         <td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
         <td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td>
         <td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td>
@@ -6572,14 +6577,19 @@ const routes = {
             </div>
             <div class="student-role-filters" aria-label="按账号角色筛选">
               <button class="active" type="button" data-account-role="student">学生 <span>${studentCount.toLocaleString("zh-CN")}</span></button>
-              <button type="button" data-account-role="teacher">老师</button>
-              ${canManageRoles ? `<button type="button" data-account-role="admin">普通管理员</button><button type="button" data-account-role="super_admin">总管理员</button>` : ""}
+              <button type="button" data-account-role="teacher">老师 <span>${Number(roleCounts.teacher || 0).toLocaleString("zh-CN")}</span></button>
+              ${canManageRoles ? `<button type="button" data-account-role="admin">普通管理员 <span>${Number(roleCounts.admin || 0).toLocaleString("zh-CN")}</span></button><button type="button" data-account-role="super_admin">总管理员 <span>${Number(roleCounts.super_admin || 0).toLocaleString("zh-CN")}</span></button>` : ""}
             </div>
             <div class="table-wrap">
               <table class="student-table">
                 <thead><tr><th>账号</th><th>学校 / 专业</th><th>班级</th><th>学号 / 工号</th><th>手机号</th><th>角色</th><th>状态</th><th>密码</th><th>操作</th></tr></thead>
                 <tbody>${studentRows || `<tr><td colspan="9" class="empty">身份库暂无账号</td></tr>`}</tbody>
               </table>
+            </div>
+            <div class="student-list-pagination" aria-label="账号列表分页">
+              <button class="ghost-btn" id="studentPagePrev" type="button" disabled>上一页</button>
+              <span id="studentPageSummary">第 1 / ${currentAccountState.totalPages} 页 · 共 ${studentCount.toLocaleString("zh-CN")} 个学生账号</span>
+              <button class="ghost-btn" id="studentPageNext" type="button" ${currentAccountState.totalPages <= 1 ? "disabled" : ""}>下一页</button>
             </div>
           </div>
         </section>
@@ -6620,7 +6630,7 @@ const routes = {
           event.preventDefault();
           const query = new FormData(event.currentTarget).get("query");
           try {
-            await loadFilteredStudents({ query, role: document.querySelector(".student-role-filters button.active")?.dataset.accountRole || "" });
+            await loadFilteredStudents({ query, role: document.querySelector(".student-role-filters button.active")?.dataset.accountRole || "", page: 1 });
           } catch (error) {
             toast(error.message);
           }
@@ -6634,22 +6644,51 @@ const routes = {
           bindStudentRoleSelects();
           bindStudentPasswordResetButtons();
         }
-        async function loadFilteredStudents({ query = "", role = "" } = {}) {
-          const result = await adminApi(`/api/admin/students?query=${encodeURIComponent(query)}&role=${encodeURIComponent(role)}`);
+        function updateAccountListMeta(result) {
+          currentAccountState = {
+            ...currentAccountState,
+            page: result.page || currentAccountState.page,
+            pageSize: result.pageSize || currentAccountState.pageSize,
+            totalPages: result.totalPages || 1
+          };
+          roleCounts = { ...roleCounts, ...(result.roleCounts || {}) };
+          document.querySelectorAll(".student-role-filters button").forEach((button) => {
+            const count = Number(roleCounts[button.dataset.accountRole] || 0);
+            let countNode = button.querySelector("span");
+            if (!countNode) {
+              countNode = document.createElement("span");
+              button.append(countNode);
+            }
+            countNode.textContent = count.toLocaleString("zh-CN");
+          });
+          const summary = document.querySelector("#studentPageSummary");
+          if (summary) summary.textContent = `第 ${currentAccountState.page} / ${currentAccountState.totalPages} 页 · 当前条件共 ${Number(result.totalCount || 0).toLocaleString("zh-CN")} 个账号`;
+          const previous = document.querySelector("#studentPagePrev");
+          const next = document.querySelector("#studentPageNext");
+          if (previous) previous.disabled = currentAccountState.page <= 1;
+          if (next) next.disabled = currentAccountState.page >= currentAccountState.totalPages;
+        }
+        async function loadFilteredStudents({ query = currentAccountState.query, role = currentAccountState.role, page = currentAccountState.page } = {}) {
+          currentAccountState = { ...currentAccountState, query: String(query || ""), role: String(role || ""), page: Math.max(1, Number(page) || 1) };
+          const params = new URLSearchParams({
+            query: currentAccountState.query,
+            role: currentAccountState.role,
+            page: String(currentAccountState.page),
+            pageSize: String(currentAccountState.pageSize)
+          });
+          const result = await adminApi(`/api/admin/students?${params}`);
           renderFilteredStudents(result);
-          const activeButton = document.querySelector(`.student-role-filters button[data-account-role="${role}"]`);
+          const activeButton = document.querySelector(`.student-role-filters button[data-account-role="${currentAccountState.role}"]`);
           document.querySelectorAll(".student-role-filters button").forEach((button) => button.classList.toggle("active", button === activeButton));
-          if (activeButton) {
-            activeButton.querySelector("span")?.remove();
-            activeButton.insertAdjacentHTML("beforeend", ` <span>${result.totalCount.toLocaleString("zh-CN")}</span>`);
-          }
+          updateAccountListMeta(result);
         }
         document.querySelectorAll(".student-role-filters button").forEach((button) => {
           button.addEventListener("click", async () => {
             try {
               await loadFilteredStudents({
                 query: document.querySelector("#studentSearchForm [name='query']")?.value || "",
-                role: button.dataset.accountRole
+                role: button.dataset.accountRole,
+                page: 1
               });
             } catch (error) {
               toast(error.message);
@@ -6665,7 +6704,7 @@ const routes = {
                   body: JSON.stringify({ studentNo: button.dataset.studentNo, status: button.dataset.nextStatus })
                 });
                 toast(button.dataset.nextStatus === "disabled" ? "学生已停用" : "学生已启用");
-                renderShell();
+                await loadFilteredStudents();
               } catch (error) {
                 toast(error.message);
               }
@@ -6684,7 +6723,7 @@ const routes = {
                   body: JSON.stringify({ studentNo: button.dataset.studentNo })
                 });
                 toast("密码已清除，请用户通过手机号登录后重新设置");
-                renderShell();
+                await loadFilteredStudents();
               } catch (error) {
                 toast(error.message);
               }
@@ -6703,15 +6742,31 @@ const routes = {
                   body: JSON.stringify({ studentNo: select.dataset.studentNo, role: select.value })
                 });
                 toast("账号角色已更新");
-                renderShell();
+                await loadFilteredStudents();
               } catch (error) {
                 toast(error.message);
-                renderShell();
+                await loadFilteredStudents();
               }
             });
           });
         }
         bindStudentRoleSelects();
+        document.querySelector("#studentPagePrev")?.addEventListener("click", async () => {
+          if (currentAccountState.page <= 1) return;
+          try {
+            await loadFilteredStudents({ page: currentAccountState.page - 1 });
+          } catch (error) {
+            toast(error.message);
+          }
+        });
+        document.querySelector("#studentPageNext")?.addEventListener("click", async () => {
+          if (currentAccountState.page >= currentAccountState.totalPages) return;
+          try {
+            await loadFilteredStudents({ page: currentAccountState.page + 1 });
+          } catch (error) {
+            toast(error.message);
+          }
+        });
       }
     };
   },
