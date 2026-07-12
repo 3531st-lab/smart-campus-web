@@ -972,8 +972,11 @@ async function handleApi(req, res) {
     }
 
     if (route === "GET /api/admin/health") {
+      const identityHealth = await studentStore.health();
       sendJson(res, 200, {
-        identity: await studentStore.health(),
+        mode: identityHealth.mode,
+        connected: identityHealth.connected,
+        identity: identityHealth,
         permanentAdmin: studentStore.permanentAdminStatus(),
         reservations: await reservationStore.health(),
         timetable: await timetableStore.health(),
@@ -1013,7 +1016,8 @@ async function handleApi(req, res) {
       const requestedRole = url.searchParams.get("role") || "";
       const query = String(url.searchParams.get("query") || "").trim().slice(0, 120);
       const status = url.searchParams.get("status") || "";
-      const pageSize = Math.min(Math.max(10, Number(url.searchParams.get("pageSize")) || 50), 100);
+      const paginatedRequest = url.searchParams.has("page") || url.searchParams.has("pageSize");
+      const pageSize = Math.min(Math.max(10, Number(url.searchParams.get("pageSize")) || (paginatedRequest ? 50 : 200)), 200);
       const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
       const roleFilter = !isSuperAdmin && requestedRole && !["student", "teacher"].includes(requestedRole) ? "__denied__" : requestedRole;
       if (roleFilter === "__denied__") {
