@@ -1,4 +1,5 @@
 const THEME_STORAGE_KEY = "smart_campus_color_theme_v1";
+const { normalizePlacement: normalizeTimetablePlacement, gridPlacement: timetableGridPlacement } = window.TimetableCore;
 
 function preferredTheme() {
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
@@ -23,7 +24,7 @@ const state = {
   sidebarScrollTop: Number(sessionStorage.getItem("smart_campus_sidebar_scroll") || 0)
 };
 
-const APP_BUILD = "campus-search-v151-20260710";
+const APP_BUILD = "timetable-placement-v155-20260713";
 window.__SMART_CAMPUS_BUILD__ = APP_BUILD;
 const LEGAL_CONSENT_VERSION = "2026.06.20";
 const LEGAL_CONSENT_STORAGE_KEY = "smart_campus_legal_consent_v1";
@@ -536,8 +537,7 @@ function sectionFromTime(time) {
 }
 
 function normalizeCourseRecord(course, index = 0) {
-  const startSection = Math.min(12, Math.max(1, Number(course.startSection || course.section || course.period || course["开始节次"] || sectionFromTime(course.time))));
-  const sectionCount = Math.min(4, Math.max(1, Number(course.sectionCount || course.duration || course.count || course["连续节数"] || 2)));
+  const { startSection, sectionCount } = normalizeTimetablePlacement(course, { fallbackStart: sectionFromTime(course.time) });
   const normalized = {
     ...course,
     id: course.id || `course-${Date.now()}-${index}`,
@@ -1412,8 +1412,9 @@ function minutesOf(value) {
 
 function courseTimeLabel(course, scheduleMode = "summer") {
   const starts = TIMETABLE_SCHEDULES[scheduleMode] || TIMETABLE_SCHEDULES.summer;
-  const startIndex = Math.min(12, Math.max(1, Number(course.startSection || 1))) - 1;
-  const endIndex = Math.min(11, startIndex + Math.max(1, Number(course.sectionCount || 1)) - 1);
+  const placement = normalizeTimetablePlacement(course, { fallbackCount: 1 });
+  const startIndex = placement.startSection - 1;
+  const endIndex = Math.min(11, startIndex + placement.sectionCount - 1);
   return `${starts[startIndex]}-${starts[endIndex]}`;
 }
 
@@ -1652,6 +1653,7 @@ function conversionDownloadHref(job) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    cache: options.cache || "no-store",
     headers: {
       "Content-Type": "application/json",
       ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
@@ -2968,7 +2970,7 @@ async function renderShell() {
     refreshUnreadNotificationCount();
   } catch (error) {
     if (renderVersion !== renderShellVersion || requestedRoute !== state.route) return;
-    app.innerHTML = shell(`<div class="empty">${error.message}</div>`, "加载失败", "请稍后重试");
+    app.innerHTML = shell(`<div class="empty">${escapeHtml(error.message)}</div>`, "加载失败", "请稍后重试");
     bindNav();
     bindMotionEffects();
   }
@@ -3205,7 +3207,7 @@ async function submitDocConvertForm(form, toolFile, resultBox, submitButton) {
     }
     toast("转换任务已创建");
   } catch (error) {
-    if (resultBox) resultBox.innerHTML = `<strong>转换失败</strong><p>${error.message}</p>`;
+    if (resultBox) resultBox.innerHTML = `<strong>转换失败</strong><p>${escapeHtml(error.message)}</p>`;
     toast(error.message || "转换失败");
   } finally {
     if (submitButton) {
@@ -5010,10 +5012,9 @@ const routes = {
                   `).join("")}
                   ${visibleCourses.map((course) => {
                     const dayIndex = Math.max(0, weekDays.indexOf(normalizeDay(course.day)));
-                    const start = Math.min(12, Math.max(1, Number(course.startSection || 1)));
-                    const span = Math.min(Number(course.sectionCount || 2), 13 - start);
+                    const { gridRowStart, gridRowSpan } = timetableGridPlacement(course);
                     return `
-                      <button type="button" class="timetable-course-card" data-course-edit="${escapeHtml(course.id)}" style="grid-column: ${dayIndex + 2}; grid-row: ${start + 1} / span ${span}; ${timetableCourseGradient(course, coursePalette.get(String(course.course || course.id)) || 0)}">
+                      <button type="button" class="timetable-course-card" data-course-edit="${escapeHtml(course.id)}" style="grid-column: ${dayIndex + 2}; grid-row: ${gridRowStart} / span ${gridRowSpan}; ${timetableCourseGradient(course, coursePalette.get(String(course.course || course.id)) || 0)}">
                         <span>${escapeHtml(courseTimeLabel(course, settings.schedule))}</span>
                         <strong>${escapeHtml(course.course)}</strong>
                         <em>${escapeHtml(course.location || "未填写教室")}</em>
@@ -6483,7 +6484,6 @@ const routes = {
     let studentCount = 0;
     let roleCounts = { student: 0, teacher: 0, admin: 0, super_admin: 0 };
     let currentAccountState = { query: "", role: "student", page: 1, pageSize: 20, totalPages: 1 };
-    const accountPageCache = new Map();
     let canManageRoles = false;
     let loadError = "";
     try {
@@ -6495,7 +6495,6 @@ const routes = {
       totalCount = studentResult.accountCount ?? Object.values(roleCounts).reduce((sum, count) => sum + Number(count || 0), 0);
       currentAccountState.totalPages = studentResult.totalPages || 1;
       canManageRoles = studentResult.canManageRoles;
-      accountPageCache.set("|student|1|20", studentResult);
     } catch (error) {
       loadError = error.message;
     }
@@ -6603,8 +6602,7 @@ const routes = {
               body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries()))
             });
             toast("学生身份已保存");
-            accountPageCache.clear();
-            await loadFilteredStudents({ page: 1, force: true });
+            await loadFilteredStudents({ page: 1 });
             event.currentTarget.reset();
           } catch (error) {
             toast(error.message);
@@ -6627,8 +6625,7 @@ const routes = {
             const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
             resultNode.textContent = `成功 ${result.success} 条，失败 ${result.failed} 条，用时 ${elapsed} 秒。${result.errors.slice(0, 3).join("；")}`;
             toast("学生名单导入完成");
-            accountPageCache.clear();
-            await loadFilteredStudents({ role: "student", page: 1, force: true });
+            await loadFilteredStudents({ role: "student", page: 1 });
           } catch (error) {
             resultNode.textContent = error.message;
           } finally {
@@ -6687,7 +6684,7 @@ const routes = {
           if (previous) previous.disabled = busy || currentAccountState.page <= 1;
           if (next) next.disabled = busy || currentAccountState.page >= currentAccountState.totalPages;
         }
-        async function loadFilteredStudents({ query = currentAccountState.query, role = currentAccountState.role, page = currentAccountState.page, force = false } = {}) {
+        async function loadFilteredStudents({ query = currentAccountState.query, role = currentAccountState.role, page = currentAccountState.page } = {}) {
           currentAccountState = { ...currentAccountState, query: String(query || ""), role: String(role || ""), page: Math.max(1, Number(page) || 1) };
           const activeButton = document.querySelector(`.student-role-filters button[data-account-role="${currentAccountState.role}"]`);
           document.querySelectorAll(".student-role-filters button").forEach((button) => button.classList.toggle("active", button === activeButton));
@@ -6697,17 +6694,9 @@ const routes = {
             page: String(currentAccountState.page),
             pageSize: String(currentAccountState.pageSize)
           });
-          const cacheKey = `${currentAccountState.query}|${currentAccountState.role}|${currentAccountState.page}|${currentAccountState.pageSize}`;
           setAccountListBusy(true, currentAccountState.page > 1 ? `正在加载第 ${currentAccountState.page} 页...` : "正在切换账号分类...");
           try {
-            let result = !force ? accountPageCache.get(cacheKey) : null;
-            if (!result && !currentAccountState.query && Number(roleCounts[currentAccountState.role] || 0) === 0) {
-              result = { students: [], totalCount: 0, page: 1, pageSize: currentAccountState.pageSize, totalPages: 1, roleCounts };
-            }
-            if (!result) {
-              result = await adminApi(`/api/admin/students?${params}`);
-              accountPageCache.set(cacheKey, result);
-            }
+            const result = await adminApi(`/api/admin/students?${params}`);
             renderFilteredStudents(result);
             updateAccountListMeta(result);
           } finally {
@@ -6736,8 +6725,7 @@ const routes = {
                   body: JSON.stringify({ studentNo: button.dataset.studentNo, status: button.dataset.nextStatus })
                 });
                 toast(button.dataset.nextStatus === "disabled" ? "学生已停用" : "学生已启用");
-                accountPageCache.clear();
-                await loadFilteredStudents({ force: true });
+                await loadFilteredStudents();
               } catch (error) {
                 toast(error.message);
               }
@@ -6756,8 +6744,7 @@ const routes = {
                   body: JSON.stringify({ studentNo: button.dataset.studentNo })
                 });
                 toast("密码已清除，请用户通过手机号登录后重新设置");
-                accountPageCache.clear();
-                await loadFilteredStudents({ force: true });
+                await loadFilteredStudents();
               } catch (error) {
                 toast(error.message);
               }
@@ -6776,12 +6763,10 @@ const routes = {
                   body: JSON.stringify({ studentNo: select.dataset.studentNo, role: select.value })
                 });
                 toast("账号角色已更新");
-                accountPageCache.clear();
-                await loadFilteredStudents({ force: true });
+                await loadFilteredStudents();
               } catch (error) {
                 toast(error.message);
-                accountPageCache.clear();
-                await loadFilteredStudents({ force: true });
+                await loadFilteredStudents();
               }
             });
           });

@@ -2,6 +2,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { SlidingWindowRegistry, publicRequestError } = require("./security-policy");
 
 function loadLocalEnv() {
   const envPath = path.resolve(__dirname, "..", ".env");
@@ -16,6 +17,7 @@ function loadLocalEnv() {
 loadLocalEnv();
 const data = require("./data");
 const XLSX = require("xlsx");
+const timetableCore = require("../public/timetable-core-v155.js");
 const studentStore = require("./student-store");
 const timetableStore = require("./timetable-store");
 const reservationStore = require("./reservation-store");
@@ -28,10 +30,20 @@ const examCatalog = require("./exams-data.json");
 const PORT = Number(process.env.PORT || 5173);
 const ROOT = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT, "public");
-const sessions = new Map();
-const smsRateLimits = new Map();
-const TOKEN_SECRET = process.env.AUTH_SECRET || "smart-campus-public-demo-v1";
-const SMS_TOKEN_SECRET = process.env.SMS_TOKEN_SECRET || TOKEN_SECRET;
+const smsRateLimits = new SlidingWindowRegistry({ maxKeys: 5000, maxEventsPerKey: 1 });
+const IS_PRODUCTION = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL || process.env.CF_PAGES);
+
+function productionSecret(name, developmentFallback) {
+  const value = String(process.env[name] || "").trim();
+  if (IS_PRODUCTION && value.length < 32) {
+    throw new Error(`${name} must be configured with at least 32 characters in production`);
+  }
+  return value || developmentFallback;
+}
+
+const TOKEN_SECRET = productionSecret("AUTH_SECRET", "smart-campus-local-development-only");
+const SMS_TOKEN_SECRET = String(process.env.SMS_TOKEN_SECRET || "").trim()
+  || crypto.createHmac("sha256", TOKEN_SECRET).update("smart-campus-sms-challenge-v1").digest("hex");
 const SMS_CODE_TTL_MS = 5 * 60 * 1000;
 const SMS_RESEND_MS = 60 * 1000;
 const AUTH_TOKEN_TTL_MS = Math.max(Number(process.env.AUTH_TOKEN_TTL_MS || 8 * 60 * 60 * 1000), 30 * 60 * 1000);
@@ -41,8 +53,8 @@ const URL_MAX_LENGTH = Number(process.env.URL_MAX_LENGTH || 2048);
 const SECURITY_BUILD = "security-hardening-v89-20260617";
 const LEGAL_CONSENT_VERSION = "2026.06.20";
 const PUBLIC_APP_URL = String(process.env.PUBLIC_APP_URL || "https://zhihueixiaoyuan.pages.dev").replace(/\/+$/, "");
-const rateLimits = new Map();
-const authFailures = new Map();
+const rateLimits = new SlidingWindowRegistry({ maxKeys: 10000, maxEventsPerKey: 120 });
+const authFailures = new SlidingWindowRegistry({ maxKeys: 5000, maxEventsPerKey: 8 });
 const AI_RUNTIME_CONFIG_PATH = path.join(__dirname, "ai-runtime.json");
 let AI_PROVIDER = String(process.env.AI_PROVIDER || "openai").toLowerCase();
 let AI_BASE_URL = String(process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
@@ -50,7 +62,7 @@ let AI_API_KEY = String(process.env.AI_API_KEY || process.env.OPENAI_API_KEY || 
 let AI_MODEL = String(process.env.AI_MODEL || "gpt-5.5");
 let AI_SYSTEM_PROMPT = String(process.env.AI_SYSTEM_PROMPT || "你是一个能力全面、准确、实用的 AI 助手。你可以回答通用知识、学习、写作、编程、数据分析、职业规划和校园生活等问题。请直接解决用户问题，不要把回答局限于校园场景。");
 let AI_MAX_REQUESTS_PER_MINUTE = Math.max(1, Number(process.env.AI_MAX_REQUESTS_PER_MINUTE || 12));
-const aiRateLimits = new Map();
+const aiRateLimits = new SlidingWindowRegistry({ maxKeys: 5000, maxEventsPerKey: 60 });
 
 function applyAiRuntimeConfig(config = {}) {
   if (config.provider) AI_PROVIDER = String(config.provider).trim().toLowerCase();
@@ -168,6 +180,7 @@ function securityHeaders(req, extra = {}) {
       "connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com https://api.bigdatacloud.net"
     ].join("; "),
     "X-Security-Build": SECURITY_BUILD,
+    "X-Request-Id": String(req?.requestId || ""),
     ...extra
   };
   if (corsOrigin) {
@@ -210,14 +223,13 @@ function clientIp(req) {
 
 function consumeRateLimit(key, limit, windowMs) {
   const now = Date.now();
-  const recent = (rateLimits.get(key) || []).filter((time) => now - time < windowMs);
+  const recent = rateLimits.recent(key, now, windowMs);
   if (recent.length >= limit) {
     const error = new Error("请求过于频繁，请稍后再试");
     error.statusCode = 429;
     throw error;
   }
-  recent.push(now);
-  rateLimits.set(key, recent);
+  rateLimits.record(key, now, windowMs);
 }
 
 function guardRequest(req, route) {
@@ -242,7 +254,7 @@ function authFailureKey(req, body = {}) {
 function blockIfAuthThrottled(req, body = {}) {
   const key = authFailureKey(req, body);
   const now = Date.now();
-  const recent = (authFailures.get(key) || []).filter((time) => now - time < 10 * 60 * 1000);
+  const recent = authFailures.recent(key, now, 10 * 60 * 1000);
   if (recent.length >= 8) {
     const error = new Error("登录失败次数过多，请稍后再试");
     error.statusCode = 429;
@@ -253,9 +265,7 @@ function blockIfAuthThrottled(req, body = {}) {
 function recordAuthFailure(req, body = {}) {
   const key = authFailureKey(req, body);
   const now = Date.now();
-  const recent = (authFailures.get(key) || []).filter((time) => now - time < 10 * 60 * 1000);
-  recent.push(now);
-  authFailures.set(key, recent);
+  authFailures.record(key, now, 10 * 60 * 1000);
   blockIfAuthThrottled(req, body);
 }
 
@@ -277,15 +287,14 @@ function aiStatus() {
 
 function consumeAiRequest(userId) {
   const now = Date.now();
-  const recent = (aiRateLimits.get(userId) || []).filter((time) => now - time < 60_000);
+  const recent = aiRateLimits.recent(userId, now, 60_000);
   if (recent.length >= AI_MAX_REQUESTS_PER_MINUTE) {
     const retryAfter = Math.max(1, Math.ceil((60_000 - (now - recent[0])) / 1000));
     const error = new Error(`AI 请求过于频繁，请在 ${retryAfter} 秒后重试`);
     error.statusCode = 429;
     throw error;
   }
-  recent.push(now);
-  aiRateLimits.set(userId, recent);
+  aiRateLimits.record(userId, now, 60_000);
 }
 
 function normalizeAiMessages(messages) {
@@ -403,8 +412,10 @@ function normalizeOcrCourse(row, index, defaults = {}) {
     semester: read("semester", "学期") || defaults.semester || "2025-2026学年第二学期",
     weeks: read("weeks", "week", "周次") || defaults.week || "1-20",
     day: read("day", "weekday", "星期") || "",
-    startSection: Number(read("startSection", "section", "开始节次", "起始节次") || 1),
-    sectionCount: Number(read("sectionCount", "duration", "连续节数", "节数") || 2),
+    ...timetableCore.normalizePlacement({
+      startSection: read("startSection", "section", "开始节次", "起始节次"),
+      sectionCount: read("sectionCount", "duration", "连续节数", "节数")
+    }),
     course: String(read("course", "title", "课程名称", "课程") || "").trim(),
     location: String(read("location", "room", "上课地点", "地点", "教室") || "").trim(),
     teacher: String(read("teacher", "任课教师", "教师") || "").trim(),
@@ -458,15 +469,25 @@ async function requestTimetableOcr(imageData, defaults = {}) {
 function parseBody(req, options = {}) {
   const limitBytes = options.limitBytes || MAX_JSON_BODY_BYTES;
   return new Promise((resolve, reject) => {
-    let body = "";
+    const chunks = [];
+    let size = 0;
+    let settled = false;
     req.on("data", (chunk) => {
-      body += chunk;
-      if (Buffer.byteLength(body) > limitBytes) {
-        reject(new Error("请求体过大"));
-        req.destroy();
+      if (settled) return;
+      size += chunk.length;
+      if (size > limitBytes) {
+        settled = true;
+        const error = new Error("请求体过大");
+        error.statusCode = 413;
+        reject(error);
+        return;
       }
+      chunks.push(chunk);
     });
     req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      const body = Buffer.concat(chunks).toString("utf8");
       if (!body) {
         resolve({});
         return;
@@ -474,8 +495,15 @@ function parseBody(req, options = {}) {
       try {
         resolve(JSON.parse(body));
       } catch (error) {
-        reject(new Error("JSON 格式错误"));
+        const parseError = new Error("JSON 格式错误");
+        parseError.statusCode = 400;
+        reject(parseError);
       }
+    });
+    req.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
     });
   });
 }
@@ -483,7 +511,7 @@ function parseBody(req, options = {}) {
 async function getCurrentUser(req) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  const userId = verifyToken(token) || sessions.get(token);
+  const userId = verifyToken(token);
   if (!userId) return null;
   return studentStore.findById(userId);
 }
@@ -493,17 +521,29 @@ function parseRawBody(req, options = {}) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let settled = false;
     req.on("data", (chunk) => {
+      if (settled) return;
       size += chunk.length;
       if (size > limitBytes) {
-        reject(new Error("Request body is too large"));
-        req.destroy();
+        settled = true;
+        const error = new Error("Request body is too large");
+        error.statusCode = 413;
+        reject(error);
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
   });
 }
 
@@ -830,7 +870,7 @@ async function handleApi(req, res) {
     await studentStore.logLegalConsent(user, body.legalConsent, { loginMode: "sms_request" });
 
     const now = Date.now();
-    const lastSentAt = smsRateLimits.get(user.phone) || 0;
+    const lastSentAt = smsRateLimits.recent(user.phone, now, SMS_RESEND_MS).at(-1) || 0;
     const retryAfter = Math.ceil((SMS_RESEND_MS - (now - lastSentAt)) / 1000);
     if (retryAfter > 0) {
       sendJson(res, 429, { error: `请在 ${retryAfter} 秒后重新获取验证码`, retryAfter });
@@ -840,7 +880,7 @@ async function handleApi(req, res) {
     const code = String(crypto.randomInt(100000, 1000000));
     const expiresAt = now + SMS_CODE_TTL_MS;
     const delivery = await deliverSmsCode(user.phone, code);
-    smsRateLimits.set(user.phone, now);
+    smsRateLimits.record(user.phone, now, SMS_RESEND_MS);
     const challenge = signPayload({
       userId: user.id,
       phone: user.phone,
@@ -1387,8 +1427,10 @@ async function handleApi(req, res) {
       semester: read(row, "semester", "学期") || "2025-2026学年第二学期",
       weeks: read(row, "weeks", "week", "周次", "上课周次") || "1-20",
       day: read(row, "day", "weekday", "星期", "周几") || "周一",
-      startSection: Number(read(row, "startSection", "section", "开始节次", "起始节次", "节次") || 1),
-      sectionCount: Number(read(row, "sectionCount", "duration", "连续节数", "节数") || 2),
+      ...timetableCore.normalizePlacement({
+        startSection: read(row, "startSection", "section", "开始节次", "起始节次", "节次"),
+        sectionCount: read(row, "sectionCount", "duration", "连续节数", "节数")
+      }),
       course: read(row, "course", "title", "课程", "课程名称", "科目") || "未命名课程",
       location: read(row, "location", "room", "地点", "上课地点", "教室") || "",
       teacher: read(row, "teacher", "教师", "老师", "任课教师") || "",
@@ -1775,6 +1817,10 @@ async function handleApi(req, res) {
 }
 
 function requestHandler(req, res) {
+  const incomingRequestId = String(req.headers["x-request-id"] || "").trim();
+  req.requestId = /^[A-Za-z0-9._-]{8,100}$/.test(incomingRequestId)
+    ? incomingRequestId
+    : crypto.randomUUID();
   res.__securityReq = req;
   if (!["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"].includes(req.method)) {
     sendError(res, 405, "请求方法不允许");
@@ -1786,10 +1832,14 @@ function requestHandler(req, res) {
   }
   if (req.url.startsWith("/api/")) {
     handleApi(req, res).catch((error) => {
-      const status = error.statusCode || 500;
-      void integrations.captureError(error, { route: req.url.split("?")[0], method: req.method, status });
-      const databaseError = /access denied|econnrefused|etimedout|database|mysql|tidb/i.test(String(error.message || ""));
-      sendError(res, databaseError ? 503 : status, databaseError ? "数据库服务暂时不可用，请稍后重试" : error.message);
+      const publicError = publicRequestError(error, IS_PRODUCTION);
+      void integrations.captureError(error, {
+        requestId: req.requestId,
+        route: req.url.split("?")[0],
+        method: req.method,
+        status: publicError.status
+      });
+      sendError(res, publicError.status, publicError.message);
     });
     return;
   }
