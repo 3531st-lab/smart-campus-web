@@ -1,0 +1,40 @@
+@media (min-width: 821px) {
+  .login-form {
+    min-height: 0;
+    max-height: none;
+    height: auto;
+    gap: 5px;
+    padding: 12px 30px;
+  }
+
+  .login-form-heading p {
+    margin-top: 3px;
+  }
+
+  .login-role-switch,
+  .login-auth-switch {
+    min-height: 32px;
+  }
+
+  .login-role-switch button,
+  .login-auth-switch button {
+    min-height: 27px;
+  }
+
+  .login-identity-grid {
+    gap: 6px 12px;
+  }
+
+  .login-field {
+    gap: 3px;
+  }
+
+  .login-field input {
+    height: 34px;
+  }
+
+  .login-submit,
+  .login-guest-btn {
+    min-height: 35px;
+  }
+}
