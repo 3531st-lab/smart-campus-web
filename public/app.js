@@ -5123,15 +5123,32 @@ const routes = {
         bindTimetableControls();
         bindTimetableImportModal();
         bindTimetableEditor();
-        document.querySelector("#exportTimetable").addEventListener("click", async () => {
-          const result = await api("/api/timetable/export", {
-            method: "POST",
-            body: JSON.stringify({ courses: visibleCourses })
-          });
-          const link = document.createElement("a");
-          link.href = `/downloads/conversions/${encodeURIComponent(result.filename)}`;
-          link.download = "智慧校园中文课表.xlsx";
-          link.click();
+        const exportButton = document.querySelector("#exportTimetable");
+        exportButton.addEventListener("click", async () => {
+          if (exportButton.disabled) return;
+          exportButton.disabled = true;
+          try {
+            const result = await api("/api/timetable/export", {
+              method: "POST",
+              body: JSON.stringify({ courses: visibleCourses })
+            });
+            if (!result.fileBase64) throw new Error("课表文件生成失败");
+            const binary = atob(result.fileBase64);
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+            const objectUrl = URL.createObjectURL(new Blob([bytes], { type: result.mimeType }));
+            const link = document.createElement("a");
+            link.href = objectUrl;
+            link.download = "智慧校园中文课表.xlsx";
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+          } catch (error) {
+            toast(error.message || "课表导出失败，请稍后重试");
+          } finally {
+            exportButton.disabled = false;
+          }
         });
       }
     };
@@ -6455,8 +6472,10 @@ const routes = {
               method: "PUT",
               body: JSON.stringify(payload)
             });
-            resultNode.textContent = `保存成功：${saved.provider} · ${saved.model}`;
-            toast("AI 模型配置已保存");
+            resultNode.textContent = saved.persistent === false
+              ? `配置已在当前实例生效：${saved.provider} · ${saved.model}。生产环境请使用环境变量永久保存。`
+              : `保存成功：${saved.provider} · ${saved.model}`;
+            toast(saved.persistent === false ? "配置已临时生效，请设置环境变量" : "AI 模型配置已保存");
           } catch (error) {
             resultNode.textContent = error.message;
             toast(error.message);

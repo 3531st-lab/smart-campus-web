@@ -63,6 +63,58 @@ let AI_MODEL = String(process.env.AI_MODEL || "gpt-5.5");
 let AI_SYSTEM_PROMPT = String(process.env.AI_SYSTEM_PROMPT || "你是一个能力全面、准确、实用的 AI 助手。你可以回答通用知识、学习、写作、编程、数据分析、职业规划和校园生活等问题。请直接解决用户问题，不要把回答局限于校园场景。");
 let AI_MAX_REQUESTS_PER_MINUTE = Math.max(1, Number(process.env.AI_MAX_REQUESTS_PER_MINUTE || 12));
 const aiRateLimits = new SlidingWindowRegistry({ maxKeys: 5000, maxEventsPerKey: 60 });
+const AI_CONFIG_ENCRYPTION_KEY = crypto.createHash("sha256")
+  .update(String(process.env.AI_CONFIG_SECRET || TOKEN_SECRET))
+  .digest();
+const AI_CONFIG_EPHEMERAL_RUNTIME = Boolean(
+  process.env.VERCEL
+  || process.env.CF_PAGES
+  || process.env.AWS_LAMBDA_FUNCTION_NAME
+  || process.env.NETLIFY
+  || process.env.RAILWAY_ENVIRONMENT
+  || process.env.ZEABUR_SERVICE_ID
+);
+let AI_CONFIG_PERSISTENCE = AI_API_KEY ? "environment" : "defaults";
+
+function encryptAiRuntimeConfig(config) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", AI_CONFIG_ENCRYPTION_KEY, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify(config), "utf8"),
+    cipher.final()
+  ]);
+  return {
+    version: 1,
+    algorithm: "aes-256-gcm",
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64")
+  };
+}
+
+function decryptAiRuntimeConfig(payload) {
+  if (!payload || payload.algorithm !== "aes-256-gcm" || !payload.ciphertext) return payload;
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    AI_CONFIG_ENCRYPTION_KEY,
+    Buffer.from(payload.iv, "base64")
+  );
+  decipher.setAuthTag(Buffer.from(payload.tag, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(payload.ciphertext, "base64")),
+    decipher.final()
+  ]);
+  return JSON.parse(plaintext.toString("utf8"));
+}
+
+function aiConfigSaveResult(config) {
+  const { apiKey, ...safeConfig } = config;
+  return {
+    ...safeConfig,
+    persistence: AI_CONFIG_PERSISTENCE,
+    persistent: AI_CONFIG_PERSISTENCE !== "runtime"
+  };
+}
 
 function applyAiRuntimeConfig(config = {}) {
   if (config.provider) AI_PROVIDER = String(config.provider).trim().toLowerCase();
@@ -76,7 +128,19 @@ function applyAiRuntimeConfig(config = {}) {
 function loadAiRuntimeConfig() {
   if (!fs.existsSync(AI_RUNTIME_CONFIG_PATH)) return;
   try {
-    applyAiRuntimeConfig(JSON.parse(fs.readFileSync(AI_RUNTIME_CONFIG_PATH, "utf8")));
+    const fileConfig = decryptAiRuntimeConfig(JSON.parse(fs.readFileSync(AI_RUNTIME_CONFIG_PATH, "utf8")));
+    applyAiRuntimeConfig({
+      ...fileConfig,
+      provider: process.env.AI_PROVIDER || fileConfig.provider,
+      baseUrl: process.env.AI_BASE_URL || fileConfig.baseUrl,
+      apiKey: process.env.AI_API_KEY || process.env.OPENAI_API_KEY || fileConfig.apiKey,
+      model: process.env.AI_MODEL || fileConfig.model,
+      systemPrompt: process.env.AI_SYSTEM_PROMPT || fileConfig.systemPrompt,
+      requestsPerMinute: process.env.AI_MAX_REQUESTS_PER_MINUTE || fileConfig.requestsPerMinute
+    });
+    AI_CONFIG_PERSISTENCE = AI_API_KEY && (process.env.AI_API_KEY || process.env.OPENAI_API_KEY)
+      ? "environment"
+      : "file";
   } catch (error) {
     console.warn("Failed to load AI runtime config:", error.message);
   }
@@ -93,8 +157,18 @@ function saveAiRuntimeConfig(config = {}) {
     updatedAt: new Date().toISOString()
   };
   applyAiRuntimeConfig(nextConfig);
-  fs.writeFileSync(AI_RUNTIME_CONFIG_PATH, JSON.stringify(nextConfig, null, 2));
-  return nextConfig;
+  if (AI_CONFIG_EPHEMERAL_RUNTIME) {
+    AI_CONFIG_PERSISTENCE = "runtime";
+    return aiConfigSaveResult(nextConfig);
+  }
+  try {
+    fs.writeFileSync(AI_RUNTIME_CONFIG_PATH, JSON.stringify(encryptAiRuntimeConfig(nextConfig), null, 2));
+    AI_CONFIG_PERSISTENCE = "file";
+  } catch (error) {
+    AI_CONFIG_PERSISTENCE = "runtime";
+    console.warn("AI runtime config could not be persisted:", error.message);
+  }
+  return aiConfigSaveResult(nextConfig);
 }
 
 loadAiRuntimeConfig();
@@ -281,7 +355,9 @@ function aiStatus() {
     baseUrl: AI_BASE_URL.replace(/:\/\/([^/@]+)@/, "://***@"),
     keySaved: Boolean(AI_API_KEY),
     systemPrompt: AI_SYSTEM_PROMPT,
-    requestsPerMinute: AI_MAX_REQUESTS_PER_MINUTE
+    requestsPerMinute: AI_MAX_REQUESTS_PER_MINUTE,
+    persistence: AI_CONFIG_PERSISTENCE,
+    persistent: AI_CONFIG_PERSISTENCE !== "runtime"
   };
 }
 
@@ -1479,10 +1555,12 @@ async function handleApi(req, res) {
     }));
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), "中文课表");
     const filename = `timetable-${Date.now()}.xlsx`;
-    const downloadDir = path.join(PUBLIC_DIR, "downloads", "conversions");
-    fs.mkdirSync(downloadDir, { recursive: true });
-    XLSX.writeFile(workbook, path.join(downloadDir, filename));
-    sendJson(res, 200, { filename });
+    const fileBuffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    sendJson(res, 200, {
+      filename,
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      fileBase64: fileBuffer.toString("base64")
+    });
     return;
   }
 

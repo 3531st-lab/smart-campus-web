@@ -2,6 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 const XLSX = require("xlsx");
 
 process.env.NODE_ENV = "test";
@@ -22,6 +24,14 @@ const legalConsent = {
 
 let server;
 let baseUrl;
+const mutableStorePaths = [
+  "lab-reservations.json",
+  "notification-receipts.json",
+  "user-timetables.json",
+  "user-timetable-preferences.json",
+  "ai-runtime.json"
+].map((filename) => path.join(__dirname, "..", "server", filename));
+const mutableStoreBackups = new Map();
 
 function createTestToken(userId) {
   const payload = Buffer.from(JSON.stringify({
@@ -35,6 +45,9 @@ function createTestToken(userId) {
 }
 
 test.before(async () => {
+  for (const storePath of mutableStorePaths) {
+    mutableStoreBackups.set(storePath, fs.existsSync(storePath) ? fs.readFileSync(storePath) : null);
+  }
   server = http.createServer(requestHandler);
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -44,8 +57,11 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (!server) return;
-  await new Promise((resolve) => server.close(resolve));
+  if (server) await new Promise((resolve) => server.close(resolve));
+  for (const [storePath, backup] of mutableStoreBackups) {
+    if (backup === null) fs.rmSync(storePath, { force: true });
+    else fs.writeFileSync(storePath, backup);
+  }
 });
 
 test("serves the app with the security baseline", async () => {
@@ -55,6 +71,15 @@ test("serves the app with the security baseline", async () => {
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("x-request-id") || "", /^[a-f0-9-]{36}$/);
+});
+
+test("serves the single-page app for direct deep links", async () => {
+  for (const route of ["/tools", "/tools/quality-score"]) {
+    const response = await fetch(`${baseUrl}${route}`);
+    assert.equal(response.status, 200, `${route} should fall back to the application shell`);
+    assert.match(response.headers.get("content-type") || "", /text\/html/);
+    assert.match(await response.text(), /<div id="app"><\/div>/);
+  }
 });
 
 test("rejects untrusted CORS origins and malformed JSON", async () => {
@@ -163,4 +188,180 @@ test("imports an Excel identity workbook and supports role filters and paginatio
     assert.equal(response.status, 200);
     assert.ok(payload.students.some((student) => student.name === expectedName), `${role} filter should return ${expectedName}`);
   }
+});
+
+test("exports a timetable as an in-memory workbook for serverless deployments", async () => {
+  const headers = {
+    Authorization: `Bearer ${createTestToken("u-1001")}`,
+    "Content-Type": "application/json"
+  };
+  const response = await fetch(`${baseUrl}/api/timetable/export`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      courses: [{
+        semester: "2025-2026-2",
+        weeks: [1, 2, 3],
+        day: 1,
+        startSection: 1,
+        sectionCount: 2,
+        course: "Serverless Export Regression",
+        location: "A101",
+        teacher: "Test Teacher"
+      }]
+    })
+  });
+
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.match(payload.filename, /^timetable-\d+\.xlsx$/);
+  assert.equal(payload.mimeType, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  assert.ok(payload.fileBase64, "the workbook must be returned without writing to the deployment filesystem");
+
+  const workbook = XLSX.read(Buffer.from(payload.fileBase64, "base64"), { type: "buffer" });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+  assert.equal(rows.length, 1);
+  assert.ok(Object.values(rows[0]).includes("Serverless Export Regression"));
+});
+
+test("persists timetable edits, calendar settings and course deletion", async () => {
+  const headers = {
+    Authorization: `Bearer ${createTestToken("u-1001")}`,
+    "Content-Type": "application/json"
+  };
+  const courseId = `workflow-course-${Date.now()}`;
+  const course = {
+    id: courseId,
+    semester: "2025-2026-2",
+    weeks: [1, 2, 3],
+    day: 2,
+    startSection: 3,
+    sectionCount: 2,
+    course: "Workflow Course",
+    location: "B202",
+    teacher: "Original Teacher"
+  };
+
+  const created = await fetch(`${baseUrl}/api/timetable/personal/course`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ course })
+  });
+  assert.equal(created.status, 200);
+  assert.ok((await created.json()).courses.some((item) => item.id === courseId));
+
+  const updated = await fetch(`${baseUrl}/api/timetable/personal/course`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ course: { ...course, teacher: "Updated Teacher" } })
+  });
+  assert.equal(updated.status, 200);
+  assert.equal((await updated.json()).course.teacher, "Updated Teacher");
+
+  const settings = await fetch(`${baseUrl}/api/timetable/settings`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ semester: course.semester, week: 9, schedule: "summer", weekOneStart: "2026-03-02" })
+  });
+  assert.equal(settings.status, 200);
+  assert.deepEqual((await settings.json()).settings, {
+    semester: course.semester,
+    week: 9,
+    schedule: "summer",
+    weekOneStart: "2026-03-02",
+    hiddenCourseIds: []
+  });
+
+  const dashboard = await fetch(`${baseUrl}/api/dashboard`, { headers });
+  const dashboardData = await dashboard.json();
+  assert.equal(dashboardData.timetable.settings.weekOneStart, "2026-03-02");
+  assert.ok(dashboardData.timetable.personalCourses.some((item) => item.id === courseId && item.teacher === "Updated Teacher"));
+
+  const deleted = await fetch(`${baseUrl}/api/timetable/personal/delete`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ id: courseId })
+  });
+  const deletedData = await deleted.json();
+  assert.equal(deleted.status, 200);
+  assert.ok(!deletedData.courses.some((item) => item.id === courseId));
+  assert.ok(deletedData.hiddenCourseIds.includes(courseId));
+});
+
+test("connects lab reservation approval to unread notifications", async () => {
+  const headers = {
+    Authorization: `Bearer ${createTestToken("u-1001")}`,
+    "Content-Type": "application/json"
+  };
+  const slot = `Regression Slot ${Date.now()}`;
+  const submitted = await fetch(`${baseUrl}/api/reservations`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ labId: "lab-301", slot, reason: "Workflow regression" })
+  });
+  assert.equal(submitted.status, 201);
+  const reservation = (await submitted.json()).reservation;
+  assert.equal(reservation.status, "pending");
+
+  const reviewed = await fetch(`${baseUrl}/api/admin/reservations/review`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ id: reservation.id, status: "approved", adminNote: "Approved in regression test" })
+  });
+  assert.equal(reviewed.status, 200);
+  assert.equal((await reviewed.json()).reservation.status, "approved");
+
+  const notificationResponse = await fetch(`${baseUrl}/api/notifications`, { headers });
+  const notificationData = await notificationResponse.json();
+  const notification = notificationData.notifications.find((item) => item.sourceId === reservation.id);
+  assert.equal(notificationResponse.status, 200);
+  assert.ok(notification);
+  assert.equal(notification.status, "approved");
+  assert.equal(notification.read, false);
+
+  const markedRead = await fetch(`${baseUrl}/api/notifications/read`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ id: notification.id })
+  });
+  assert.equal(markedRead.status, 200);
+
+  const nextNotifications = await fetch(`${baseUrl}/api/notifications`, { headers });
+  const nextData = await nextNotifications.json();
+  assert.equal(nextData.notifications.find((item) => item.id === notification.id)?.read, true);
+});
+
+test("saves and reports the AI runtime configuration without exposing its key", async () => {
+  const headers = {
+    Authorization: `Bearer ${createTestToken("u-1001")}`,
+    "Content-Type": "application/json"
+  };
+  const saved = await fetch(`${baseUrl}/api/admin/ai-config`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      model: "audit-test-model",
+      apiKey: "test-key-that-must-not-be-returned",
+      requestsPerMinute: 7,
+      systemPrompt: "Regression test"
+    })
+  });
+  const savedPayload = await saved.json();
+  assert.equal(saved.status, 200);
+  assert.equal(savedPayload.model, "audit-test-model");
+  assert.equal(savedPayload.persistence, "file");
+  assert.equal(savedPayload.persistent, true);
+  assert.equal(savedPayload.keySaved, true);
+  assert.equal("apiKey" in savedPayload, false);
+  const storedConfig = fs.readFileSync(path.join(__dirname, "..", "server", "ai-runtime.json"), "utf8");
+  assert.doesNotMatch(storedConfig, /test-key-that-must-not-be-returned/);
+  assert.equal(JSON.parse(storedConfig).algorithm, "aes-256-gcm");
+
+  const loaded = await fetch(`${baseUrl}/api/admin/ai-config`, { headers });
+  const loadedPayload = await loaded.json();
+  assert.equal(loaded.status, 200);
+  assert.equal(loadedPayload.model, "audit-test-model");
+  assert.equal("apiKey" in loadedPayload, false);
 });

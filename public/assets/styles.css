@@ -2925,6 +2925,12 @@ html[data-theme="day"] .news-filter-bar select {
   display: none;
 }
 
+.exam-card,
+.software-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 320px;
+}
+
 .exam-card-head {
   display: flex;
   align-items: flex-start;
