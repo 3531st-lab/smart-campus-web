@@ -54,3 +54,10 @@ test("ships cache-safe assets and paginates the exam catalog", () => {
   assert.match(app, /const examPageSize = 12;/);
   assert.match(app, /items\.slice\(start, start \+ examPageSize\)/);
 });
+
+test("keeps local runtime data and maintenance scripts out of Vercel uploads", () => {
+  const ignore = fs.readFileSync(path.join(root, ".vercelignore"), "utf8");
+  assert.match(ignore, /^scripts\/$/m);
+  assert.match(ignore, /^server\/lab-reservations\.json$/m);
+  assert.match(ignore, /^\.env\.\*$/m);
+});

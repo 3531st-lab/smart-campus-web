@@ -4,10 +4,12 @@
 functions/
 output/
 design-qa.md
+scripts/
 *.pid
 *.jobid
 *.log
 server/ai-runtime.json
+server/lab-reservations.json
 server/payment-orders.json
 server/user-timetable-preferences.json
 server/user-timetables.json
