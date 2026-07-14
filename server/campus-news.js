@@ -1,6 +1,6 @@
 const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 
-const NEWS_CACHE_MS = 5 * 60 * 1000;
+const NEWS_CACHE_MS = 15 * 60 * 1000;
 const SOURCE_TIMEOUT_MS = 5000;
 const MAX_ITEMS_PER_SOURCE = 12;
 const MAX_ITEMS = 160;
@@ -192,18 +192,22 @@ async function refreshCampusNews() {
   for (const item of results.flatMap((result) => result.items)) {
     if (!deduped.has(item.url)) deduped.set(item.url, item);
   }
+  const failedSources = new Set(results.filter((source) => source.status !== "live").map((source) => source.name));
+  for (const item of cache?.items || []) {
+    if (failedSources.has(item.source) && !deduped.has(item.url)) deduped.set(item.url, item);
+  }
   const items = [...deduped.values()]
     .sort((a, b) => String(b.fullDate).localeCompare(String(a.fullDate)) || a.title.localeCompare(b.title, "zh-CN"))
     .slice(0, MAX_ITEMS);
   const liveCount = results.filter((source) => source.status === "live").length;
   cache = {
     source: "https://www.tzu.edu.cn/",
-    sourceStatus: liveCount === results.length ? "live" : liveCount ? "partial-no-official" : "fallback",
+    sourceStatus: liveCount === results.length ? "live" : liveCount ? "partial-no-official" : items.length ? "stale" : "fallback",
     updatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
     cacheSeconds: NEWS_CACHE_MS / 1000,
     sources: results.map(({ items: ignored, ...source }) => source),
     items,
-    expiresAt: Date.now() + NEWS_CACHE_MS
+    expiresAt: Date.now() + (liveCount ? NEWS_CACHE_MS : 2 * 60 * 1000)
   };
   try {
     await persistCache(cache);
@@ -213,16 +217,31 @@ async function refreshCampusNews() {
   return cache;
 }
 
-async function getCampusNews(forceRefresh = false, { preferCache = false } = {}) {
-  if (!forceRefresh && cache && cache.expiresAt > Date.now()) return cache;
-  if (!forceRefresh) await hydratePersistentCache();
-  if (!forceRefresh && cache && (preferCache || cache.expiresAt > Date.now())) return cache;
-  if (!forceRefresh && preferCache) return cache || emptyCache();
+function startRefresh() {
   if (pendingRefresh) return pendingRefresh;
   pendingRefresh = refreshCampusNews().finally(() => {
     pendingRefresh = null;
   });
   return pendingRefresh;
+}
+
+async function getCampusNews(forceRefresh = false, { preferCache = false } = {}) {
+  if (forceRefresh) return startRefresh();
+  if (cache && cache.expiresAt > Date.now()) return { ...cache, refreshing: false };
+  try {
+    await hydratePersistentCache();
+  } catch (error) {
+    console.warn("Failed to hydrate campus news cache:", error.message);
+  }
+  if (cache) {
+    if (cache.expiresAt <= Date.now()) startRefresh();
+    return { ...cache, refreshing: Boolean(pendingRefresh) };
+  }
+  if (preferCache) {
+    startRefresh();
+    return { ...emptyCache(), refreshing: true };
+  }
+  return startRefresh();
 }
 
 module.exports = { getCampusNews, sources, refreshCampusNews };

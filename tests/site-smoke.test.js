@@ -99,6 +99,24 @@ test("rejects untrusted CORS origins and malformed JSON", async () => {
   assert.equal((await malformed.json()).error, "JSON 格式错误");
 });
 
+test("returns the campus news shell immediately while a cold cache refreshes", async () => {
+  const login = await fetch(`${baseUrl}/api/auth/guest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ legalConsent })
+  });
+  assert.equal(login.status, 200);
+  const { token } = await login.json();
+  const startedAt = Date.now();
+  const response = await fetch(`${baseUrl}/api/campus-news`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(response.status, 200);
+  assert.ok(elapsedMs < 1000, `cold campus news response took ${elapsedMs}ms`);
+  assert.equal((await response.json()).refreshing, true);
+});
+
 test("supports the guest read-only core journey", async () => {
   const login = await fetch(`${baseUrl}/api/auth/guest`, {
     method: "POST",
@@ -135,6 +153,45 @@ test("supports the guest read-only core journey", async () => {
 
   const admin = await fetch(`${baseUrl}/api/admin/students`, { headers });
   assert.equal(admin.status, 403);
+});
+
+test("restricts campus news imports to administrators and safe article URLs", async () => {
+  const login = await fetch(`${baseUrl}/api/auth/guest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ legalConsent })
+  });
+  assert.equal(login.status, 200);
+  const { token } = await login.json();
+  const guestImport = await fetch(`${baseUrl}/api/campus-news/import`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      title: "访客不能导入",
+      source: "测试来源",
+      category: "校园资讯",
+      url: "https://www.tzu.edu.cn/"
+    })
+  });
+  assert.equal(guestImport.status, 403);
+
+  const invalidUrl = await fetch(`${baseUrl}/api/campus-news/import`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${createTestToken("u-1001")}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      title: "不安全链接",
+      source: "测试来源",
+      category: "校园资讯",
+      url: "javascript:alert(1)"
+    })
+  });
+  assert.equal(invalidUrl.status, 400);
 });
 
 test("imports an Excel identity workbook and supports role filters and pagination", async () => {

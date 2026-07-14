@@ -1383,14 +1383,45 @@ async function handleApi(req, res) {
   }
 
   if (route === "GET /api/campus-news") {
-    const liveNews = await campusNewsService.getCampusNews(url.searchParams.get("refresh") === "1");
+    const forceRefresh = url.searchParams.get("refresh") === "1";
+    const liveNews = await campusNewsService.getCampusNews(forceRefresh, { preferCache: !forceRefresh });
     sendJson(res, 200, { ...liveNews, items: [...importedNews, ...liveNews.items] });
     return;
   }
 
   if (route === "POST /api/campus-news/import") {
     const body = await parseBody(req);
-    importedNews.unshift({ ...body, date: new Date().toISOString().slice(5, 10) });
+    if (!["admin", "super_admin"].includes(user.role)) {
+      sendError(res, 403, "仅管理员可以导入校园资讯稿件");
+      return;
+    }
+    let articleUrl;
+    try {
+      articleUrl = new URL(String(body.url || "").trim());
+    } catch {
+      sendError(res, 400, "请输入有效的公开原文链接");
+      return;
+    }
+    if (!["http:", "https:"].includes(articleUrl.protocol)) {
+      sendError(res, 400, "原文链接仅支持 HTTP 或 HTTPS");
+      return;
+    }
+    const title = String(body.title || "").trim().slice(0, 120);
+    const source = String(body.source || "").trim().slice(0, 80);
+    const category = String(body.category || "校园资讯").trim().slice(0, 40);
+    if (!title || !source) {
+      sendError(res, 400, "请填写资讯标题和来源");
+      return;
+    }
+    importedNews.unshift({
+      id: `manual-${crypto.randomUUID()}`,
+      title,
+      source,
+      category,
+      url: articleUrl.href,
+      date: new Date().toISOString().slice(5, 10),
+      fullDate: new Date().toISOString().slice(0, 10)
+    });
     sendJson(res, 201, { imported: true });
     return;
   }

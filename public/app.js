@@ -4623,7 +4623,15 @@ const routes = {
   async news() {
     const data = await api("/api/campus-news");
     const liveCount = (data.sources || []).filter((item) => item.status === "live").length;
-    const officialStatus = data.sourceStatus === "live" ? "全部官网已连接" : data.sourceStatus === "partial-no-official" ? "部分来源暂不可达" : "官网暂不可达";
+    const officialStatus = data.sourceStatus === "live"
+      ? "全部官网已连接"
+      : data.sourceStatus === "partial-no-official"
+        ? "部分来源暂不可达"
+        : data.sourceStatus === "stale"
+          ? "网络波动，正在显示缓存"
+          : data.sourceStatus === "warming"
+            ? "正在连接官网来源"
+          : "官网暂不可达";
     const newsCategories = [...new Set((data.items || []).map((item) => item.category).filter(Boolean))];
     return {
       title: "校园资讯",
@@ -4636,8 +4644,9 @@ const routes = {
               <span>强制官网源：https://www.tzu.edu.cn</span>
               <span>更新状态：${officialStatus}</span>
               <span>公开源在线：${liveCount}/${(data.sources || []).length}</span>
-              <span>更新时间：${data.updatedAt}</span>
+              <span>更新时间：${data.updatedAt || "后台获取中"}</span>
               <span>缓存：${Math.round(data.cacheSeconds / 60)} 分钟</span>
+              ${data.refreshing ? "<span>后台更新中</span>" : ""}
             </div>
             <p class="muted">本页聚合泰州学院官网、二级学院、团委和职能部门公开页面，只读取公开文章链接；登录态、内部门户与私有接口不参与抓取。</p>
             <div class="news-source-grid">
@@ -4648,7 +4657,7 @@ const routes = {
                 </a>
               `).join("")}
             </div>
-            <form class="news-import-form" id="newsImportForm">
+            ${canAccessStudentAdmin() ? `<form class="news-import-form" id="newsImportForm">
               <input name="title" placeholder="微信小程序/社团稿件标题" required />
               <input name="source" placeholder="来源，如：泰州学院小程序、活力经管" required />
               <input name="url" placeholder="公开原文链接" required />
@@ -4659,7 +4668,7 @@ const routes = {
                 <option value="校园活动">校园活动</option>
               </select>
               <button class="ghost-btn" type="submit">导入审核稿件</button>
-            </form>
+            </form>` : ""}
           </div>
           <div class="dash-card news-filter-bar">
             <label class="news-filter-search"><span>${iconSvg("search")}</span><input id="campusNewsSearch" placeholder="搜索标题或来源..." /></label>
@@ -4669,50 +4678,124 @@ const routes = {
             </select>
             <span id="campusNewsResultCount">共 ${(data.items || []).length} 条</span>
           </div>
-          <div class="news-list-grid">
-            ${(data.items || []).map((item) => `
-              <article class="news-item dash-card" data-news-category="${escapeHtml(item.category || "")}" data-news-search="${escapeHtml(`${item.title || ""} ${item.source || ""}`.toLowerCase())}">
-                <div>
-                  <span class="badge">${escapeHtml(item.category || "校园资讯")}</span>
-                  <time>${escapeHtml(item.date || "最新")}</time>
-                </div>
-                <h3>${escapeHtml(item.title)}</h3>
-                <p>${escapeHtml(item.source)}</p>
-                <a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">查看原文</a>
-              </article>
-            `).join("")}
-          </div>
-          <button type="button" class="ghost-btn news-load-more" id="campusNewsLoadMore">加载更多资讯</button>
+          <div class="news-list-grid" id="campusNewsList" aria-live="polite"></div>
+          <nav class="news-pagination" id="campusNewsPagination" aria-label="校园资讯分页">
+            <button type="button" data-news-page-action="previous" aria-label="上一页" title="上一页">‹</button>
+            <div id="campusNewsPageNumbers"></div>
+            <button type="button" data-news-page-action="next" aria-label="下一页" title="下一页">›</button>
+          </nav>
         </section>
       `,
       afterRender() {
         const newsSearch = document.querySelector("#campusNewsSearch");
         const newsCategory = document.querySelector("#campusNewsCategory");
         const newsCount = document.querySelector("#campusNewsResultCount");
-        const loadMore = document.querySelector("#campusNewsLoadMore");
-        let visibleLimit = 30;
-        const filterNews = () => {
+        const newsList = document.querySelector("#campusNewsList");
+        const pagination = document.querySelector("#campusNewsPagination");
+        const pageNumbers = document.querySelector("#campusNewsPageNumbers");
+        const allItems = data.items || [];
+        const pageSize = 12;
+        let currentPage = 1;
+        let searchTimer = 0;
+        let refreshPollTimer = 0;
+        const pageTokens = (totalPages) => {
+          if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
+          let start = Math.max(2, currentPage - 1);
+          let end = Math.min(totalPages - 1, currentPage + 1);
+          if (currentPage <= 4) end = 5;
+          if (currentPage >= totalPages - 3) start = totalPages - 4;
+          const tokens = [1];
+          if (start > 2) tokens.push("ellipsis-start");
+          for (let page = start; page <= end; page += 1) tokens.push(page);
+          if (end < totalPages - 1) tokens.push("ellipsis-end");
+          tokens.push(totalPages);
+          return tokens;
+        };
+        const renderNewsPage = () => {
           const query = newsSearch.value.trim().toLowerCase();
           const category = newsCategory.value;
-          const matches = [...document.querySelectorAll(".news-item")].filter((card) => {
-            const matched = (!query || card.dataset.newsSearch.includes(query)) && (!category || card.dataset.newsCategory === category);
-            card.hidden = !matched;
-            return matched;
-          });
-          matches.forEach((card, index) => { card.hidden = index >= visibleLimit; });
-          newsCount.textContent = `共 ${matches.length} 条，当前显示 ${Math.min(matches.length, visibleLimit)} 条`;
-          loadMore.hidden = matches.length <= visibleLimit;
+          const matches = allItems.filter((item) => (
+            (!query || `${item.title || ""} ${item.source || ""}`.toLowerCase().includes(query))
+            && (!category || item.category === category)
+          ));
+          const totalPages = Math.max(1, Math.ceil(matches.length / pageSize));
+          currentPage = Math.min(currentPage, totalPages);
+          const startIndex = (currentPage - 1) * pageSize;
+          const pageItems = matches.slice(startIndex, startIndex + pageSize);
+          newsList.innerHTML = pageItems.length
+            ? pageItems.map((item) => `
+                <article class="news-item dash-card">
+                  <div>
+                    <span class="badge">${escapeHtml(item.category || "校园资讯")}</span>
+                    <time>${escapeHtml(item.date || "最新")}</time>
+                  </div>
+                  <h3>${escapeHtml(item.title)}</h3>
+                  <p>${escapeHtml(item.source)}</p>
+                  <a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">查看原文</a>
+                </article>
+              `).join("")
+            : '<div class="news-empty-state">没有找到符合条件的校园资讯</div>';
+          newsCount.textContent = matches.length
+            ? `共 ${matches.length} 条 · 第 ${currentPage}/${totalPages} 页`
+            : "共 0 条";
+          pagination.hidden = matches.length <= pageSize;
+          pagination.querySelector('[data-news-page-action="previous"]').disabled = currentPage <= 1;
+          pagination.querySelector('[data-news-page-action="next"]').disabled = currentPage >= totalPages;
+          pageNumbers.innerHTML = pageTokens(totalPages).map((token) => typeof token === "number"
+            ? `<button type="button" data-news-page="${token}" class="${token === currentPage ? "active" : ""}" aria-label="第 ${token} 页" ${token === currentPage ? 'aria-current="page"' : ""}>${token}</button>`
+            : '<span class="news-page-ellipsis" aria-hidden="true">…</span>').join("");
         };
-        newsSearch.addEventListener("input", () => { visibleLimit = 30; filterNews(); });
-        newsCategory.addEventListener("change", () => { visibleLimit = 30; filterNews(); });
-        loadMore.addEventListener("click", () => { visibleLimit += 30; filterNews(); });
-        filterNews();
-        document.querySelector("#refreshCampusNews").addEventListener("click", async () => {
-          toast("正在刷新泰州学院官网资讯");
-          await api("/api/campus-news?refresh=1");
-          renderShell();
+        newsSearch.addEventListener("input", () => {
+          window.clearTimeout(searchTimer);
+          searchTimer = window.setTimeout(() => { currentPage = 1; renderNewsPage(); }, 160);
         });
-        document.querySelector("#newsImportForm").addEventListener("submit", async (event) => {
+        newsCategory.addEventListener("change", () => { currentPage = 1; renderNewsPage(); });
+        pagination.addEventListener("click", (event) => {
+          const pageButton = event.target.closest("[data-news-page]");
+          const actionButton = event.target.closest("[data-news-page-action]");
+          if (pageButton) currentPage = Number(pageButton.dataset.newsPage || 1);
+          else if (actionButton?.dataset.newsPageAction === "previous") currentPage -= 1;
+          else if (actionButton?.dataset.newsPageAction === "next") currentPage += 1;
+          else return;
+          renderNewsPage();
+          document.querySelector(".news-filter-bar")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+        renderNewsPage();
+        if (data.refreshing) {
+          let refreshAttempts = 0;
+          const pollForRefreshedNews = async () => {
+            if (location.hash !== "#news") return;
+            refreshAttempts += 1;
+            try {
+              const refreshedNews = await api("/api/campus-news");
+              if (!refreshedNews.refreshing) {
+                renderShell();
+                return;
+              }
+            } catch {
+              // Keep the current cached view and retry quietly.
+            }
+            if (refreshAttempts < 8) refreshPollTimer = window.setTimeout(pollForRefreshedNews, 1200);
+          };
+          refreshPollTimer = window.setTimeout(pollForRefreshedNews, 1200);
+        }
+        document.querySelector("#refreshCampusNews").addEventListener("click", async (event) => {
+          const button = event.currentTarget;
+          if (button.disabled) return;
+          button.disabled = true;
+          button.textContent = "刷新中...";
+          toast("正在刷新泰州学院官网资讯");
+          try {
+            window.clearTimeout(refreshPollTimer);
+            await api("/api/campus-news?refresh=1");
+            renderShell();
+          } catch (error) {
+            toast(error.message || "资讯刷新失败，请稍后重试");
+            button.disabled = false;
+            button.textContent = "刷新资讯";
+          }
+        });
+        document.querySelector("#newsImportForm")?.addEventListener("submit", async (event) => {
           event.preventDefault();
           const formData = new FormData(event.currentTarget);
           await api("/api/campus-news/import", {

@@ -29,3 +29,12 @@ test("keeps client API calls connected to server route handlers", () => {
   ));
   assert.deepEqual(missing, []);
 });
+
+test("paginates campus news without pre-rendering the full catalog", () => {
+  const app = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+  assert.match(app, /id="campusNewsPagination"/);
+  assert.match(app, /const pageSize = 12;/);
+  assert.match(app, /pollForRefreshedNews/);
+  assert.doesNotMatch(app, /id="campusNewsLoadMore"/);
+  assert.doesNotMatch(app, /document\.querySelectorAll\("\.news-item"\)/);
+});
