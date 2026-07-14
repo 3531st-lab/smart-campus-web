@@ -14,6 +14,8 @@ process.env.CAMPUS_USER_ROLE = "super_admin";
 process.env.CAMPUS_USER_STUDENT_NO = "TEST-SUPER-ADMIN";
 
 const requestHandler = require("../server/index.js");
+const data = require("../server/data");
+const studentStore = require("../server/student-store");
 
 const legalConsent = {
   accepted: true,
@@ -42,6 +44,21 @@ function createTestToken(userId) {
   }), "utf8").toString("base64url");
   const signature = crypto.createHmac("sha256", process.env.AUTH_SECRET).update(payload).digest("base64url");
   return `${payload}.${signature}`;
+}
+
+function withIdentityFixtures(t) {
+  const fixtures = [
+    { id: "lookup-student", name: "联动学生", school: "联动大学", college: "信息学院", major: "软件工程", studentNo: "LOOKUP-S001", phone: "13800000001", status: "active", role: "student", verified: true },
+    { id: "lookup-teacher", name: "联动老师", school: "联动大学", college: "信息学院", major: "计算机科学", studentNo: "LOOKUP-T001", phone: "13800000002", status: "active", role: "teacher", verified: true },
+    { id: "lookup-disabled", name: "停用学生", school: "停用账号大学", college: "信息学院", major: "数据科学", studentNo: "LOOKUP-D001", phone: "13800000003", status: "disabled", role: "student", verified: true }
+  ];
+  data.users.push(...fixtures);
+  t.after(() => {
+    for (const fixture of fixtures) {
+      const index = data.users.findIndex((user) => user.id === fixture.id);
+      if (index >= 0) data.users.splice(index, 1);
+    }
+  });
 }
 
 test.before(async () => {
@@ -97,6 +114,18 @@ test("rejects untrusted CORS origins and malformed JSON", async () => {
   });
   assert.equal(malformed.status, 400);
   assert.equal((await malformed.json()).error, "JSON 格式错误");
+});
+
+test("queries role-scoped schools and majors from the identity store", async (t) => {
+  withIdentityFixtures(t);
+  const studentSchools = await studentStore.listActiveSchools("student");
+  const teacherSchools = await studentStore.listActiveSchools("teacher");
+  assert.deepEqual(studentSchools.filter((school) => school.startsWith("联动")), ["联动大学"]);
+  assert.ok(teacherSchools.includes("联动大学"));
+  assert.equal(studentSchools.includes("停用账号大学"), false);
+  assert.equal(await studentStore.findMajorBySchoolAndAccount({ school: "联动大学", studentNo: "LOOKUP-S001", identityType: "student" }), "软件工程");
+  assert.equal(await studentStore.findMajorBySchoolAndAccount({ school: "联动大学", studentNo: "LOOKUP-T001", identityType: "student" }), "");
+  assert.equal(await studentStore.findMajorBySchoolAndAccount({ school: "停用账号大学", studentNo: "LOOKUP-D001", identityType: "student" }), "");
 });
 
 test("returns the campus news shell immediately while a cold cache refreshes", async () => {

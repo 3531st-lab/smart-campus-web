@@ -198,6 +198,50 @@ async function findLoginAccount({ school, major, studentNo }) {
   return normalizeStudent(rows[0]);
 }
 
+function matchesIdentityType(user, identityType) {
+  if (!user || user.status === "disabled" || user.role === "guest") return false;
+  return identityType === "teacher" ? user.role === "teacher" : user.role !== "teacher";
+}
+
+async function listActiveSchools(identityType = "student") {
+  const normalizedType = identityType === "teacher" ? "teacher" : "student";
+  if (!mysqlConfigured) {
+    return [...new Set(data.users
+      .filter((user) => matchesIdentityType(user, normalizedType))
+      .map((user) => String(user.school || "").trim())
+      .filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+  }
+  await initialize();
+  const roleCondition = normalizedType === "teacher" ? "role = 'teacher'" : "role <> 'teacher'";
+  const [rows] = await getPool().query(
+    `SELECT DISTINCT school FROM students WHERE status = 'active' AND ${roleCondition} AND school <> '' ORDER BY school ASC`
+  );
+  return rows.map((row) => String(row.school || "").trim()).filter(Boolean);
+}
+
+async function findMajorBySchoolAndAccount({ school, studentNo, identityType = "student" }) {
+  const normalizedSchool = String(school || "").trim();
+  const normalizedStudentNo = String(studentNo || "").trim();
+  const normalizedType = identityType === "teacher" ? "teacher" : "student";
+  if (!normalizedSchool || !normalizedStudentNo) return "";
+  if (!mysqlConfigured) {
+    const user = data.users.find((item) => (
+      matchesIdentityType(item, normalizedType)
+      && String(item.school || "").trim() === normalizedSchool
+      && String(item.studentNo || "").trim() === normalizedStudentNo
+    ));
+    return String(user?.major || "").trim();
+  }
+  await initialize();
+  const roleCondition = normalizedType === "teacher" ? "role = 'teacher'" : "role <> 'teacher'";
+  const [rows] = await getPool().execute(
+    `SELECT major FROM students WHERE school = ? AND student_no = ? AND status = 'active' AND ${roleCondition} LIMIT 1`,
+    [normalizedSchool, normalizedStudentNo]
+  );
+  return String(rows[0]?.major || "").trim();
+}
+
 async function listStudents({ query = "", status = "", role = "", limit = 50, offset = 0 } = {}) {
   if (!mysqlConfigured) {
     const safeOffset = Math.max(0, Number(offset) || 0);
@@ -581,6 +625,8 @@ module.exports = {
   findById,
   findIdentity,
   findLoginAccount,
+  listActiveSchools,
+  findMajorBySchoolAndAccount,
   listStudents,
   countStudents,
   countStudentsByRole,
