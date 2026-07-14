@@ -30,6 +30,24 @@ test("keeps client API calls connected to server route handlers", () => {
   assert.deepEqual(missing, []);
 });
 
+test("orders login identity fields and wires database-driven autofill", () => {
+  const app = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+  const schoolIndex = app.indexOf('id="loginSchool"');
+  const accountIndex = app.indexOf('name="studentNo"');
+  const majorIndex = app.indexOf('id="loginMajor"');
+  const phoneIndex = app.indexOf('name="phone"');
+
+  assert.ok(schoolIndex >= 0);
+  assert.ok(schoolIndex < accountIndex);
+  assert.ok(accountIndex < majorIndex);
+  assert.ok(majorIndex < phoneIndex);
+  assert.match(app, /\/api\/auth\/identity\/schools/);
+  assert.match(app, /\/api\/auth\/identity\/major/);
+  assert.match(app, /AbortController/);
+  assert.match(app, /identityLookupTimer/);
+  assert.match(app, /loginMajorStatus/);
+});
+
 test("paginates campus news without pre-rendering the full catalog", () => {
   const app = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
   assert.match(app, /id="campusNewsPagination"/);

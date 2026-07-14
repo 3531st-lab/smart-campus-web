@@ -2017,15 +2017,19 @@ function renderLogin() {
           <div class="login-identity-grid">
             <label class="field login-field login-field-wide">
               <span>学校</span>
-              <input name="school" value="泰州学院" autocomplete="organization" required />
-            </label>
-            <label class="field login-field">
-              <span>专业</span>
-              <input name="major" value="数字经济" autocomplete="organization-title" required />
+              <select id="loginSchool" name="school" autocomplete="organization" required>
+                <option value="">正在加载学校...</option>
+              </select>
+              <input id="loginSchoolFallback" autocomplete="organization" placeholder="请输入学校" hidden disabled />
             </label>
             <label class="field login-field">
               <span id="loginAccountLabel">学号</span>
               <input name="studentNo" placeholder="请输入学号" autocomplete="username" required />
+            </label>
+            <label class="field login-field">
+              <span>专业</span>
+              <input id="loginMajor" name="major" autocomplete="organization-title" readonly required />
+              <small id="loginMajorStatus" class="login-field-status" aria-live="polite">输入学号后自动匹配</small>
             </label>
             <label class="field login-field login-field-wide" id="loginPhoneField">
               <span>手机号</span>
@@ -2209,9 +2213,143 @@ function renderLogin() {
     applyTheme(nextTheme, true);
     renderLogin();
   });
+  const formElement = document.querySelector("#loginForm");
+  const schoolSelect = document.querySelector("#loginSchool");
+  const schoolFallback = document.querySelector("#loginSchoolFallback");
+  const majorInput = document.querySelector("#loginMajor");
+  const majorStatus = document.querySelector("#loginMajorStatus");
+  const accountInput = formElement.elements.studentNo;
+  let identityLookupTimer = null;
+  let identityLookupController = null;
+  let schoolLoadController = null;
+
+  const currentSchoolValue = () => (
+    schoolSelect.disabled ? schoolFallback.value.trim() : schoolSelect.value.trim()
+  );
+
+  const setSchoolFallback = (enabled, value = "") => {
+    schoolSelect.hidden = enabled;
+    schoolSelect.disabled = enabled;
+    schoolSelect.name = enabled ? "" : "school";
+    schoolFallback.hidden = !enabled;
+    schoolFallback.disabled = !enabled;
+    schoolFallback.name = enabled ? "school" : "";
+    if (enabled) schoolFallback.value = value;
+  };
+
+  const resetMajorLookup = (message = "输入学号后自动匹配", allowManual = false) => {
+    clearTimeout(identityLookupTimer);
+    identityLookupTimer = null;
+    identityLookupController?.abort();
+    identityLookupController = null;
+    majorInput.value = "";
+    majorInput.readOnly = !allowManual;
+    majorInput.classList.remove("is-matched");
+    majorStatus.classList.remove("is-matched", "is-error");
+    majorStatus.textContent = message;
+  };
+
+  const lookupIdentityMajor = async () => {
+    const school = currentSchoolValue();
+    const studentNo = accountInput.value.trim();
+    const identityType = formElement.elements.identityType.value;
+    if (school.length < 2 || studentNo.length < 2) {
+      resetMajorLookup(identityType === "teacher" ? "输入工号后自动匹配" : "输入学号后自动匹配");
+      return;
+    }
+
+    identityLookupController?.abort();
+    const controller = new AbortController();
+    identityLookupController = controller;
+    majorInput.value = "";
+    majorInput.readOnly = true;
+    majorInput.classList.remove("is-matched");
+    majorStatus.classList.remove("is-matched", "is-error");
+    majorStatus.textContent = "正在匹配身份信息...";
+    try {
+      const result = await api("/api/auth/identity/major", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({ school, studentNo, identityType })
+      });
+      if (identityLookupController !== controller) return;
+      majorInput.value = result.major || "";
+      majorInput.readOnly = true;
+      majorInput.classList.toggle("is-matched", Boolean(result.major));
+      majorStatus.classList.add("is-matched");
+      majorStatus.textContent = result.major ? "已从学校身份库匹配" : "未登记专业";
+      localStorage.setItem("campus-login-school", school);
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      if (identityLookupController !== controller) return;
+      const notMatched = /未能匹配|不存在|未找到/.test(error?.message || "");
+      resetMajorLookup(
+        notMatched ? "未匹配到身份，请检查学校和学号或工号" : "身份服务暂不可用，可手动填写专业",
+        !notMatched
+      );
+      majorStatus.classList.add("is-error");
+    } finally {
+      if (identityLookupController === controller) identityLookupController = null;
+    }
+  };
+
+  const scheduleIdentityLookup = () => {
+    clearTimeout(identityLookupTimer);
+    identityLookupTimer = setTimeout(lookupIdentityMajor, 360);
+  };
+
+  const loadIdentitySchools = async () => {
+    schoolLoadController?.abort();
+    const controller = new AbortController();
+    schoolLoadController = controller;
+    const identityType = formElement.elements.identityType.value;
+    const rememberedSchool = localStorage.getItem("campus-login-school") || "泰州学院";
+    schoolSelect.disabled = true;
+    schoolSelect.innerHTML = '<option value="">正在加载学校...</option>';
+    setSchoolFallback(false);
+    resetMajorLookup(identityType === "teacher" ? "输入工号后自动匹配" : "输入学号后自动匹配");
+    try {
+      const result = await api(`/api/auth/identity/schools?identityType=${encodeURIComponent(identityType)}`, {
+        signal: controller.signal
+      });
+      if (schoolLoadController !== controller || formElement.elements.identityType.value !== identityType) return;
+      const schools = Array.isArray(result.schools) ? result.schools.filter(Boolean) : [];
+      if (!schools.length) {
+        setSchoolFallback(true, rememberedSchool);
+        resetMajorLookup("该身份暂无学校列表，可手动填写专业", true);
+        return;
+      }
+      schoolSelect.replaceChildren(...schools.map((school) => {
+        const option = document.createElement("option");
+        option.value = school;
+        option.textContent = school;
+        return option;
+      }));
+      schoolSelect.disabled = false;
+      schoolSelect.value = schools.includes(rememberedSchool) ? rememberedSchool : schools[0];
+      localStorage.setItem("campus-login-school", schoolSelect.value);
+      if (accountInput.value.trim()) scheduleIdentityLookup();
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      setSchoolFallback(true, rememberedSchool);
+      resetMajorLookup("学校列表加载失败，可手动填写学校和专业", true);
+      majorStatus.classList.add("is-error");
+    } finally {
+      if (schoolLoadController === controller) schoolLoadController = null;
+    }
+  };
+
+  schoolSelect.addEventListener("change", () => {
+    localStorage.setItem("campus-login-school", schoolSelect.value);
+    resetMajorLookup();
+    scheduleIdentityLookup();
+  });
+  schoolFallback.addEventListener("input", scheduleIdentityLookup);
+  accountInput.addEventListener("input", scheduleIdentityLookup);
+  accountInput.addEventListener("blur", lookupIdentityMajor);
   document.querySelectorAll("[data-login-role]").forEach((button) => {
     button.addEventListener("click", () => {
-      const form = document.querySelector("#loginForm");
+      const form = formElement;
       const identityType = button.dataset.loginRole;
       form.elements.identityType.value = identityType;
       document.querySelectorAll("[data-login-role]").forEach((item) => item.classList.toggle("active", item === button));
@@ -2220,6 +2358,7 @@ function renderLogin() {
       form.elements.studentNo.value = "";
       form.elements.code.value = "";
       smsChallenge = "";
+      loadIdentitySchools();
       if (identityType === "teacher") toast("老师请使用学校身份库登记的工号与手机号登录");
     });
   });
@@ -2239,6 +2378,7 @@ function renderLogin() {
       if (passwordMode) toast("密码登录需填写已绑定手机号");
     });
   });
+  loadIdentitySchools();
   document.querySelector("#sendSmsCode")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     const formElement = document.querySelector("#loginForm");
