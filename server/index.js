@@ -55,6 +55,8 @@ const LEGAL_CONSENT_VERSION = "2026.06.20";
 const PUBLIC_APP_URL = String(process.env.PUBLIC_APP_URL || "https://zhihueixiaoyuan.pages.dev").replace(/\/+$/, "");
 const rateLimits = new SlidingWindowRegistry({ maxKeys: 10000, maxEventsPerKey: 120 });
 const authFailures = new SlidingWindowRegistry({ maxKeys: 5000, maxEventsPerKey: 8 });
+const identitySchoolCache = new Map();
+const IDENTITY_SCHOOL_CACHE_MS = 5 * 60 * 1000;
 const AI_RUNTIME_CONFIG_PATH = path.join(__dirname, "ai-runtime.json");
 let AI_PROVIDER = String(process.env.AI_PROVIDER || "openai").toLowerCase();
 let AI_BASE_URL = String(process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
@@ -345,6 +347,14 @@ function recordAuthFailure(req, body = {}) {
 
 function clearAuthFailures(req, body = {}) {
   authFailures.delete(authFailureKey(req, body));
+}
+
+function normalizeIdentityType(value) {
+  return value === "teacher" ? "teacher" : "student";
+}
+
+function clearIdentitySchoolCache() {
+  identitySchoolCache.clear();
 }
 
 function aiStatus() {
@@ -995,6 +1005,39 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === "GET /api/auth/identity/schools") {
+    const identityType = normalizeIdentityType(url.searchParams.get("identityType"));
+    const cached = identitySchoolCache.get(identityType);
+    if (cached && cached.expiresAt > Date.now()) {
+      sendJson(res, 200, { schools: cached.schools });
+      return;
+    }
+    const schools = await studentStore.listActiveSchools(identityType);
+    identitySchoolCache.set(identityType, { schools, expiresAt: Date.now() + IDENTITY_SCHOOL_CACHE_MS });
+    sendJson(res, 200, { schools });
+    return;
+  }
+
+  if (route === "POST /api/auth/identity/major") {
+    const body = await parseBody(req);
+    const school = String(body.school || "").trim();
+    const studentNo = String(body.studentNo || "").trim();
+    const identityType = normalizeIdentityType(body.identityType);
+    if (school.length < 2 || school.length > 120 || studentNo.length < 2 || studentNo.length > 64) {
+      sendError(res, 400, "请填写有效的学校和学号或工号");
+      return;
+    }
+    const lookupDigest = crypto.createHash("sha256").update(`${school}|${studentNo}|${identityType}`).digest("hex").slice(0, 16);
+    consumeRateLimit(`${clientIp(req)}:identity-major:${lookupDigest}`, 12, 60 * 1000);
+    const major = await studentStore.findMajorBySchoolAndAccount({ school, studentNo, identityType });
+    if (!major) {
+      sendError(res, 404, "未能匹配校园身份信息，请检查学校和学号或工号");
+      return;
+    }
+    sendJson(res, 200, { matched: true, major });
+    return;
+  }
+
   if (route === "POST /api/auth/sms/send") {
     const body = await parseBody(req);
     if (!requireLegalConsent(res, body)) return;
@@ -1259,6 +1302,7 @@ async function handleApi(req, res) {
       }
       const student = await studentStore.upsertStudent(body);
       await studentStore.logAdminAction("upsert_student", student.studentNo, { operator: adminUser.studentNo, school: student.school, major: student.major, className: student.className });
+      clearIdentitySchoolCache();
       sendJson(res, 200, { student: adminStudent(student) });
       return;
     }
@@ -1285,6 +1329,7 @@ async function handleApi(req, res) {
         return;
       }
       await studentStore.logAdminAction("set_student_status", String(body.studentNo || ""), { operator: adminUser.studentNo, status });
+      clearIdentitySchoolCache();
       sendJson(res, 200, { updated: true, status });
       return;
     }
@@ -1311,6 +1356,7 @@ async function handleApi(req, res) {
       }
       await studentStore.setStudentRole(target.studentNo, role);
       await studentStore.logAdminAction("set_student_role", target.studentNo, { operator: adminUser.studentNo, role });
+      clearIdentitySchoolCache();
       sendJson(res, 200, { updated: true, role });
       return;
     }
@@ -1362,6 +1408,7 @@ async function handleApi(req, res) {
         success: result.success,
         failed: result.failed
       });
+      clearIdentitySchoolCache();
       sendJson(res, 200, result);
       return;
     }

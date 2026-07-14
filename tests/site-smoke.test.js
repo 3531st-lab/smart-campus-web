@@ -128,6 +128,58 @@ test("queries role-scoped schools and majors from the identity store", async (t)
   assert.equal(await studentStore.findMajorBySchoolAndAccount({ school: "停用账号大学", studentNo: "LOOKUP-D001", identityType: "student" }), "");
 });
 
+test("exposes minimal rate-limited login identity endpoints", async (t) => {
+  withIdentityFixtures(t);
+  const studentSchools = await fetch(`${baseUrl}/api/auth/identity/schools?identityType=student`, {
+    headers: { "x-forwarded-for": "198.51.100.19" }
+  });
+  assert.equal(studentSchools.status, 200);
+  assert.deepEqual((await studentSchools.json()).schools.filter((school) => school.startsWith("联动")), ["联动大学"]);
+
+  const teacherSchools = await fetch(`${baseUrl}/api/auth/identity/schools?identityType=teacher`, {
+    headers: { "x-forwarded-for": "198.51.100.20" }
+  });
+  assert.equal(teacherSchools.status, 200);
+  assert.ok((await teacherSchools.json()).schools.includes("联动大学"));
+
+  const matched = await fetch(`${baseUrl}/api/auth/identity/major`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-forwarded-for": "198.51.100.21" },
+    body: JSON.stringify({ school: "联动大学", studentNo: "LOOKUP-S001", identityType: "student" })
+  });
+  assert.equal(matched.status, 200);
+  const privacyPayload = await matched.json();
+  assert.deepEqual(privacyPayload, { matched: true, major: "软件工程" });
+  for (const forbidden of ["name", "phone", "className", "college", "role", "id"]) {
+    assert.equal(Object.hasOwn(privacyPayload, forbidden), false, `${forbidden} must not be exposed`);
+  }
+
+  const roleMismatch = await fetch(`${baseUrl}/api/auth/identity/major`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-forwarded-for": "198.51.100.22" },
+    body: JSON.stringify({ school: "联动大学", studentNo: "LOOKUP-T001", identityType: "student" })
+  });
+  assert.equal(roleMismatch.status, 404);
+
+  const disabled = await fetch(`${baseUrl}/api/auth/identity/major`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-forwarded-for": "198.51.100.23" },
+    body: JSON.stringify({ school: "停用账号大学", studentNo: "LOOKUP-D001", identityType: "student" })
+  });
+  assert.equal(disabled.status, 404);
+
+  let throttledStatus = 0;
+  for (let index = 0; index < 13; index += 1) {
+    const response = await fetch(`${baseUrl}/api/auth/identity/major`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": "198.51.100.24" },
+      body: JSON.stringify({ school: "联动大学", studentNo: "LOOKUP-S001", identityType: "student" })
+    });
+    throttledStatus = response.status;
+  }
+  assert.equal(throttledStatus, 429);
+});
+
 test("returns the campus news shell immediately while a cold cache refreshes", async () => {
   const login = await fetch(`${baseUrl}/api/auth/guest`, {
     method: "POST",
