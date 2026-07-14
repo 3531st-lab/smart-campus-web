@@ -2253,7 +2253,7 @@ function renderLogin() {
     const school = currentSchoolValue();
     const studentNo = accountInput.value.trim();
     const identityType = formElement.elements.identityType.value;
-    if (school.length < 2 || studentNo.length < 2) {
+    if (school.length < 2 || studentNo.length < 6) {
       resetMajorLookup(identityType === "teacher" ? "输入工号后自动匹配" : "输入学号后自动匹配");
       return;
     }
@@ -2295,7 +2295,7 @@ function renderLogin() {
 
   const scheduleIdentityLookup = () => {
     clearTimeout(identityLookupTimer);
-    identityLookupTimer = setTimeout(lookupIdentityMajor, 360);
+    identityLookupTimer = setTimeout(lookupIdentityMajor, 600);
   };
 
   const loadIdentitySchools = async () => {
@@ -2304,9 +2304,9 @@ function renderLogin() {
     schoolLoadController = controller;
     const identityType = formElement.elements.identityType.value;
     const rememberedSchool = localStorage.getItem("campus-login-school") || "泰州学院";
+    setSchoolFallback(false);
     schoolSelect.disabled = true;
     schoolSelect.innerHTML = '<option value="">正在加载学校...</option>';
-    setSchoolFallback(false);
     resetMajorLookup(identityType === "teacher" ? "输入工号后自动匹配" : "输入学号后自动匹配");
     try {
       const result = await api(`/api/auth/identity/schools?identityType=${encodeURIComponent(identityType)}`, {

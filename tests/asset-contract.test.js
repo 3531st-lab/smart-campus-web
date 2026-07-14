@@ -61,10 +61,10 @@ test("ships cache-safe assets and paginates the exam catalog", () => {
   const index = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
   const app = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
   const canonicalStyles = fs.readFileSync(path.join(root, "public", "assets", "styles.css"), "utf8");
-  const releaseStylesPath = path.join(root, "public", "assets", "styles-v156.css");
+  const releaseStylesPath = path.join(root, "public", "assets", "styles-v157.css");
 
-  assert.match(index, /\/assets\/styles-v156\.css/);
-  assert.match(index, /\/app\.js\?v=156/);
+  assert.match(index, /\/assets\/styles-v157\.css/);
+  assert.match(index, /\/app\.js\?v=157/);
   assert.ok(fs.existsSync(releaseStylesPath), "the release stylesheet should exist");
   assert.equal(fs.readFileSync(releaseStylesPath, "utf8"), canonicalStyles);
   assert.match(app, /id="examResultSummary"/);
