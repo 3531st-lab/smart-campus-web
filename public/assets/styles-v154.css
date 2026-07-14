@@ -969,8 +969,8 @@ html[data-theme="day"] .search-results button:hover {
 
 .notice-list {
   display: grid;
-  gap: 18px;
-  padding-top: 6px;
+  gap: 0;
+  padding-top: 0;
 }
 
 .notice-list div {
@@ -980,6 +980,31 @@ html[data-theme="day"] .search-results button:hover {
   gap: 8px;
   color: #dce5fb;
   font-size: 13px;
+}
+
+.campus-news-preview,
+.reserve-card {
+  min-height: 304px;
+}
+
+.campus-news-preview {
+  display: flex;
+  flex-direction: column;
+}
+
+.campus-news-preview .notice-list {
+  flex: 1;
+  grid-template-rows: repeat(5, minmax(43px, 1fr));
+}
+
+.campus-news-preview .notice-list > div {
+  min-height: 43px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(112, 143, 198, 0.12);
+}
+
+.campus-news-preview .notice-list > div:last-child {
+  border-bottom: 0;
 }
 
 .notice-list span {
@@ -1027,9 +1052,44 @@ html[data-theme="day"] .campus-news-preview .notice-list p small {
 
 .reserve-layout {
   display: grid;
-  grid-template-columns: 218px 1fr;
-  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
+  align-items: stretch;
+}
+
+.reserve-live-meta {
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -4px 0 8px;
+  color: #7f9fa9;
+  font-size: 10px;
+}
+
+.reserve-live-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.reserve-live-meta i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #49d3af;
+  box-shadow: 0 0 0 4px rgba(73, 211, 175, 0.1), 0 0 12px rgba(73, 211, 175, 0.7);
+  animation: livePulse 1.8s ease-in-out infinite;
+}
+
+.reserve-live-meta .is-offline i {
+  background: #e8af55;
+  box-shadow: 0 0 0 4px rgba(232, 175, 85, 0.1);
+  animation: none;
+}
+
+@keyframes livePulse {
+  50% { opacity: 0.48; transform: scale(0.78); }
 }
 
 .section-title span {
@@ -1046,11 +1106,11 @@ html[data-theme="day"] .campus-news-preview .notice-list p small {
 
 .reserve-summary {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
+  grid-template-columns: 76px minmax(0, 1fr);
   align-items: center;
-  gap: 14px;
-  min-height: 118px;
-  padding: 12px;
+  gap: 10px;
+  min-height: 104px;
+  padding: 9px 10px;
   border: 1px solid rgba(77, 205, 207, 0.16);
   border-radius: 8px;
   background: rgba(24, 99, 113, 0.08);
@@ -1060,8 +1120,8 @@ html[data-theme="day"] .campus-news-preview .notice-list p small {
   position: relative;
   display: grid;
   place-items: center;
-  width: 92px;
-  height: 92px;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
   background: conic-gradient(#42c8ba 0 var(--reserve-progress, 0%), rgba(90, 142, 155, 0.18) var(--reserve-progress, 0%) 100%);
   box-shadow: 0 8px 22px rgba(27, 146, 148, 0.18);
@@ -1071,7 +1131,7 @@ html[data-theme="day"] .campus-news-preview .notice-list p small {
 .ring::before {
   content: "";
   position: absolute;
-  inset: 9px;
+  inset: 7px;
   border-radius: 50%;
   background: #102b3b;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -1086,7 +1146,7 @@ html[data-theme="day"] .campus-news-preview .notice-list p small {
 
 .ring-value strong {
   color: #f0fbfc;
-  font-size: 24px;
+  font-size: 20px;
   line-height: 1.05;
 }
 
@@ -1116,9 +1176,38 @@ html[data-theme="day"] .campus-news-preview .notice-list p small {
   font-size: 9px;
 }
 
+.reserve-kpis {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.reserve-kpis > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 5px 3px;
+  border: 1px solid rgba(85, 167, 176, 0.12);
+  border-radius: 6px;
+  background: rgba(51, 129, 139, 0.08);
+}
+
+.reserve-kpis b {
+  color: #dffaf5;
+  font-size: 13px;
+}
+
+.reserve-kpis small {
+  color: #7fa1aa;
+  font-size: 9px;
+}
+
 .reserve-list {
   display: grid;
-  gap: 8px;
+  gap: 5px;
 }
 
 .reserve-list div {
@@ -1127,7 +1216,8 @@ html[data-theme="day"] .campus-news-preview .notice-list p small {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 10px 10px 10px 14px;
+  min-height: 38px;
+  padding: 6px 8px 6px 12px;
   overflow: hidden;
   border: 1px solid rgba(94, 172, 184, 0.14);
   border-radius: 7px;

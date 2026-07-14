@@ -1,4 +1,5 @@
 const THEME_STORAGE_KEY = "smart_campus_color_theme_v1";
+const { normalizePlacement: normalizeTimetablePlacement, gridPlacement: timetableGridPlacement } = window.TimetableCore;
 
 function preferredTheme() {
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
@@ -23,7 +24,7 @@ const state = {
   sidebarScrollTop: Number(sessionStorage.getItem("smart_campus_sidebar_scroll") || 0)
 };
 
-const APP_BUILD = "campus-search-v151-20260710";
+const APP_BUILD = "timetable-placement-v155-20260713";
 window.__SMART_CAMPUS_BUILD__ = APP_BUILD;
 const LEGAL_CONSENT_VERSION = "2026.06.20";
 const LEGAL_CONSENT_STORAGE_KEY = "smart_campus_legal_consent_v1";
@@ -536,8 +537,7 @@ function sectionFromTime(time) {
 }
 
 function normalizeCourseRecord(course, index = 0) {
-  const startSection = Math.min(12, Math.max(1, Number(course.startSection || course.section || course.period || course["开始节次"] || sectionFromTime(course.time))));
-  const sectionCount = Math.min(4, Math.max(1, Number(course.sectionCount || course.duration || course.count || course["连续节数"] || 2)));
+  const { startSection, sectionCount } = normalizeTimetablePlacement(course, { fallbackStart: sectionFromTime(course.time) });
   const normalized = {
     ...course,
     id: course.id || `course-${Date.now()}-${index}`,
@@ -1412,8 +1412,9 @@ function minutesOf(value) {
 
 function courseTimeLabel(course, scheduleMode = "summer") {
   const starts = TIMETABLE_SCHEDULES[scheduleMode] || TIMETABLE_SCHEDULES.summer;
-  const startIndex = Math.min(12, Math.max(1, Number(course.startSection || 1))) - 1;
-  const endIndex = Math.min(11, startIndex + Math.max(1, Number(course.sectionCount || 1)) - 1);
+  const placement = normalizeTimetablePlacement(course, { fallbackCount: 1 });
+  const startIndex = placement.startSection - 1;
+  const endIndex = Math.min(11, startIndex + placement.sectionCount - 1);
   return `${starts[startIndex]}-${starts[endIndex]}`;
 }
 
@@ -2968,7 +2969,7 @@ async function renderShell() {
     refreshUnreadNotificationCount();
   } catch (error) {
     if (renderVersion !== renderShellVersion || requestedRoute !== state.route) return;
-    app.innerHTML = shell(`<div class="empty">${error.message}</div>`, "加载失败", "请稍后重试");
+    app.innerHTML = shell(`<div class="empty">${escapeHtml(error.message)}</div>`, "加载失败", "请稍后重试");
     bindNav();
     bindMotionEffects();
   }
@@ -3205,7 +3206,7 @@ async function submitDocConvertForm(form, toolFile, resultBox, submitButton) {
     }
     toast("转换任务已创建");
   } catch (error) {
-    if (resultBox) resultBox.innerHTML = `<strong>转换失败</strong><p>${error.message}</p>`;
+    if (resultBox) resultBox.innerHTML = `<strong>转换失败</strong><p>${escapeHtml(error.message)}</p>`;
     toast(error.message || "转换失败");
   } finally {
     if (submitButton) {
@@ -5010,10 +5011,9 @@ const routes = {
                   `).join("")}
                   ${visibleCourses.map((course) => {
                     const dayIndex = Math.max(0, weekDays.indexOf(normalizeDay(course.day)));
-                    const start = Math.min(12, Math.max(1, Number(course.startSection || 1)));
-                    const span = Math.min(Number(course.sectionCount || 2), 13 - start);
+                    const { gridRowStart, gridRowSpan } = timetableGridPlacement(course);
                     return `
-                      <button type="button" class="timetable-course-card" data-course-edit="${escapeHtml(course.id)}" style="grid-column: ${dayIndex + 2}; grid-row: ${start + 1} / span ${span}; ${timetableCourseGradient(course, coursePalette.get(String(course.course || course.id)) || 0)}">
+                      <button type="button" class="timetable-course-card" data-course-edit="${escapeHtml(course.id)}" style="grid-column: ${dayIndex + 2}; grid-row: ${gridRowStart} / span ${gridRowSpan}; ${timetableCourseGradient(course, coursePalette.get(String(course.course || course.id)) || 0)}">
                         <span>${escapeHtml(courseTimeLabel(course, settings.schedule))}</span>
                         <strong>${escapeHtml(course.course)}</strong>
                         <em>${escapeHtml(course.location || "未填写教室")}</em>

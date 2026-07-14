@@ -907,6 +907,70 @@ function handleStatic(req, res) {
   fs.createReadStream(filePath).pipe(res);
 }
 
+function reservationDurationHours(slot) {
+  const match = String(slot || "").match(/(\d{1,2}):(\d{2})\s*[-–—至]\s*(\d{1,2}):(\d{2})/);
+  if (!match) return 0;
+  const start = Number(match[1]) * 60 + Number(match[2]);
+  const end = Number(match[3]) * 60 + Number(match[4]);
+  return end > start ? (end - start) / 60 : 0;
+}
+
+function reservationDate(value) {
+  const normalized = String(value || "").trim().replace(/\//g, "-");
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function startOfWeek(value = new Date()) {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  return date;
+}
+
+function buildReservationDashboard(reservations = [], now = new Date()) {
+  const rows = Array.isArray(reservations) ? reservations : [];
+  const approved = rows.filter((item) => item.status === "approved");
+  const pending = rows.filter((item) => item.status === "pending");
+  const weekStart = startOfWeek(now);
+  const nextWeekStart = new Date(weekStart);
+  nextWeekStart.setDate(nextWeekStart.getDate() + 7);
+  const previousWeekStart = new Date(weekStart);
+  previousWeekStart.setDate(previousWeekStart.getDate() - 7);
+  const approvedInRange = (from, to) => approved.filter((item) => {
+    const timestamp = reservationDate(item.updatedAt || item.createdAt);
+    return timestamp && timestamp >= from && timestamp < to;
+  });
+  const weekApproved = approvedInRange(weekStart, nextWeekStart);
+  const previousWeekApproved = approvedInRange(previousWeekStart, weekStart);
+  const hoursOf = (items) => items.reduce((sum, item) => sum + reservationDurationHours(item.slot), 0);
+  const approvedHours = hoursOf(approved);
+  const weekApprovedHours = hoursOf(weekApproved);
+  const previousWeekApprovedHours = hoursOf(previousWeekApproved);
+  const weeklyChangePercent = previousWeekApprovedHours > 0
+    ? Math.round(((weekApprovedHours - previousWeekApprovedHours) / previousWeekApprovedHours) * 100)
+    : weekApprovedHours > 0 ? 100 : 0;
+  const recentReservations = [...rows]
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
+    .slice(0, 3);
+
+  return {
+    reservationSummary: {
+      approvedHours: Number(approvedHours.toFixed(1)),
+      weekApprovedHours: Number(weekApprovedHours.toFixed(1)),
+      previousWeekApprovedHours: Number(previousWeekApprovedHours.toFixed(1)),
+      weeklyChangePercent,
+      approvedCount: approved.length,
+      pendingCount: pending.length,
+      rejectedCount: rows.filter((item) => item.status === "rejected").length,
+      totalCount: rows.length,
+      approvalRate: rows.length ? Math.round((approved.length / rows.length) * 100) : 0,
+      updatedAt: new Date(now).toISOString()
+    },
+    recentReservations
+  };
+}
+
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const route = `${req.method} ${url.pathname}`;
@@ -1664,26 +1728,7 @@ async function handleApi(req, res) {
       })
       .sort((a, b) => String(b.fullDate).localeCompare(String(a.fullDate)))
       .slice(0, 5);
-    const reservationDurationHours = (slot) => {
-      const match = String(slot || "").match(/(\d{1,2}):(\d{2})\s*[-–—至]\s*(\d{1,2}):(\d{2})/);
-      if (!match) return 0;
-      const start = Number(match[1]) * 60 + Number(match[2]);
-      const end = Number(match[3]) * 60 + Number(match[4]);
-      return end > start ? (end - start) / 60 : 0;
-    };
-    const approvedReservations = userReservations.filter((item) => item.status === "approved");
-    const pendingReservations = userReservations.filter((item) => item.status === "pending");
-    const approvedHours = approvedReservations.reduce((sum, item) => sum + reservationDurationHours(item.slot), 0);
-    const reservationSummary = {
-      approvedHours: Number(approvedHours.toFixed(1)),
-      approvedCount: approvedReservations.length,
-      pendingCount: pendingReservations.length,
-      totalCount: userReservations.length,
-      approvalRate: userReservations.length ? Math.round((approvedReservations.length / userReservations.length) * 100) : 0
-    };
-    const recentReservations = [...userReservations]
-      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
-      .slice(0, 3);
+    const { reservationSummary, recentReservations } = buildReservationDashboard(userReservations);
     sendJson(res, 200, {
       stats: {
         pendingReservations: userReservations.filter((item) => item.status === "pending").length,
@@ -1752,6 +1797,12 @@ async function handleApi(req, res) {
     sendJson(res, 200, { reservations: await reservationStore.listForUser(user) });
     return;
     sendJson(res, 200, { reservations: data.reservations.filter((item) => item.userId === user.id) });
+    return;
+  }
+
+  if (route === "GET /api/dashboard/reservations") {
+    const userReservations = await reservationStore.listForUser(user);
+    sendJson(res, 200, buildReservationDashboard(userReservations));
     return;
   }
 

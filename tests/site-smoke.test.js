@@ -333,6 +333,7 @@ test("persists timetable edits, calendar settings and course deletion", async ()
   const dashboardData = await dashboard.json();
   assert.equal(dashboardData.timetable.settings.weekOneStart, "2026-03-02");
   assert.ok(dashboardData.timetable.personalCourses.some((item) => item.id === courseId && item.teacher === "Updated Teacher"));
+  assert.ok(dashboardData.recentCampusNews.length <= 5, "the dashboard must never overflow the five-row campus news panel");
 
   const deleted = await fetch(`${baseUrl}/api/timetable/personal/delete`, {
     method: "POST",
@@ -350,7 +351,11 @@ test("connects lab reservation approval to unread notifications", async () => {
     Authorization: `Bearer ${createTestToken("u-1001")}`,
     "Content-Type": "application/json"
   };
-  const slot = `Regression Slot ${Date.now()}`;
+  const beforeResponse = await fetch(`${baseUrl}/api/dashboard/reservations`, { headers });
+  const before = await beforeResponse.json();
+  assert.equal(beforeResponse.status, 200);
+
+  const slot = `周二 14:00-16:00 · Regression ${Date.now()}`;
   const submitted = await fetch(`${baseUrl}/api/reservations`, {
     method: "POST",
     headers,
@@ -360,6 +365,12 @@ test("connects lab reservation approval to unread notifications", async () => {
   const reservation = (await submitted.json()).reservation;
   assert.equal(reservation.status, "pending");
 
+  const pendingResponse = await fetch(`${baseUrl}/api/dashboard/reservations`, { headers });
+  const pendingDashboard = await pendingResponse.json();
+  assert.equal(pendingDashboard.reservationSummary.totalCount, before.reservationSummary.totalCount + 1);
+  assert.equal(pendingDashboard.reservationSummary.pendingCount, before.reservationSummary.pendingCount + 1);
+  assert.equal(pendingDashboard.recentReservations[0].id, reservation.id);
+
   const reviewed = await fetch(`${baseUrl}/api/admin/reservations/review`, {
     method: "POST",
     headers,
@@ -367,6 +378,13 @@ test("connects lab reservation approval to unread notifications", async () => {
   });
   assert.equal(reviewed.status, 200);
   assert.equal((await reviewed.json()).reservation.status, "approved");
+
+  const approvedResponse = await fetch(`${baseUrl}/api/dashboard/reservations`, { headers });
+  const approvedDashboard = await approvedResponse.json();
+  assert.equal(approvedDashboard.reservationSummary.approvedCount, before.reservationSummary.approvedCount + 1);
+  assert.equal(approvedDashboard.reservationSummary.pendingCount, before.reservationSummary.pendingCount);
+  assert.equal(approvedDashboard.reservationSummary.approvedHours, before.reservationSummary.approvedHours + 2);
+  assert.ok(approvedDashboard.reservationSummary.updatedAt);
 
   const notificationResponse = await fetch(`${baseUrl}/api/notifications`, { headers });
   const notificationData = await notificationResponse.json();

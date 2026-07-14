@@ -2915,6 +2915,10 @@ async function renderShell() {
   if (currentSidebar) state.sidebarScrollTop = currentSidebar.scrollTop;
   const renderVersion = ++renderShellVersion;
   const requestedRoute = routes[state.route] ? state.route : "dashboard";
+  if (requestedRoute !== "dashboard" && window.dashboardReservationTimer) {
+    clearInterval(window.dashboardReservationTimer);
+    window.dashboardReservationTimer = null;
+  }
   if (requestedRoute !== state.route) {
     state.route = requestedRoute;
     const nextUrl = routeToUrl(requestedRoute);
@@ -2973,6 +2977,67 @@ async function renderShell() {
     app.innerHTML = shell(`<div class="empty">${escapeHtml(error.message)}</div>`, "加载失败", "请稍后重试");
     bindNav();
     bindMotionEffects();
+  }
+}
+
+function reservationTrendLabel(summary = {}) {
+  const current = Number(summary.weekApprovedHours || 0);
+  const previous = Number(summary.previousWeekApprovedHours || 0);
+  const change = Number(summary.weeklyChangePercent || 0);
+  if (!current && !previous) return "本周暂无新增通过时长";
+  if (current && !previous) return `本周新增 ${current.toFixed(1)} 小时`;
+  if (change === 0) return "与上周持平";
+  return `较上周${change > 0 ? "增加" : "减少"} ${Math.abs(change)}%`;
+}
+
+function dashboardReservationMarkup(summary = {}, reservations = []) {
+  const approvalRate = Math.max(0, Math.min(100, Number(summary.approvalRate || 0)));
+  const updatedAt = summary.updatedAt ? new Date(summary.updatedAt) : null;
+  const updatedLabel = updatedAt && !Number.isNaN(updatedAt.getTime())
+    ? updatedAt.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
+    : "刚刚";
+  return `
+    <div class="reserve-live-meta">
+      <span><i></i> 实时预约数据</span>
+      <time>${updatedLabel} 更新</time>
+    </div>
+    <div class="reserve-layout">
+      <div class="reserve-summary">
+        <div class="ring" style="--reserve-progress:${approvalRate}%">
+          <div class="ring-value"><strong>${Number(summary.approvedHours || 0).toFixed(1)}</strong><span>累计小时</span></div>
+        </div>
+        <div class="reserve-summary-copy">
+          <span>预约通过率 ${approvalRate}%</span>
+          <strong>本周 ${Number(summary.weekApprovedHours || 0).toFixed(1)} 小时</strong>
+          <small>${escapeHtml(reservationTrendLabel(summary))}</small>
+        </div>
+        <div class="reserve-kpis" aria-label="预约状态统计">
+          <span><b>${Number(summary.pendingCount || 0)}</b><small>待审批</small></span>
+          <span><b>${Number(summary.approvedCount || 0)}</b><small>已通过</small></span>
+          <span><b>${Number(summary.totalCount || 0)}</b><small>总申请</small></span>
+        </div>
+      </div>
+      <div class="reserve-list">
+        ${(reservations || []).slice(0, 3).map((item) => `
+          <div>
+            <span><time>${escapeHtml(item.slot || "时段待定")}</time><b>${escapeHtml(item.labName || "实验室")}</b></span>
+            <em class="${statusClass(item.status)}">${escapeHtml(statusText(item.status))}</em>
+          </div>
+        `).join("") || `<div class="empty">暂无预约记录，提交预约后会实时显示在这里。</div>`}
+      </div>
+    </div>
+  `;
+}
+
+async function refreshDashboardReservationPanel() {
+  const panel = document.querySelector("#dashboardReservationBody");
+  if (!panel || state.route !== "dashboard") return;
+  try {
+    const data = await api("/api/dashboard/reservations");
+    if (state.route !== "dashboard" || !document.body.contains(panel)) return;
+    panel.innerHTML = dashboardReservationMarkup(data.reservationSummary, data.recentReservations);
+  } catch (error) {
+    panel.querySelector(".reserve-live-meta span")?.classList.add("is-offline");
   }
 }
 
@@ -4142,32 +4207,15 @@ const routes = {
           <article class="dash-card notice-card campus-news-preview">
             <h2 class="section-title"><span>${iconSvg("news")} 校园资讯</span><button data-route="news">查看全部 ›</button></h2>
             <div class="notice-list">
-              ${recentCampusNews
+              ${recentCampusNews.slice(0, 5)
                 .map((item) => `<div><span></span><p><b>${escapeHtml(item.title || "校园资讯")}</b><small>${escapeHtml(item.source || item.category || "泰州学院")}</small></p><time>${escapeHtml(item.date || String(item.fullDate || "").slice(5) || "--")}</time></div>`)
                 .join("") || `<div class="empty">近 3 天暂无校园资讯</div>`}
             </div>
           </article>
           <article class="dash-card reserve-card">
             <h2 class="section-title"><span>${iconSvg("lab")} 实验室预约</span><button data-route="labs">查看全部 ›</button></h2>
-            <div class="reserve-layout">
-              <div class="reserve-summary">
-                <div class="ring" style="--reserve-progress:${Math.max(0, Math.min(100, Number(reservationSummary.approvalRate || 0)))}%">
-                  <div class="ring-value"><strong>${Number(reservationSummary.approvedHours || 0).toFixed(1)}</strong><span>小时</span></div>
-                </div>
-                <div class="reserve-summary-copy">
-                  <span>已通过预约时长</span>
-                  <strong>${reservationSummary.approvedCount} 项已通过</strong>
-                  <small>${reservationSummary.pendingCount} 项待审核 · 共 ${reservationSummary.totalCount} 项</small>
-                </div>
-              </div>
-              <div class="reserve-list">
-                ${recentReservations.map((item) => `
-                  <div>
-                    <span><time>${escapeHtml(item.slot || "时段待定")}</time><b>${escapeHtml(item.labName || "实验室")}</b></span>
-                    <em class="${statusClass(item.status)}">${escapeHtml(statusText(item.status))}</em>
-                  </div>
-                `).join("") || `<div class="empty">暂无实验室预约记录</div>`}
-              </div>
+            <div id="dashboardReservationBody" aria-live="polite">
+              ${dashboardReservationMarkup(reservationSummary, recentReservations)}
             </div>
           </article>
           <article class="dash-card campus-card">
@@ -4223,6 +4271,8 @@ const routes = {
         });
         clearInterval(window.dashboardWeatherTimer);
         window.dashboardWeatherTimer = setInterval(() => updateDashboardWeather(true), 10 * 60 * 1000);
+        clearInterval(window.dashboardReservationTimer);
+        window.dashboardReservationTimer = setInterval(refreshDashboardReservationPanel, 30 * 1000);
         document.querySelectorAll(".pay-entry").forEach((button) => {
           button.addEventListener("click", async () => {
             try {
@@ -4831,6 +4881,37 @@ const routes = {
       "可查分": 6,
       "关注公告": 7
     };
+    const examPageSize = 12;
+    const renderExamCard = (item) => `
+      <article class="exam-card dash-card">
+        <div class="exam-card-head">
+          <div>
+            <span class="badge">${escapeHtml(item.category)}</span>
+            <h3>${escapeHtml(item.name)}</h3>
+          </div>
+          <span class="badge ${statusClass(item.status)}">${escapeHtml(item.status)}</span>
+        </div>
+        <div class="exam-meta-row">
+          <span>含金量：${escapeHtml(item.valueLabel)} · ${Number(item.valueScore) || 0}</span>
+          <span>舆情样本：${item.publicOpinion?.sampleSize || "-"} · 置信度${escapeHtml(item.publicOpinion?.confidence || "-")}</span>
+          <span>时间精度：${escapeHtml(item.datePrecision)}</span>
+          <span>官网链接：${item.linksReady ? "三入口已核验" : "部分待复核"}</span>
+        </div>
+        <div class="exam-timeline">
+          <div><span>报名时间</span><strong>${escapeHtml(item.registrationTime)}</strong></div>
+          <div><span>考试时间</span><strong>${escapeHtml(item.examTime)}</strong></div>
+          <div><span>查分时间</span><strong>${escapeHtml(item.scoreTime)}</strong></div>
+        </div>
+        <p class="exam-source">来源：${escapeHtml(item.source)}</p>
+        <p class="exam-risk">${escapeHtml(item.riskNote)}</p>
+        <p class="exam-risk">舆情方法：${escapeHtml(item.publicOpinion?.method || "待更新")}</p>
+        <div class="exam-actions">
+          <a href="${escapeHtml(item.signupUrl)}" target="_blank" rel="noreferrer">报名入口</a>
+          <a href="${escapeHtml(item.scoreUrl)}" target="_blank" rel="noreferrer">成绩查询</a>
+          <a href="${escapeHtml(item.officialUrl)}" target="_blank" rel="noreferrer">官网公告</a>
+        </div>
+      </article>
+    `;
     return {
       title: "考试报名",
       subtitle: "大学生常用考试官方入口、报名时间、考试时间与成绩查询",
@@ -4867,84 +4948,94 @@ const routes = {
               </select>
             </label>
             <div class="exam-filters">
-              ${categories.map((category) => `<button class="exam-filter ${category === "全部" ? "active" : ""}" data-exam-category="${category}">${category}</button>`).join("")}
+              ${categories.map((category) => `<button class="exam-filter ${category === "全部" ? "active" : ""}" data-exam-category="${escapeHtml(category)}">${escapeHtml(category)}</button>`).join("")}
             </div>
           </div>
 
-          <div class="exam-grid" id="examGrid">
-            ${data.items.map((item) => `
-              <article class="exam-card dash-card"
-                data-category="${item.category}"
-                data-search="${`${item.name} ${item.category} ${item.source}`.toLowerCase()}"
-                data-exam-date="${item.nextExamDate || "9999-12-31"}"
-                data-value="${item.valueScore || 0}"
-                data-status-rank="${statusRank[item.status] || 9}">
-                <div class="exam-card-head">
-                  <div>
-                    <span class="badge">${item.category}</span>
-                    <h3>${item.name}</h3>
-                  </div>
-                  <span class="badge ${statusClass(item.status)}">${item.status}</span>
-                </div>
-                <div class="exam-meta-row">
-                  <span>含金量：${item.valueLabel} · ${item.valueScore}</span>
-                  <span>舆情样本：${item.publicOpinion?.sampleSize || "-"} · 置信度${item.publicOpinion?.confidence || "-"}</span>
-                  <span>时间精度：${item.datePrecision}</span>
-                  <span>官网链接：${item.linksReady ? "三入口已核验" : "部分待复核"}</span>
-                </div>
-                <div class="exam-timeline">
-                  <div><span>报名时间</span><strong>${item.registrationTime}</strong></div>
-                  <div><span>考试时间</span><strong>${item.examTime}</strong></div>
-                  <div><span>查分时间</span><strong>${item.scoreTime}</strong></div>
-                </div>
-                <p class="exam-source">来源：${item.source}</p>
-                <p class="exam-risk">${item.riskNote}</p>
-                <p class="exam-risk">舆情方法：${item.publicOpinion?.method || "待更新"}</p>
-                <div class="exam-actions">
-                  <a href="${item.signupUrl}" target="_blank" rel="noreferrer">报名入口</a>
-                  <a href="${item.scoreUrl}" target="_blank" rel="noreferrer">成绩查询</a>
-                  <a href="${item.officialUrl}" target="_blank" rel="noreferrer">官网公告</a>
-                </div>
-              </article>
-            `).join("")}
+          <div class="exam-results-bar">
+            <span id="examResultSummary" aria-live="polite"></span>
+            <span>仅加载当前页，浏览更流畅</span>
           </div>
+          <div class="exam-grid" id="examGrid"></div>
+          <nav class="exam-pagination" id="examPagination" aria-label="考试报名分页"></nav>
         </section>
       `,
       afterRender() {
         const filters = [...document.querySelectorAll(".exam-filter")];
-        const cards = [...document.querySelectorAll(".exam-card")];
         const grid = document.querySelector("#examGrid");
         const search = document.querySelector("#examSearch");
         const sort = document.querySelector("#examSort");
+        const summary = document.querySelector("#examResultSummary");
+        const pagination = document.querySelector("#examPagination");
         let category = "全部";
+        let page = 1;
 
-        const updateCards = () => {
+        const sortedItems = () => {
           const keyword = search.value.trim().toLowerCase();
-          cards.forEach((card) => {
-            const matchCategory = category === "全部" || card.dataset.category === category;
-            const matchSearch = !keyword || card.dataset.search.includes(keyword);
-            card.hidden = !(matchCategory && matchSearch);
+          return data.items.filter((item) => {
+            const matchCategory = category === "全部" || item.category === category;
+            const searchText = `${item.name} ${item.category} ${item.source}`.toLowerCase();
+            return matchCategory && (!keyword || searchText.includes(keyword));
+          }).sort((a, b) => {
+            if (sort.value === "value") return Number(b.valueScore) - Number(a.valueScore);
+            if (sort.value === "status") return (statusRank[a.status] || 9) - (statusRank[b.status] || 9);
+            return String(a.nextExamDate || "9999-12-31").localeCompare(String(b.nextExamDate || "9999-12-31"))
+              || Number(b.valueScore) - Number(a.valueScore);
           });
         };
-        const sortCards = () => {
-          const sorted = [...cards].sort((a, b) => {
-            if (sort.value === "value") return Number(b.dataset.value) - Number(a.dataset.value);
-            if (sort.value === "status") return Number(a.dataset.statusRank) - Number(b.dataset.statusRank);
-            return a.dataset.examDate.localeCompare(b.dataset.examDate) || Number(b.dataset.value) - Number(a.dataset.value);
+
+        const pageNumbers = (current, total) => {
+          const candidates = [1, total, current - 2, current - 1, current, current + 1, current + 2]
+            .filter((value) => value >= 1 && value <= total);
+          return [...new Set(candidates)].sort((a, b) => a - b);
+        };
+
+        const renderExamPage = (resetPage = false) => {
+          if (resetPage) page = 1;
+          const items = sortedItems();
+          const totalPages = Math.max(1, Math.ceil(items.length / examPageSize));
+          page = Math.min(page, totalPages);
+          const start = (page - 1) * examPageSize;
+          const visibleItems = items.slice(start, start + examPageSize);
+          grid.innerHTML = visibleItems.length
+            ? visibleItems.map(renderExamCard).join("")
+            : `<div class="exam-empty">没有找到符合条件的考试，请更换关键词或分类。</div>`;
+          summary.textContent = items.length
+            ? `显示 ${start + 1}-${start + visibleItems.length} 项，共 ${items.length} 项`
+            : "共 0 项";
+
+          const numbers = pageNumbers(page, totalPages);
+          const controls = [];
+          controls.push(`<button type="button" data-exam-page="prev" ${page === 1 ? "disabled" : ""} aria-label="上一页">‹</button>`);
+          numbers.forEach((number, index) => {
+            if (index > 0 && number - numbers[index - 1] > 1) controls.push('<span class="exam-page-gap">…</span>');
+            controls.push(`<button type="button" data-exam-page="${number}" class="${number === page ? "active" : ""}" ${number === page ? 'aria-current="page"' : ""}>${number}</button>`);
           });
-          sorted.forEach((card) => grid.appendChild(card));
+          controls.push(`<button type="button" data-exam-page="next" ${page === totalPages ? "disabled" : ""} aria-label="下一页">›</button>`);
+          pagination.innerHTML = controls.join("");
+          pagination.hidden = items.length <= examPageSize;
         };
 
         filters.forEach((button) => {
           button.addEventListener("click", () => {
             category = button.dataset.examCategory;
             filters.forEach((item) => item.classList.toggle("active", item === button));
-            updateCards();
+            renderExamPage(true);
           });
         });
-        search.addEventListener("input", updateCards);
-        sort.addEventListener("change", sortCards);
-        sortCards();
+        search.addEventListener("input", () => renderExamPage(true));
+        sort.addEventListener("change", () => renderExamPage(true));
+        pagination.addEventListener("click", (event) => {
+          const button = event.target.closest("button[data-exam-page]");
+          if (!button || button.disabled) return;
+          const action = button.dataset.examPage;
+          if (action === "prev") page -= 1;
+          else if (action === "next") page += 1;
+          else page = Number(action);
+          renderExamPage();
+          document.querySelector(".exam-results-bar")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+        renderExamPage();
         document.querySelector("#refreshExams").addEventListener("click", async () => {
           toast("正在核验官网链接与舆情含金量，可能需要几十秒");
           await api("/api/exams?refresh=1&audit=1");
