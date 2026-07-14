@@ -31,6 +31,8 @@ async function initialize() {
   if (!mysqlConfigured || initialized) return;
   if (!autoMigrateSchema) {
     initialized = true;
+    await seedPrivateStudent();
+    await enforcePermanentSuperAdmins();
     return;
   }
   const db = getPool();
