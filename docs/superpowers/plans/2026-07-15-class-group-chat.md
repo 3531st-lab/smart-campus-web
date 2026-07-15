@@ -212,6 +212,8 @@ git commit -m "feat: synchronize mandatory class groups"
 **Files:**
 - Create: `tests/class-admin-api.test.js`
 - Modify: `server/index.js`
+- Modify: `server/class-store.js` (review fix: enforce one matching active student class)
+- Modify: `server/student-store.js` (review fix: align import identity semantics)
 - Modify: `public/app.js`
 - Modify: `public/assets/styles.css`
 - Modify: `public/assets/styles-v157.css`
