@@ -1128,7 +1128,7 @@ async function handleApi(req, res) {
     const user = await studentStore.findIdentity(body);
     const identityMatches = body.identityType === "teacher" ? user?.role === "teacher" : user?.role !== "teacher";
     const hasBoundPhone = /^1\d{10}$/.test(String(user?.phone || ""));
-    const passwordMatches = user && await studentStore.verifyPassword(user.studentNo, body.password);
+    const passwordMatches = user && await studentStore.verifyPassword({ school: user.school, studentNo: user.studentNo }, body.password);
     if (!user || !identityMatches || !hasBoundPhone || !user.hasPassword || user.mustChangePassword || !passwordMatches) {
       recordAuthFailure(req, body);
       sendError(res, 401, "账号、密码或登录身份错误；密码登录需要账号已绑定手机号");
@@ -1376,7 +1376,7 @@ async function handleApi(req, res) {
         sendError(res, 400, "该账号尚未绑定有效手机号，不能启用密码登录");
         return;
       }
-      await studentStore.clearPassword(target.studentNo);
+      await studentStore.clearPassword({ id: target.id, school: target.school, studentNo: target.studentNo });
       await studentStore.logAdminAction("reset_student_password", target.studentNo, { operator: adminUser.studentNo });
       sendJson(res, 200, { updated: true, requiresPhoneLogin: true });
       return;
@@ -1441,7 +1441,7 @@ async function handleApi(req, res) {
       sendError(res, 400, "请先绑定有效手机号，再设置登录密码");
       return;
     }
-    await studentStore.setPassword(user.studentNo, body.password, { mustChange: false });
+    await studentStore.setPassword({ id: user.id, school: user.school, studentNo: user.studentNo }, body.password, { mustChange: false });
     await studentStore.logAdminAction("set_own_password", user.studentNo, { operator: user.studentNo });
     const updatedUser = await studentStore.findById(user.id);
     sendJson(res, 200, { updated: true, user: publicUser(updatedUser) });

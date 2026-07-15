@@ -533,3 +533,88 @@ test("MySQL syncAllClasses dry-run reports would-change counts without opening t
   );
   assert.equal(queries.some((query) => /beginTransaction|UPDATE |INSERT INTO/i.test(query.sql)), false);
 });
+
+test("password credentials are scoped by school and reject ambiguous no-school requests", async () => {
+  const studentNo = "PWD-DUP-1001";
+  const schoolA = {
+    id: "pwd-school-a",
+    name: "Password A",
+    school: "Password School A",
+    college: "College",
+    major: "Software",
+    className: "Class A",
+    studentNo,
+    phone: "13800003001",
+    status: "active",
+    role: "student"
+  };
+  const schoolB = {
+    ...schoolA,
+    id: "pwd-school-b",
+    name: "Password B",
+    school: "Password School B",
+    className: "Class B",
+    phone: "13800003002"
+  };
+  data.users.push(schoolA, schoolB);
+  try {
+    assert.equal(await studentStore.setPassword({ school: schoolB.school, studentNo }, "Classroom42", { mustChange: true }), true);
+
+    assert.equal(await studentStore.verifyPassword({ school: schoolA.school, studentNo }, "Classroom42"), false);
+    assert.equal(await studentStore.verifyPassword({ school: schoolB.school, studentNo }, "Classroom42"), true);
+    assert.equal(data.users.find((user) => user.id === schoolA.id).passwordHash || "", "");
+    assert.equal(data.users.find((user) => user.id === schoolB.id).mustChangePassword, true);
+
+    await assert.rejects(() => studentStore.setPassword(studentNo, "Otherpass42"), /学校|school|ambiguous/i);
+    await assert.rejects(() => studentStore.verifyPassword(studentNo, "Classroom42"), /学校|school|ambiguous/i);
+    await assert.rejects(() => studentStore.clearPassword(studentNo), /学校|school|ambiguous/i);
+
+    assert.equal(await studentStore.clearPassword({ school: schoolB.school, studentNo }), true);
+    assert.equal(await studentStore.verifyPassword({ school: schoolB.school, studentNo }, "Classroom42"), false);
+  } finally {
+    for (let index = data.users.length - 1; index >= 0; index -= 1) {
+      if ([schoolA.id, schoolB.id].includes(data.users[index].id)) data.users.splice(index, 1);
+    }
+  }
+});
+
+test("server credential call sites pass resolved identity to password store operations", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "server", "index.js"), "utf8");
+
+  assert.match(source, /verifyPassword\(\{ school: user\.school, studentNo: user\.studentNo \}/);
+  assert.match(source, /clearPassword\(\{ id: target\.id, school: target\.school, studentNo: target\.studentNo \}/);
+  assert.match(source, /setPassword\(\{ id: user\.id, school: user\.school, studentNo: user\.studentNo \}/);
+  assert.doesNotMatch(source, /verifyPassword\(user\.studentNo/);
+  assert.doesNotMatch(source, /clearPassword\(target\.studentNo/);
+  assert.doesNotMatch(source, /setPassword\(user\.studentNo/);
+});
+
+test("MySQL dry-run counts class group id repair when group exists but class link is missing", async () => {
+  const rows = {
+    users: [
+      { id: "mysql-group-link", school: "S", college: "C", class_name: "Needs Link", role: "student", status: "active" }
+    ],
+    classRow: { id: "class-needs-link", school: "S", college: "C", class_name: "Needs Link", class_key: "s\u001fc\u001fneedslink", group_id: null, status: "active" },
+    groupRow: { id: "group-needs-link", type: "class", name: "Needs Link", class_id: "class-needs-link", status: "active" },
+    assignmentRow: { class_id: "class-needs-link", user_id: "mysql-group-link", duty: "member", source: "student_identity", active: 1 }
+  };
+  const fakeDb = {
+    async execute(sql, params = []) {
+      if (/SELECT \* FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
+      if (/SELECT \* FROM campus_classes WHERE class_key = \?/.test(sql)) return [[rows.classRow]];
+      if (/SELECT \* FROM chat_groups WHERE type = 'class' AND class_id = \?/.test(sql)) return [[rows.groupRow]];
+      if (/FROM class_assignments/.test(sql)) return [[rows.assignmentRow]];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    async getConnection() {
+      throw new Error("dry-run must not open a transaction connection");
+    }
+  };
+  const isolatedClassStore = loadClassStoreWithFakeDb(fakeDb);
+
+  const summary = await isolatedClassStore.syncAllClasses({ dryRun: true });
+
+  assert.equal(summary.checked, 1);
+  assert.equal(summary.changed, 1);
+  assert.equal(summary.incomplete, 0);
+});

@@ -287,11 +287,12 @@ function matchesIdentityType(user, identityType) {
 function normalizeStudentNoIdentity(identity) {
   if (identity && typeof identity === "object") {
     return {
+      id: String(identity.id || "").trim(),
       school: String(identity.school || "").trim(),
       studentNo: String(identity.studentNo ?? identity.student_no ?? "").trim()
     };
   }
-  return { school: "", studentNo: String(identity || "").trim() };
+  return { id: "", school: "", studentNo: String(identity || "").trim() };
 }
 
 function ambiguousStudentNoError(studentNo) {
@@ -302,7 +303,7 @@ function ambiguousStudentNoError(studentNo) {
 
 function memoryMatchesStudentNo(identity) {
   return data.users.filter((user) => (
-    user.studentNo === identity.studentNo
+    (identity.id ? user.id === identity.id : user.studentNo === identity.studentNo)
     && (!identity.school || user.school === identity.school)
   ));
 }
@@ -699,16 +700,21 @@ async function setStudentRole(identityInput, role) {
 
 async function findByStudentNo(identityInput) {
   const identity = normalizeStudentNoIdentity(identityInput);
-  if (!identity.studentNo) return null;
+  if (!identity.id && !identity.studentNo) return null;
   if (!mysqlConfigured) {
     const matches = memoryMatchesStudentNo(identity);
     if (!identity.school && matches.length > 1) throw ambiguousStudentNoError(identity.studentNo);
     return normalizeStudent(matches[0]);
   }
   await initialize();
-  const [rows] = identity.school
-    ? await getPool().execute("SELECT * FROM students WHERE school = ? AND student_no = ? LIMIT 1", [identity.school, identity.studentNo])
-    : await getPool().execute("SELECT * FROM students WHERE student_no = ? LIMIT 2", [identity.studentNo]);
+  let rows;
+  if (identity.id) {
+    [rows] = await getPool().execute("SELECT * FROM students WHERE id = ? LIMIT 1", [identity.id]);
+  } else if (identity.school) {
+    [rows] = await getPool().execute("SELECT * FROM students WHERE school = ? AND student_no = ? LIMIT 1", [identity.school, identity.studentNo]);
+  } else {
+    [rows] = await getPool().execute("SELECT * FROM students WHERE student_no = ? LIMIT 2", [identity.studentNo]);
+  }
   if (!identity.school && rows.length > 1) throw ambiguousStudentNoError(identity.studentNo);
   return normalizeStudent(rows[0]);
 }
@@ -725,47 +731,53 @@ function validPassword(password) {
     && /\d/.test(String(password));
 }
 
-async function setPassword(studentNo, password, { mustChange = false } = {}) {
+async function setPassword(identityInput, password, { mustChange = false } = {}) {
   if (!validPassword(password)) throw new Error("密码至少 8 位，并同时包含字母和数字");
+  const target = await findByStudentNo(identityInput);
   const passwordHash = hashPassword(password);
   if (!mysqlConfigured) {
-    const student = data.users.find((user) => user.studentNo === studentNo);
+    const student = target ? data.users.find((user) => user.id === target.id) : null;
     if (!student) return false;
     student.passwordHash = passwordHash;
     student.mustChangePassword = mustChange;
     return true;
   }
   await initialize();
+  if (!target) return false;
   const [result] = await getPool().execute(
-    "UPDATE students SET password_hash = ?, password_must_change = ? WHERE student_no = ?",
-    [passwordHash, mustChange ? 1 : 0, studentNo]
+    "UPDATE students SET password_hash = ?, password_must_change = ? WHERE id = ?",
+    [passwordHash, mustChange ? 1 : 0, target.id]
   );
   return result.affectedRows > 0;
 }
 
-async function clearPassword(studentNo) {
+async function clearPassword(identityInput) {
+  const target = await findByStudentNo(identityInput);
   if (!mysqlConfigured) {
-    const student = data.users.find((user) => user.studentNo === studentNo);
+    const student = target ? data.users.find((user) => user.id === target.id) : null;
     if (!student) return false;
     student.passwordHash = "";
     student.mustChangePassword = false;
     return true;
   }
   await initialize();
+  if (!target) return false;
   const [result] = await getPool().execute(
-    "UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE student_no = ?",
-    [studentNo]
+    "UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE id = ?",
+    [target.id]
   );
   return result.affectedRows > 0;
 }
 
-async function verifyPassword(studentNo, password) {
+async function verifyPassword(identityInput, password) {
+  const target = await findByStudentNo(identityInput);
   let encoded = "";
   if (!mysqlConfigured) {
-    encoded = data.users.find((user) => user.studentNo === studentNo)?.passwordHash || "";
+    encoded = target ? data.users.find((user) => user.id === target.id)?.passwordHash || "" : "";
   } else {
     await initialize();
-    const [rows] = await getPool().execute("SELECT password_hash FROM students WHERE student_no = ? LIMIT 1", [studentNo]);
+    if (!target) return false;
+    const [rows] = await getPool().execute("SELECT password_hash FROM students WHERE id = ? LIMIT 1", [target.id]);
     encoded = rows[0]?.password_hash || "";
   }
   const [, salt, expected] = String(encoded).split("$");

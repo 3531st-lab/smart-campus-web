@@ -469,7 +469,7 @@ async function previewMysqlStudentSync(user) {
     "SELECT * FROM class_assignments WHERE user_id = ? AND active = 1",
     [user.id]
   );
-  const hasClassGroup = Boolean(groupRows[0]) && (!campusClass.groupId || campusClass.groupId === String(groupRows[0].id));
+  const hasClassGroup = Boolean(groupRows[0]) && campusClass.groupId === String(groupRows[0].id);
   const hasCurrentAssignment = activeRows.some((assignment) => (
     String(assignment.class_id ?? assignment.classId) === campusClass.id
     && (assignment.source ?? AUTO_ASSIGNMENT_SOURCE) === AUTO_ASSIGNMENT_SOURCE
