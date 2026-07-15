@@ -8,6 +8,7 @@ Thumbs.db
 .vercel/
 .env.vercel.*
 .wrangler/
+.worktrees/
 .edge-smoke-profile*/
 output/
 server/ai-runtime.json
