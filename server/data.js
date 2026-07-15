@@ -280,6 +280,10 @@ const orders = [];
 const campusClasses = [];
 const classAssignments = [];
 const chatGroups = [];
+const chatMembers = [];
+const chatJoinRequests = [];
+const chatInvites = [];
+const chatInviteTokens = [];
 const classSyncErrors = [];
 
 module.exports = {
@@ -297,5 +301,9 @@ module.exports = {
   campusClasses,
   classAssignments,
   chatGroups,
+  chatMembers,
+  chatJoinRequests,
+  chatInvites,
+  chatInviteTokens,
   classSyncErrors
 };

@@ -58,13 +58,96 @@ CREATE TABLE IF NOT EXISTS class_assignments (
 CREATE TABLE IF NOT EXISTS chat_groups (
   id VARCHAR(64) PRIMARY KEY,
   type VARCHAR(32) NOT NULL,
+  public_no VARCHAR(32) NULL,
   name VARCHAR(120) NOT NULL,
+  owner_id VARCHAR(64) NULL,
   class_id VARCHAR(64) NULL,
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+  frozen TINYINT(1) NOT NULL DEFAULT 0,
+  description VARCHAR(500) NOT NULL DEFAULT '',
+  join_policy VARCHAR(32) NOT NULL DEFAULT 'review',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_chat_group_class (class_id),
+  UNIQUE KEY uq_chat_group_public_no (public_no),
+  KEY idx_chat_group_owner (owner_id, status),
   KEY idx_chat_group_type_status (type, status)
+);
+
+ALTER TABLE chat_groups
+  ADD COLUMN IF NOT EXISTS public_no VARCHAR(32) NULL,
+  ADD COLUMN IF NOT EXISTS owner_id VARCHAR(64) NULL,
+  ADD COLUMN IF NOT EXISTS frozen TINYINT(1) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS description VARCHAR(500) NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS join_policy VARCHAR(32) NOT NULL DEFAULT 'review';
+
+ALTER TABLE chat_groups
+  ADD UNIQUE INDEX IF NOT EXISTS uq_chat_group_public_no (public_no),
+  ADD INDEX IF NOT EXISTS idx_chat_group_owner (owner_id, status);
+
+CREATE TABLE IF NOT EXISTS chat_members (
+  id VARCHAR(64) PRIMARY KEY,
+  group_id VARCHAR(64) NOT NULL,
+  user_id VARCHAR(64) NOT NULL,
+  role ENUM('owner','admin','member') NOT NULL DEFAULT 'member',
+  joined_via VARCHAR(32) NOT NULL,
+  muted_until TIMESTAMP NULL,
+  last_read_seq BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_chat_member (group_id, user_id),
+  KEY idx_chat_member_user_active (user_id, active, group_id),
+  KEY idx_chat_member_group_role (group_id, active, role, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_join_requests (
+  id VARCHAR(64) PRIMARY KEY,
+  group_id VARCHAR(64) NOT NULL,
+  applicant_id VARCHAR(64) NOT NULL,
+  source ENUM('group_number','qr') NOT NULL,
+  status ENUM('pending','approved','rejected','cancelled') NOT NULL DEFAULT 'pending',
+  pending_key VARCHAR(160) NULL,
+  reviewer_id VARCHAR(64) NULL,
+  reviewed_at TIMESTAMP NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_chat_join_pending (pending_key),
+  KEY idx_chat_join_group_status (group_id, status, created_at),
+  KEY idx_chat_join_applicant (applicant_id, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS chat_invites (
+  id VARCHAR(64) PRIMARY KEY,
+  group_id VARCHAR(64) NOT NULL,
+  inviter_id VARCHAR(64) NOT NULL,
+  invitee_id VARCHAR(64) NOT NULL,
+  status ENUM('pending','accepted','rejected','expired','cancelled') NOT NULL DEFAULT 'pending',
+  pending_key VARCHAR(160) NULL,
+  expires_at TIMESTAMP NULL,
+  accepted_at TIMESTAMP NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_chat_invite_pending (pending_key),
+  KEY idx_chat_invite_group_status (group_id, status, created_at),
+  KEY idx_chat_invite_invitee_status (invitee_id, status, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS chat_invite_tokens (
+  id VARCHAR(64) PRIMARY KEY,
+  group_id VARCHAR(64) NOT NULL,
+  creator_id VARCHAR(64) NOT NULL,
+  token_digest CHAR(64) NOT NULL,
+  expires_at TIMESTAMP NULL,
+  max_uses INT UNSIGNED NOT NULL DEFAULT 1,
+  use_count INT UNSIGNED NOT NULL DEFAULT 0,
+  revoked TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_chat_invite_token_digest (token_digest),
+  KEY idx_chat_token_group_active (group_id, revoked, expires_at),
+  KEY idx_chat_token_creator (creator_id, created_at),
+  CONSTRAINT chk_chat_token_usage CHECK (use_count <= max_uses)
 );
 
 CREATE TABLE IF NOT EXISTS class_sync_errors (

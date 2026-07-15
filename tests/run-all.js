@@ -2,6 +2,7 @@ const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 
 execFileSync(process.execPath, ["--test", path.join(__dirname, "class-admin-api.test.js")], { stdio: "inherit" });
+execFileSync(process.execPath, ["--test", path.join(__dirname, "chat-store.test.js")], { stdio: "inherit" });
 
 require("./class-domain.test.js");
 require("./class-store.test.js");
