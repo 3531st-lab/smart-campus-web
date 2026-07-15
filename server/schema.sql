@@ -37,7 +37,6 @@ CREATE TABLE IF NOT EXISTS campus_classes (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_class_key (class_key),
-  UNIQUE KEY uq_class_identity (school, college, class_name),
   KEY idx_class_status (status)
 );
 

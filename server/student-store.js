@@ -57,6 +57,7 @@ async function initialize() {
       UNIQUE KEY uq_school_student_no (school, student_no),
       KEY idx_identity (school, major, student_no, phone),
       KEY idx_class (school, college, major, class_name),
+      KEY idx_class_identity_order (school, college, class_name, role, name, student_no),
       KEY idx_role_updated (role, updated_at),
       KEY idx_status (status)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
@@ -78,6 +79,11 @@ async function initialize() {
     if (error.code !== "ER_DUP_KEYNAME") throw error;
   }
   try {
+    await db.query("ALTER TABLE students ADD INDEX idx_class_identity_order (school, college, class_name, role, name, student_no)");
+  } catch (error) {
+    if (error.code !== "ER_DUP_KEYNAME") throw error;
+  }
+  try {
     await db.query("ALTER TABLE students ADD COLUMN password_hash VARCHAR(255) NULL");
   } catch (error) {
     if (error.code !== "ER_DUP_FIELDNAME") throw error;
@@ -87,6 +93,41 @@ async function initialize() {
   } catch (error) {
     if (error.code !== "ER_DUP_FIELDNAME") throw error;
   }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS campus_classes (
+      id VARCHAR(64) PRIMARY KEY,
+      school VARCHAR(120) NOT NULL,
+      college VARCHAR(120) NOT NULL,
+      class_name VARCHAR(120) NOT NULL,
+      class_key VARCHAR(400) NOT NULL,
+      group_id VARCHAR(64) NULL,
+      status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_class_key (class_key),
+      KEY idx_class_status (status)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  try {
+    await db.query("ALTER TABLE campus_classes DROP INDEX uq_class_identity");
+  } catch (error) {
+    if (error.code !== "ER_CANT_DROP_FIELD_OR_KEY") throw error;
+  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS class_assignments (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      class_id VARCHAR(64) NOT NULL,
+      user_id VARCHAR(64) NOT NULL,
+      duty VARCHAR(32) NOT NULL DEFAULT 'member',
+      source VARCHAR(32) NOT NULL,
+      active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_class_assignment (class_id, user_id),
+      KEY idx_assignment_user_active (user_id, active),
+      KEY idx_assignment_class_active (class_id, active)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
   await db.query(`
     CREATE TABLE IF NOT EXISTS admin_audit_logs (
       id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
