@@ -277,6 +277,10 @@ const labRules = [
 const supportTickets = [];
 const feedbackItems = [];
 const orders = [];
+const campusClasses = [];
+const classAssignments = [];
+const chatGroups = [];
+const classSyncErrors = [];
 
 module.exports = {
   users,
@@ -289,5 +293,9 @@ module.exports = {
   labRules,
   supportTickets,
   feedbackItems,
-  orders
+  orders,
+  campusClasses,
+  classAssignments,
+  chatGroups,
+  classSyncErrors
 };

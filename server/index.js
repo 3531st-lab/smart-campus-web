@@ -853,7 +853,7 @@ function maskPhone(phone) {
 }
 
 function adminStudent(student) {
-  const { phone, ...safeStudent } = student;
+  const { phone, syncError, ...safeStudent } = student;
   return { ...safeStudent, phoneMasked: maskPhone(phone) };
 }
 
@@ -1303,7 +1303,7 @@ async function handleApi(req, res) {
       const student = await studentStore.upsertStudent(body);
       await studentStore.logAdminAction("upsert_student", student.studentNo, { operator: adminUser.studentNo, school: student.school, major: student.major, className: student.className });
       clearIdentitySchoolCache();
-      sendJson(res, 200, { student: adminStudent(student) });
+      sendJson(res, 200, { student: adminStudent(student), syncError: student.syncError || null });
       return;
     }
 
@@ -1323,14 +1323,14 @@ async function handleApi(req, res) {
         return;
       }
       const status = body.status === "disabled" ? "disabled" : "active";
-      const updated = await studentStore.setStudentStatus(String(body.studentNo || ""), status);
-      if (!updated) {
+      const result = await studentStore.setStudentStatus(String(body.studentNo || ""), status);
+      if (!result.updated) {
         sendError(res, 404, "未找到该学号");
         return;
       }
       await studentStore.logAdminAction("set_student_status", String(body.studentNo || ""), { operator: adminUser.studentNo, status });
       clearIdentitySchoolCache();
-      sendJson(res, 200, { updated: true, status });
+      sendJson(res, 200, { updated: true, status, syncError: result.syncError || null });
       return;
     }
 
@@ -1354,10 +1354,10 @@ async function handleApi(req, res) {
         sendError(res, 400, "不能降级当前登录的总管理员账号");
         return;
       }
-      await studentStore.setStudentRole(target.studentNo, role);
+      const result = await studentStore.setStudentRole(target.studentNo, role);
       await studentStore.logAdminAction("set_student_role", target.studentNo, { operator: adminUser.studentNo, role });
       clearIdentitySchoolCache();
-      sendJson(res, 200, { updated: true, role });
+      sendJson(res, 200, { updated: result.updated, role, syncError: result.syncError || null });
       return;
     }
 

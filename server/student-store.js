@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const data = require("./data");
 const permanentAdmins = require("./permanent-admins");
 const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
+const classStore = require("./class-store");
 
 let initialized = false;
 
@@ -412,6 +413,40 @@ function validateStudent(input) {
   return student;
 }
 
+async function recordClassSyncError(student, error) {
+  const syncError = {
+    code: "class_sync_failed",
+    retryable: true,
+    userId: student.id,
+    message: "班级同步失败，可稍后重试",
+    detail: error.message,
+    recordedAt: new Date().toISOString()
+  };
+  if (!mysqlConfigured) {
+    data.classSyncErrors.push(syncError);
+    if (data.classSyncErrors.length > 500) data.classSyncErrors.splice(0, data.classSyncErrors.length - 500);
+    return syncError;
+  }
+  try {
+    await getPool().execute(
+      "INSERT INTO admin_audit_logs (action, target_student_no, detail) VALUES (?, ?, ?)",
+      ["class_sync_failed", student.studentNo, JSON.stringify(syncError)]
+    );
+  } catch (auditError) {
+    console.warn("Class sync error could not be recorded:", auditError.message);
+  }
+  return syncError;
+}
+
+async function synchronizeClassAssignment(student) {
+  try {
+    await classStore.ensureStudentClassAssignment(student);
+    return null;
+  } catch (error) {
+    return recordClassSyncError(student, error);
+  }
+}
+
 async function upsertStudent(input) {
   let student = validateStudent(input);
   const existing = student.studentNo ? await findByStudentNo(student.studentNo) : null;
@@ -432,6 +467,7 @@ async function upsertStudent(input) {
     const index = data.users.findIndex((user) => user.school === student.school && user.studentNo === student.studentNo);
     if (index >= 0) data.users[index] = { ...data.users[index], ...student };
     else data.users.push(student);
+    student.syncError = await synchronizeClassAssignment(student);
     return student;
   }
   await initialize();
@@ -442,6 +478,7 @@ async function upsertStudent(input) {
       name = VALUES(name), college = VALUES(college), major = VALUES(major), class_name = VALUES(class_name), phone = VALUES(phone),
       status = VALUES(status), role = VALUES(role), verified = VALUES(verified), avatar_color = VALUES(avatar_color)
   `, [student.id, student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone, student.status, student.role, student.verified ? 1 : 0, student.avatarColor]);
+  student.syncError = await synchronizeClassAssignment(student);
   return student;
 }
 
@@ -462,8 +499,12 @@ async function bulkUpsertStudents(items = []) {
   }
   if (!prepared.length) return { success: 0, failed: errors.length, errors };
   if (!mysqlConfigured) {
-    for (const item of prepared) await upsertStudent(item.student);
-    return { success: prepared.length, failed: errors.length, errors };
+    const syncErrors = [];
+    for (const item of prepared) {
+      const student = await upsertStudent(item.student);
+      if (student.syncError) syncErrors.push(student.syncError);
+    }
+    return { success: prepared.length, failed: errors.length, errors, syncErrors };
   }
 
   await initialize();
@@ -516,7 +557,12 @@ async function bulkUpsertStudents(items = []) {
   } finally {
     connection.release();
   }
-  return { success: students.length, failed: errors.length, errors };
+  const syncErrors = [];
+  for (const student of students) {
+    const syncError = await synchronizeClassAssignment(student);
+    if (syncError) syncErrors.push(syncError);
+  }
+  return { success: students.length, failed: errors.length, errors, syncErrors };
 }
 
 async function setStudentStatus(studentNo, status) {
@@ -526,13 +572,14 @@ async function setStudentStatus(studentNo, status) {
   }
   if (!mysqlConfigured) {
     const student = data.users.find((user) => user.studentNo === studentNo);
-    if (!student) return false;
+    if (!student) return { updated: false, syncError: null };
     student.status = status;
-    return true;
+    return { updated: true, syncError: await synchronizeClassAssignment(student) };
   }
   await initialize();
   const [result] = await getPool().execute("UPDATE students SET status = ? WHERE student_no = ?", [status, studentNo]);
-  return result.affectedRows > 0;
+  if (!result.affectedRows) return { updated: false, syncError: null };
+  return { updated: true, syncError: await synchronizeClassAssignment({ ...target, status }) };
 }
 
 async function setStudentRole(studentNo, role) {
@@ -543,13 +590,14 @@ async function setStudentRole(studentNo, role) {
   if (!["student", "teacher", "admin", "super_admin"].includes(role)) throw new Error("账号角色无效");
   if (!mysqlConfigured) {
     const student = data.users.find((user) => user.studentNo === studentNo);
-    if (!student) return false;
+    if (!student) return { updated: false, syncError: null };
     student.role = role;
-    return true;
+    return { updated: true, syncError: await synchronizeClassAssignment(student) };
   }
   await initialize();
   const [result] = await getPool().execute("UPDATE students SET role = ? WHERE student_no = ?", [role, studentNo]);
-  return result.affectedRows > 0;
+  if (!result.affectedRows) return { updated: false, syncError: null };
+  return { updated: true, syncError: await synchronizeClassAssignment({ ...target, role }) };
 }
 
 async function findByStudentNo(studentNo) {
