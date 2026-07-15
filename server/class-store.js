@@ -193,15 +193,20 @@ function createMemoryClassStore(seed = {}) {
 
   function assignmentForAdmin({ userId, classId, duty, operatorId, source, role }) {
     validDuty(duty);
+    let user;
     if (role === "teacher") {
-      requiredUser(userId, "teacher");
+      user = requiredUser(userId, "teacher");
       if (!TEACHER_DUTIES.has(duty)) throw new Error("教师班级职务无效");
     } else {
-      requiredUser(userId, "student");
+      user = requiredUser(userId, "student");
     }
     const campusClass = store.data.classes.find((item) => item.id === classId);
     if (!campusClass) throw new Error("班级不存在");
+    if (role === "student" && classKey(classValues(user)) !== (campusClass.classKey ?? campusClass.class_key)) {
+      throw new Error("所选班级与学生身份班级不一致");
+    }
     const { group } = ensureGroup(campusClass);
+    if (role === "student") deactivateAssignments(userId, (item) => item.classId !== classId);
     let assignment = store.data.assignments.find((item) => item.userId === userId && item.classId === classId);
     if (!assignment) {
       assignment = {
@@ -232,6 +237,11 @@ function createMemoryClassStore(seed = {}) {
     return assignmentForAdmin({ userId, classId, duty, operatorId, source: AUTO_ASSIGNMENT_SOURCE, role: "student" });
   }
 
+  async function removeTeacherAssignment({ userId, classId }) {
+    requiredUser(userId, "teacher");
+    return { removed: deactivateAssignments(userId, (item) => item.classId === classId && item.source === TEACHER_ASSIGNMENT_SOURCE) };
+  }
+
   async function syncAllClasses({ dryRun = false } = {}) {
     if (dryRun) {
       const simulation = createMemoryClassStore({
@@ -253,13 +263,14 @@ function createMemoryClassStore(seed = {}) {
         if (result.changed) summary.changed += 1;
         if (result.incomplete) summary.incomplete += 1;
       } catch (error) {
-        summary.errors.push({ userId: user.id, message: error.message, retryable: true });
+        console.error("class synchronization failed", { userId: user.id, error: error.message });
+        summary.errors.push({ userId: user.id, message: "班级同步失败", retryable: true });
       }
     }
     return summary;
   }
 
-  return { ...store, ensureStudentClassAssignment, assignTeacher, setStudentDuty, syncAllClasses };
+  return { ...store, ensureStudentClassAssignment, assignTeacher, setStudentDuty, removeTeacherAssignment, syncAllClasses };
 }
 
 async function activeMysqlAssignments(connection, userId) {
@@ -368,7 +379,7 @@ async function updateMysqlAssignment({ userId, classId, duty, operatorId, source
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
-    const [studentRows] = await connection.execute("SELECT id, role, status FROM students WHERE id = ? FOR UPDATE", [userId]);
+    const [studentRows] = await connection.execute("SELECT id, role, status, school, college, class_name FROM students WHERE id = ? FOR UPDATE", [userId]);
     if (!studentRows[0]) throw new Error("账号不存在");
     if (studentRows[0].status !== "active" || studentRows[0].role !== role) {
       throw new Error(role === "teacher" ? "账号不是有效教师" : "账号不是有效学生");
@@ -377,6 +388,9 @@ async function updateMysqlAssignment({ userId, classId, duty, operatorId, source
     const [classRows] = await connection.execute("SELECT * FROM campus_classes WHERE id = ? FOR UPDATE", [classId]);
     if (!classRows[0]) throw new Error("班级不存在");
     const campusClass = classRow(classRows[0]);
+    if (role === "student" && classKey(classValues({ ...studentRows[0], className: studentRows[0].class_name })) !== campusClass.classKey) {
+      throw new Error("所选班级与学生身份班级不一致");
+    }
     const [groupUpsert] = await connection.execute(`
       INSERT INTO chat_groups (id, type, name, class_id, status)
       VALUES (?, 'class', ?, ?, 'active')
@@ -392,6 +406,12 @@ async function updateMysqlAssignment({ userId, classId, duty, operatorId, source
       campusClass.groupId = chatGroup.id;
     }
     try {
+      if (role === "student") {
+        await connection.execute(
+          "UPDATE class_assignments SET active = 0 WHERE user_id = ? AND class_id <> ? AND active = 1",
+          [userId, classId]
+        );
+      }
       await connection.execute(`
         INSERT INTO class_assignments (class_id, user_id, duty, source, active, assigned_by)
         VALUES (?, ?, ?, ?, 1, ?)
@@ -441,6 +461,27 @@ async function setStudentDuty(input) {
   return mysqlConfigured
     ? updateMysqlAssignment({ ...input, source: AUTO_ASSIGNMENT_SOURCE, role: "student" })
     : memoryStore.setStudentDuty(input);
+}
+
+async function removeTeacherAssignment(input) {
+  if (!mysqlConfigured) return memoryStore.removeTeacherAssignment(input);
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [users] = await connection.execute("SELECT id, role, status FROM students WHERE id = ? FOR UPDATE", [input.userId]);
+    if (!users[0] || users[0].role !== "teacher" || users[0].status !== "active") throw new Error("账号不是有效教师");
+    const [result] = await connection.execute(
+      "UPDATE class_assignments SET active = 0 WHERE user_id = ? AND class_id = ? AND source = ? AND active = 1",
+      [input.userId, input.classId, TEACHER_ASSIGNMENT_SOURCE]
+    );
+    await connection.commit();
+    return { removed: result.affectedRows > 0 };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 async function previewMysqlStudentSync(user) {
@@ -506,7 +547,8 @@ async function syncAllClasses(options = {}) {
         if (result.incomplete) summary.incomplete += 1;
       }
     } catch (error) {
-      summary.errors.push({ userId: user.id, message: error.message, retryable: true });
+      console.error("class synchronization failed", { userId: user.id, error: error.message });
+      summary.errors.push({ userId: user.id, message: "班级同步失败", retryable: true });
     }
   }
   return summary;
@@ -517,5 +559,6 @@ module.exports = {
   ensureStudentClassAssignment,
   assignTeacher,
   setStudentDuty,
+  removeTeacherAssignment,
   syncAllClasses
 };

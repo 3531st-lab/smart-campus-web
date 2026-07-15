@@ -893,7 +893,10 @@ function normalizedAdminIdentity(row) {
   };
 }
 
-function classIdentityFields(student, assignment, campusClass) {
+const UNASSIGNED_CLASS_KEY = "__unassigned__";
+const CLASS_ADMIN_ROLE_ORDER = new Map([["student", 0], ["teacher", 1], ["admin", 2], ["super_admin", 3]]);
+
+function classIdentityFields(student, assignment, campusClass, classAssignments = []) {
   const className = String(campusClass?.className ?? campusClass?.class_name ?? student.className ?? "");
   const complete = [student.school, student.college, className].every(Boolean);
   return {
@@ -901,8 +904,13 @@ function classIdentityFields(student, assignment, campusClass) {
     className,
     classId: assignment ? String(assignment.class_id ?? assignment.classId) : null,
     classKey: campusClass?.class_key ?? campusClass?.classKey ?? (complete ? classKey({ ...student, className }) : null),
-    classDuty: assignment?.duty || (student.role === "student" && complete ? "member" : null)
+    classDuty: assignment?.duty || (student.role === "student" && complete ? "member" : null),
+    classAssignments
   };
+}
+
+function classGroupingKey(student) {
+  return student.classKey || UNASSIGNED_CLASS_KEY;
 }
 
 function classAdminFilters(url, { includeRole = true } = {}) {
@@ -922,7 +930,19 @@ function memoryClassAssignment(userId) {
     .sort((left, right) => classDutyRank(left.duty) - classDutyRank(right.duty) || String(left.classId).localeCompare(String(right.classId)));
   const assignment = assignments[0] || null;
   const campusClass = assignment ? data.campusClasses.find((item) => item.id === assignment.classId) : null;
-  return { assignment, campusClass };
+  return {
+    assignment,
+    campusClass,
+    classAssignments: assignments.map((item) => assignmentRowForAdmin(item, data.campusClasses.find((campusClassItem) => campusClassItem.id === item.classId)))
+  };
+}
+
+function assignmentRowForAdmin(assignment, campusClass) {
+  return {
+    id: String(assignment.id), classId: String(assignment.class_id ?? assignment.classId),
+    duty: assignment.duty, className: campusClass?.class_name ?? campusClass?.className ?? "",
+    school: campusClass?.school ?? "", college: campusClass?.college ?? ""
+  };
 }
 
 function compareClassAdminIdentity(left, right) {
@@ -930,7 +950,9 @@ function compareClassAdminIdentity(left, right) {
     const comparison = normalizeClassPart(left[field]).localeCompare(normalizeClassPart(right[field]), "zh-CN");
     if (comparison) return comparison;
   }
-  return (CLASS_ADMIN_DUTY_ORDER.get(left.classDuty) ?? CLASS_ADMIN_DUTY_ORDER.size)
+  return (CLASS_ADMIN_ROLE_ORDER.get(left.role) ?? CLASS_ADMIN_ROLE_ORDER.size)
+    - (CLASS_ADMIN_ROLE_ORDER.get(right.role) ?? CLASS_ADMIN_ROLE_ORDER.size)
+    || (CLASS_ADMIN_DUTY_ORDER.get(left.classDuty) ?? CLASS_ADMIN_DUTY_ORDER.size)
     - (CLASS_ADMIN_DUTY_ORDER.get(right.classDuty) ?? CLASS_ADMIN_DUTY_ORDER.size)
     || String(left.name || "").localeCompare(String(right.name || ""), "zh-CN")
     || String(left.studentNo || "").localeCompare(String(right.studentNo || ""), "zh-CN");
@@ -942,7 +964,8 @@ function matchesClassAdminFilters(student, filters, visibleRoles) {
   if (filters.status && student.status !== filters.status) return false;
   if (filters.school && student.school !== filters.school) return false;
   if (filters.college && student.college !== filters.college) return false;
-  if (filters.className && student.className !== filters.className) return false;
+  if (filters.className && student.className !== filters.className
+    && !student.classAssignments?.some((item) => item.className === filters.className)) return false;
   if (filters.query && ![student.name, student.school, student.college, student.major, student.className, student.studentNo, student.phone]
     .some((value) => String(value || "").includes(filters.query))) return false;
   return true;
@@ -954,8 +977,8 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
       .filter((user) => user.role !== "guest")
       .map(normalizedAdminIdentity)
       .map((student) => {
-        const { assignment, campusClass } = memoryClassAssignment(student.id);
-        return classIdentityFields(student, assignment, campusClass);
+        const { assignment, campusClass, classAssignments } = memoryClassAssignment(student.id);
+        return classIdentityFields(student, assignment, campusClass, classAssignments);
       })
       .filter((student) => matchesClassAdminFilters(student, filters, visibleRoles))
       .sort(compareClassAdminIdentity);
@@ -964,7 +987,7 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
     return {
       students: pageRows,
       totalCount: rows.length,
-      continuedClassKey: previous && pageRows[0]?.classKey === previous.classKey ? pageRows[0].classKey : null
+      continuedClassKey: previous && classGroupingKey(pageRows[0]) === classGroupingKey(previous) ? classGroupingKey(pageRows[0]) : null
     };
   }
 
@@ -979,7 +1002,10 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
   if (["active", "disabled"].includes(filters.status)) { conditions.push("s.status = ?"); values.push(filters.status); }
   if (filters.school) { conditions.push("s.school = ?"); values.push(filters.school); }
   if (filters.college) { conditions.push("s.college = ?"); values.push(filters.college); }
-  if (filters.className) { conditions.push("COALESCE(cc.class_name, s.class_name) = ?"); values.push(filters.className); }
+  if (filters.className) {
+    conditions.push("(COALESCE(cc.class_name, s.class_name) = ? OR EXISTS (SELECT 1 FROM class_assignments caf INNER JOIN campus_classes ccf ON ccf.id = caf.class_id WHERE caf.user_id = s.id AND caf.active = 1 AND ccf.class_name = ?))");
+    values.push(filters.className, filters.className);
+  }
   if (filters.query) {
     const like = `%${filters.query}%`;
     conditions.push("(s.name LIKE ? OR s.school LIKE ? OR s.college LIKE ? OR s.major LIKE ? OR COALESCE(cc.class_name, s.class_name) LIKE ? OR s.student_no LIKE ? OR s.phone LIKE ?)");
@@ -1002,10 +1028,22 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
     SELECT s.*, ca.class_id, ca.duty, cc.class_key AS assignment_class_key, cc.class_name AS assignment_class_name
     FROM students s ${join} ${where}
     ORDER BY s.school, s.college, COALESCE(cc.class_name, s.class_name),
+      CASE s.role WHEN 'student' THEN 0 WHEN 'teacher' THEN 1 WHEN 'admin' THEN 2 WHEN 'super_admin' THEN 3 ELSE 4 END,
       CASE ca.duty WHEN 'monitor' THEN 0 WHEN 'league_secretary' THEN 1 WHEN 'class_admin' THEN 2 WHEN 'head_teacher' THEN 3 WHEN 'subject_teacher' THEN 4 ELSE 5 END,
       s.name, s.student_no
     LIMIT ${fetchLimit} OFFSET ${start}
   `, values);
+  let assignmentRows = [];
+  const pageUserIds = [...new Set(rows.map((row) => String(row.id)))];
+  if (pageUserIds.length) {
+    const placeholders = pageUserIds.map(() => "?").join(",");
+    [assignmentRows] = await getPool().execute(`
+      SELECT ca.id, ca.user_id, ca.class_id, ca.duty, cc.school, cc.college, cc.class_name
+      FROM class_assignments ca INNER JOIN campus_classes cc ON cc.id = ca.class_id
+      WHERE ca.active = 1 AND ca.user_id IN (${placeholders})
+      ORDER BY cc.school, cc.college, cc.class_name, ca.duty, ca.id
+    `, pageUserIds);
+  }
   const identities = rows.map((row) => classIdentityFields(normalizedAdminIdentity(row), row.class_id ? {
     class_id: row.class_id,
     duty: row.duty
@@ -1013,12 +1051,12 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
     id: row.class_id,
     class_name: row.assignment_class_name,
     class_key: row.assignment_class_key
-  } : null));
+  } : null, assignmentRows.filter((item) => String(item.user_id) === String(row.id)).map((item) => assignmentRowForAdmin(item, item))));
   const previous = offset > 0 ? identities.shift() : null;
   return {
     students: identities,
     totalCount: Number(countRows[0]?.total || 0),
-    continuedClassKey: previous && identities[0]?.classKey === previous.classKey ? identities[0].classKey : null
+    continuedClassKey: previous && classGroupingKey(identities[0]) === classGroupingKey(previous) ? classGroupingKey(identities[0]) : null
   };
 }
 
@@ -1376,7 +1414,7 @@ async function handleApi(req, res) {
     return;
   }
 
-  if (route.startsWith("GET /api/admin/") || route.startsWith("POST /api/admin/") || route.startsWith("PUT /api/admin/")) {
+  if (route.startsWith("GET /api/admin/") || route.startsWith("POST /api/admin/") || route.startsWith("PUT /api/admin/") || route.startsWith("DELETE /api/admin/")) {
     const adminUser = await requireUser(req, res);
     if (!adminUser) return;
     if (!["admin", "super_admin"].includes(adminUser.role)) {
@@ -1517,9 +1555,28 @@ async function handleApi(req, res) {
         });
         sendJson(res, 200, { assignment: { ...assignment, user: adminStudent(target) } });
       } catch (error) {
+        if (/身份班级|班级不存在|班级职务|有效学生|有效教师/.test(String(error.message || ""))) {
+          sendError(res, 400, error.message);
+          return;
+        }
         const publicError = publicRequestError(error, IS_PRODUCTION);
         sendError(res, publicError.status >= 500 ? publicError.status : 400, publicError.message);
       }
+      return;
+    }
+
+    if (route === "DELETE /api/admin/classes/assignments") {
+      const body = await parseBody(req);
+      const userId = String(body.userId || "").trim();
+      const classId = String(body.classId || "").trim();
+      const target = await studentStore.findById(userId);
+      if (!target || target.role !== "teacher" || target.status !== "active" || !classId) {
+        sendError(res, 404, "未找到可移除的教师班级分配");
+        return;
+      }
+      const result = await classStore.removeTeacherAssignment({ userId, classId, operatorId: adminUser.id });
+      await studentStore.logAdminAction("remove_class_assignment", target.studentNo, { operator: adminUser.studentNo, classId });
+      sendJson(res, 200, result);
       return;
     }
 
@@ -1541,7 +1598,6 @@ async function handleApi(req, res) {
     if (route === "GET /api/admin/students") {
       const requestedRole = url.searchParams.get("role") || "";
       const filters = classAdminFilters(url);
-      const { query, status } = filters;
       const paginatedRequest = url.searchParams.has("page") || url.searchParams.has("pageSize");
       const pageSize = Math.min(Math.max(10, Number(url.searchParams.get("pageSize")) || (paginatedRequest ? 50 : 200)), 200);
       const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
@@ -1552,19 +1608,18 @@ async function handleApi(req, res) {
       }
       const visibleRoles = isSuperAdmin ? [] : ["student", "teacher"];
       filters.role = roleFilter;
-      const [studentPage, allRoleCounts] = await Promise.all([
+      const rolesToCount = isSuperAdmin ? ["student", "teacher", "admin", "super_admin"] : ["student", "teacher"];
+      const [studentPage, roleCountPages] = await Promise.all([
         listClassAdminStudents(filters, {
           limit: pageSize,
           offset: (page - 1) * pageSize,
           visibleRoles
         }),
-        studentStore.countStudentsByRole({ query, status })
+        Promise.all(rolesToCount.map((role) => listClassAdminStudents({ ...filters, role }, { limit: 1, offset: 0, visibleRoles })))
       ]);
       const { students, totalCount, continuedClassKey } = studentPage;
       const visibleStudents = isSuperAdmin ? students : students.filter((student) => ["student", "teacher"].includes(student.role));
-      const roleCounts = isSuperAdmin
-        ? allRoleCounts
-        : { student: allRoleCounts.student, teacher: allRoleCounts.teacher };
+      const roleCounts = Object.fromEntries(rolesToCount.map((role, index) => [role, roleCountPages[index].totalCount]));
       const accountCount = Object.values(roleCounts).reduce((sum, count) => sum + Number(count || 0), 0);
       sendJson(res, 200, {
         students: visibleStudents.map(adminStudent),
@@ -1603,7 +1658,9 @@ async function handleApi(req, res) {
 
     if (route === "PUT /api/admin/students/status") {
       const body = await parseBody(req);
-      const target = await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
+      const target = body.userId
+        ? await studentStore.findById(String(body.userId))
+        : await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
       if (!target) {
         sendError(res, 404, "未找到该账号");
         return;
@@ -1634,7 +1691,9 @@ async function handleApi(req, res) {
         return;
       }
       const body = await parseBody(req);
-      const target = await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
+      const target = body.userId
+        ? await studentStore.findById(String(body.userId))
+        : await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
       if (!target) {
         sendError(res, 404, "未找到该账号");
         return;
@@ -1657,7 +1716,9 @@ async function handleApi(req, res) {
 
     if (route === "POST /api/admin/students/password-reset") {
       const body = await parseBody(req);
-      const target = await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
+      const target = body.userId
+        ? await studentStore.findById(String(body.userId))
+        : await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
       if (!target) {
         sendError(res, 404, "未找到该账号");
         return;
@@ -1718,6 +1779,7 @@ async function handleApi(req, res) {
       }
       const result = await studentStore.bulkUpsertStudents(items);
       const assignmentErrors = [];
+      const rowStatuses = classMetadata.map((metadata) => ({ rowNumber: metadata.rowNumber, identityImported: true, classAssignmentFailed: false }));
       for (const metadata of classMetadata) {
         if (!metadata.classAssignment.duty || !metadata.classAssignment.relatedClass) continue;
         try {
@@ -1748,12 +1810,18 @@ async function handleApi(req, res) {
             });
           }
         } catch (error) {
-          assignmentErrors.push(`第 ${metadata.rowNumber} 行：${error.message}`);
+          console.error("class assignment import failed", { rowNumber: metadata.rowNumber, error: error.message });
+          assignmentErrors.push(`第 ${metadata.rowNumber} 行：身份已导入，班级分配失败`);
+          const status = rowStatuses.find((item) => item.rowNumber === metadata.rowNumber);
+          if (status) status.classAssignmentFailed = true;
         }
       }
-      result.errors = [...importErrors, ...(result.errors || []), ...assignmentErrors];
+      result.errors = [...importErrors, ...(result.errors || [])];
       result.failed = result.errors.length;
       result.success = Math.max(0, rows.length - result.failed);
+      result.classAssignmentFailed = assignmentErrors.length;
+      result.assignmentErrors = assignmentErrors;
+      result.rows = rowStatuses;
       await studentStore.logAdminAction("import_students_batch", "", {
         operator: adminUser.studentNo,
         filename: String(body.filename || ""),

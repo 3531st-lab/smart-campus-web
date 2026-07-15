@@ -597,7 +597,15 @@ async function bulkUpsertStudents(items = []) {
   if (!mysqlConfigured) {
     const syncErrors = [];
     for (const item of prepared) {
-      const student = await upsertStudent(item.student);
+      const existing = await findByStudentNo({ school: item.student.school, studentNo: item.student.studentNo });
+      let input = { ...item.student };
+      if (existing) {
+        input.id = existing.id;
+        if (!item.roleExplicit) input.role = existing.role;
+        if (!item.statusExplicit) input.status = existing.status;
+        if (permanentAdmins.isPermanentSuperAdmin(existing)) input = { ...input, role: "super_admin", status: "active", verified: true };
+      }
+      const student = await upsertStudent(input);
       if (student.syncError) syncErrors.push(student.syncError);
     }
     return { success: prepared.length, failed: errors.length, errors, syncErrors };

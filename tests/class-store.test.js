@@ -206,6 +206,41 @@ test("setStudentDuty preserves student identity source and disabled users lose a
   assert.equal(store.data.assignments.some((item) => item.userId === fixture.student.id && item.active), false);
 });
 
+test("setStudentDuty only accepts the student's normalized identity class", async () => {
+  const fixture = fixtures();
+  const store = createMemoryClassStore({ users: [fixture.student] });
+  const current = await store.ensureStudentClassAssignment(fixture.student);
+  const other = await store.ensureStudentClassAssignment({ ...fixture.student, id: "other-student", className: "24数字经济2班" });
+  await assert.rejects(
+    store.setStudentDuty({ userId: fixture.student.id, classId: other.class.id, duty: "monitor", operatorId: "admin" }),
+    /身份班级/
+  );
+  assert.deepEqual(store.data.assignments.filter((item) => item.userId === fixture.student.id && item.active).map((item) => item.classId), [current.class.id]);
+});
+
+test("memory bulk import preserves an existing protected role when role is omitted", async () => {
+  const existing = { id: "preserved-admin", name: "已有管理员", school: "角色大学", college: "学院", major: "专业", className: "", studentNo: "ROLE-KEEP-1", phone: "13812345678", status: "active", role: "admin", verified: true };
+  data.users.push(existing);
+  try {
+    const result = await studentStore.bulkUpsertStudents([{ rowNumber: 2, input: { ...existing, name: "更新姓名", role: "student", roleExplicit: false } }]);
+    assert.equal(result.success, 1);
+    assert.equal(data.users.find((item) => item.id === existing.id).role, "admin");
+  } finally {
+    const index = data.users.findIndex((item) => item.id === existing.id);
+    if (index >= 0) data.users.splice(index, 1);
+  }
+});
+
+test("sync summaries do not expose internal database errors", async () => {
+  const fixture = fixtures();
+  const store = createMemoryClassStore({ users: [fixture.student] });
+  store.ensureStudentClassAssignment = async () => { throw new Error("SELECT secret FROM students"); };
+  // Exercise the public implementation contract through source inspection because the closure is intentionally private.
+  const source = fs.readFileSync(path.join(__dirname, "..", "server", "class-store.js"), "utf8");
+  assert.match(source, /message:\s*"班级同步失败"/);
+  assert.doesNotMatch(source, /summary\.errors\.push\(\{ userId: user\.id, message: error\.message/);
+});
+
 test("platform admins lose assignments while active teachers retain explicit teacher assignments", async () => {
   const fixture = fixtures();
   const platformAdmin = { id: "platform-admin", role: "admin", status: "active" };
@@ -364,7 +399,7 @@ test("runtime migration and MySQL admin assignment use the class lock order", ()
 
   assert.match(studentSource, /CREATE TABLE IF NOT EXISTS chat_groups[\s\S]*UNIQUE KEY uq_chat_group_class \(class_id\)/);
   assert.match(classSource, /if \(!studentRows\[0\]\) throw new Error/);
-  assert.ok(adminSource.indexOf("SELECT id, role, status FROM students WHERE id = ? FOR UPDATE") < adminSource.indexOf("SELECT * FROM campus_classes WHERE id = ? FOR UPDATE"));
+  assert.ok(adminSource.indexOf("FROM students WHERE id = ? FOR UPDATE") < adminSource.indexOf("SELECT * FROM campus_classes WHERE id = ? FOR UPDATE"));
   assert.match(adminSource, /INSERT INTO chat_groups/);
   assert.match(adminSource, /assigned_by/);
 });
@@ -532,6 +567,33 @@ test("MySQL syncAllClasses dry-run reports would-change counts without opening t
     { checked: 4, changed: 2, incomplete: 1, dryRun: true }
   );
   assert.equal(queries.some((query) => /beginTransaction|UPDATE |INSERT INTO/i.test(query.sql)), false);
+});
+
+test("MySQL student duty rejects a cross-class assignment before writes", async () => {
+  const calls = [];
+  const connection = {
+    async beginTransaction() { calls.push("begin"); },
+    async commit() { calls.push("commit"); },
+    async rollback() { calls.push("rollback"); },
+    release() { calls.push("release"); },
+    async execute(sql) {
+      calls.push(sql);
+      if (/FROM students WHERE id = \? FOR UPDATE/.test(sql)) {
+        return [[{ id: "mysql-student", role: "student", status: "active", school: "学校A", college: "学院A", class_name: "一班" }]];
+      }
+      if (/FROM campus_classes WHERE id = \? FOR UPDATE/.test(sql)) {
+        return [[{ id: "class-b", school: "学校B", college: "学院B", class_name: "二班", class_key: "学校b\u001f学院b\u001f二班", status: "active" }]];
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    }
+  };
+  const isolated = loadClassStoreWithFakeDb({ async getConnection() { return connection; } });
+  await assert.rejects(
+    isolated.setStudentDuty({ userId: "mysql-student", classId: "class-b", duty: "monitor", operatorId: "admin" }),
+    /身份班级/
+  );
+  assert.equal(calls.includes("rollback"), true);
+  assert.equal(calls.some((sql) => typeof sql === "string" && /INSERT INTO class_assignments|UPDATE class_assignments/.test(sql)), false);
 });
 
 test("password credentials are scoped by school and reject ambiguous no-school requests", async () => {

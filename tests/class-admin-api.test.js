@@ -21,7 +21,9 @@ const fixtureIds = new Set([
   "class-api-monitor",
   "class-api-member",
   "class-api-other",
-  "class-api-teacher"
+  "class-api-teacher",
+  "class-api-duplicate-a",
+  "class-api-duplicate-b"
 ]);
 
 const fixtures = [
@@ -89,6 +91,16 @@ const fixtures = [
     status: "active",
     role: "teacher",
     verified: true
+  },
+  {
+    id: "class-api-duplicate-a", name: "同号甲", school: "班级测试大学", college: "经济学院",
+    major: "数字经济", className: "24数字经济", studentNo: "DUPLICATE-001", phone: "13600001111",
+    status: "active", role: "student", verified: true
+  },
+  {
+    id: "class-api-duplicate-b", name: "同号乙", school: "另一所大学", college: "商学院",
+    major: "会计学", className: "24会计", studentNo: "DUPLICATE-001", phone: "13600002222",
+    status: "active", role: "student", verified: true
   }
 ];
 
@@ -128,6 +140,8 @@ test.before(async () => {
   await classStore.ensureStudentClassAssignment(fixtures[1]);
   await classStore.ensureStudentClassAssignment(fixtures[2]);
   await classStore.ensureStudentClassAssignment(fixtures[3]);
+  await classStore.ensureStudentClassAssignment(fixtures[5]);
+  await classStore.ensureStudentClassAssignment(fixtures[6]);
   digitalClass = data.campusClasses.find((item) => item.className === "24数字经济");
 
   server = http.createServer(requestHandler);
@@ -166,7 +180,7 @@ test("normal and super administrators can list privacy-safe class summaries", as
     assert.equal(response.status, 200);
     const item = payload.classes.find((campusClass) => campusClass.id === digitalClass.id);
     assert.equal(item.className, "24数字经济");
-    assert.equal(item.studentCount, 2);
+    assert.equal(item.studentCount, 3);
     assert.equal(item.teacherCount, 0);
     assert.equal("phone" in item, false);
   }
@@ -200,11 +214,52 @@ test("class assignment APIs manage duties without granting platform roles or lea
   assert.equal(data.users.find((user) => user.id === "class-api-monitor").role, "student");
 });
 
+test("student duty rejects a different identity class and keeps one active assignment", async () => {
+  const otherClass = data.campusClasses.find((item) => item.className === "24国际经济");
+  const rejected = await jsonRequest("/api/admin/classes/assignments", {
+    method: "PUT",
+    body: { userId: "class-api-monitor", classId: otherClass.id, duty: "monitor" }
+  });
+  assert.equal(rejected.response.status, 400);
+  const active = data.classAssignments.filter((item) => item.userId === "class-api-monitor" && item.active);
+  assert.equal(active.length, 1);
+  assert.equal(active[0].classId, digitalClass.id);
+});
+
+test("duplicate student numbers remain manageable with stable id and school", async () => {
+  const { payload } = await jsonRequest("/api/admin/students?query=DUPLICATE-001&page=1&pageSize=10");
+  assert.equal(payload.students.length, 2);
+  assert.deepEqual(new Set(payload.students.map((item) => item.school)), new Set(["班级测试大学", "另一所大学"]));
+  const target = payload.students.find((item) => item.id === "class-api-duplicate-b");
+  const updated = await jsonRequest("/api/admin/students/status", {
+    method: "PUT",
+    body: { userId: target.id, school: target.school, studentNo: target.studentNo, status: "disabled" }
+  });
+  assert.equal(updated.response.status, 200);
+  assert.equal(data.users.find((item) => item.id === target.id).status, "disabled");
+  assert.equal(data.users.find((item) => item.id === "class-api-duplicate-a").status, "active");
+});
+
+test("teacher listing returns every active class assignment and supports removal", async () => {
+  const otherClass = data.campusClasses.find((item) => item.className === "24国际经济");
+  await jsonRequest("/api/admin/classes/assignments", {
+    method: "PUT", body: { userId: "class-api-teacher", classId: otherClass.id, duty: "subject_teacher" }
+  });
+  const listed = await jsonRequest("/api/admin/students?role=teacher&query=CLASS-T001&page=1&pageSize=10");
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.payload.students[0].classAssignments.length, 2);
+  const removed = await jsonRequest("/api/admin/classes/assignments", {
+    method: "DELETE", body: { userId: "class-api-teacher", classId: otherClass.id }
+  });
+  assert.equal(removed.response.status, 200);
+  assert.equal(data.classAssignments.some((item) => item.userId === "class-api-teacher" && item.classId === otherClass.id && item.active), false);
+});
+
 test("student listing joins class identity, filters classes and uses stable duty order", async () => {
   const { response, payload } = await jsonRequest("/api/admin/students?role=student&school=班级测试大学&college=经济学院&className=24数字经济&page=1&pageSize=10");
   assert.equal(response.status, 200);
-  assert.deepEqual(payload.students.map((student) => student.id), ["class-api-monitor", "class-api-member"]);
-  assert.deepEqual(payload.students.map((student) => student.classDuty), ["monitor", "member"]);
+  assert.deepEqual(payload.students.map((student) => student.id), ["class-api-monitor", "class-api-member", "class-api-duplicate-a"]);
+  assert.deepEqual(payload.students.map((student) => student.classDuty), ["monitor", "member", "member"]);
   for (const student of payload.students) {
     assert.equal(student.classId, digitalClass.id);
     assert.match(student.classKey, /班级测试大学/);
@@ -212,7 +267,7 @@ test("student listing joins class identity, filters classes and uses stable duty
   }
   assert.equal(payload.page, 1);
   assert.equal(payload.totalPages, 1);
-  assert.equal(payload.totalCount, 2);
+  assert.equal(payload.totalCount, 3);
 });
 
 test("class sync is available to normal administrators", async () => {
@@ -277,6 +332,45 @@ test("identity import accepts class duties and related classes with row-specific
   assert.equal(data.classAssignments.find((item) => item.userId === importedTeacher.id && item.active).duty, "subject_teacher");
 });
 
+test("assignment failure reports identity persistence truthfully", async () => {
+  const original = classStore.setStudentDuty;
+  const originalConsoleError = console.error;
+  classStore.setStudentDuty = async () => { throw new Error("private SQL text"); };
+  console.error = () => {};
+  try {
+    const { response, payload } = await jsonRequest("/api/admin/students/import", {
+      method: "POST",
+      body: { rows: [{ 姓名: "半成功", 学校: "班级测试大学", 学院: "经济学院", 专业: "数字经济", 班级: "24数字经济", 学号: "IMPORT-CLASS-PARTIAL", 手机号: "13600001009", 角色: "学生", 班级职务: "班长" }] }
+    });
+    assert.equal(response.status, 200);
+    assert.equal(payload.success, 1);
+    assert.equal(payload.failed, 0);
+    assert.equal(payload.classAssignmentFailed, 1);
+    assert.equal(payload.rows[0].identityImported, true);
+    assert.equal(payload.rows[0].classAssignmentFailed, true);
+    assert.doesNotMatch(JSON.stringify(payload), /private SQL text/);
+    assert.equal(data.users.some((item) => item.studentNo === "IMPORT-CLASS-PARTIAL"), true);
+  } finally {
+    classStore.setStudentDuty = original;
+    console.error = originalConsoleError;
+  }
+});
+
+test("role counts honor class filters and unassigned continuation uses a sentinel", async () => {
+  const filtered = await jsonRequest("/api/admin/students?school=班级测试大学&college=经济学院&className=24数字经济&role=student&page=1&pageSize=10");
+  assert.equal(filtered.payload.roleCounts.student, filtered.payload.totalCount);
+  const filteredTeachers = await jsonRequest("/api/admin/students?school=班级测试大学&college=经济学院&className=24数字经济&role=teacher&page=1&pageSize=10");
+  assert.equal(filtered.payload.roleCounts.teacher, filteredTeachers.payload.totalCount);
+
+  const unassigned = [];
+  for (let index = 0; index < 12; index += 1) {
+    const row = { id: `class-unassigned-${index}`, name: `未分班${index}`, school: "续页大学", college: "学院", major: "专业", className: "", studentNo: `UNASSIGNED-${index}`, phone: `1350000${String(index).padStart(4, "0")}`, status: "active", role: "teacher", verified: true };
+    data.users.push(row); unassigned.push(row.id); fixtureIds.add(row.id);
+  }
+  const page = await jsonRequest("/api/admin/students?school=续页大学&role=teacher&page=2&pageSize=10");
+  assert.equal(page.payload.continuedClassKey, "__unassigned__");
+});
+
 test("identity UI exposes grouped class controls for desktop and mobile", () => {
   const root = path.join(__dirname, "..");
   const app = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
@@ -286,6 +380,11 @@ test("identity UI exposes grouped class controls for desktop and mobile", () => 
   assert.match(app, /接上页/);
   assert.match(app, /student-class-duty-select/);
   assert.match(app, /teacher-class-assignment/);
+  assert.match(app, /data-user-id/);
+  assert.match(app, /data-school/);
+  assert.match(app, /teacher-class-assignment-remove/);
+  assert.match(app, /method:\s*"DELETE"[\s\S]*userId:\s*button\.dataset\.userId/);
+  assert.match(app, /userId:\s*select\.dataset\.userId, school:\s*select\.dataset\.school/);
   assert.match(app, /班级职务/);
   assert.match(app, /关联班级/);
   assert.match(styles, /\.class-group-heading/);

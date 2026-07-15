@@ -8761,6 +8761,10 @@ html[data-theme="day"] .admin-current-role strong {
   min-width: 380px;
 }
 
+.teacher-class-assignment-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+.teacher-class-assignment-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 12px; }
+.teacher-class-assignment-remove { width: 22px; height: 22px; border: 0; border-radius: 50%; color: currentColor; background: color-mix(in srgb, var(--danger, #d84b62) 14%, transparent); cursor: pointer; }
+
 .student-table {
   min-width: 1240px;
 }

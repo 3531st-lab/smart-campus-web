@@ -6854,7 +6854,9 @@ const routes = {
         return `<select class="student-class-duty-select" data-user-id="${escapeHtml(student.id)}" data-class-id="${escapeHtml(student.classId)}" aria-label="${escapeHtml(student.name)}的班级职务">${dutyOptions(["member", "monitor", "league_secretary", "class_admin"], student.classDuty || "member")}</select>`;
       }
       if (student.role === "teacher") {
-        return `<div class="teacher-class-assignment" data-user-id="${escapeHtml(student.id)}">
+        const assignments = Array.isArray(student.classAssignments) ? student.classAssignments : [];
+        const existing = assignments.map((assignment) => `<span class="teacher-class-assignment-chip">${escapeHtml(`${assignment.className} · ${dutyLabels[assignment.duty] || assignment.duty}`)}<button class="teacher-class-assignment-remove" type="button" data-user-id="${escapeHtml(student.id)}" data-class-id="${escapeHtml(assignment.classId)}" aria-label="移除${escapeHtml(assignment.className)}分配">×</button></span>`).join("");
+        return `<div class="teacher-class-assignment-list">${existing || `<span class="muted">尚未关联班级</span>`}</div><div class="teacher-class-assignment" data-user-id="${escapeHtml(student.id)}">
           <select class="teacher-class-select" aria-label="关联班级"><option value="">选择关联班级</option>${classOptions(student.classId)}</select>
           <select class="teacher-class-duty-select" aria-label="教师班级职务">${dutyOptions(["subject_teacher", "head_teacher", "class_admin"], student.classDuty || "subject_teacher")}</select>
           <button class="ghost-btn teacher-class-assignment-save" type="button">保存</button>
@@ -6867,8 +6869,8 @@ const routes = {
       const classCounts = new Map(classes.map((campusClass) => [campusClass.classKey, Number(campusClass.studentCount || 0) + Number(campusClass.teacherCount || 0)]));
       let lastKey = null;
       return list.map((student, index) => {
-        const groupingKey = student.classKey || `unassigned:${student.role}`;
-        const heading = groupingKey !== lastKey ? `<tr class="class-group-heading"><td colspan="10"><div><strong>${escapeHtml(student.className ? `${student.school} · ${student.college} · ${student.className}` : "班级资料不完整")}</strong><span>${classCounts.get(student.classKey) ?? "-"} 人${index === 0 && continuedKey === student.classKey ? " · 接上页" : ""}</span></div></td></tr>` : "";
+        const groupingKey = student.classKey || "__unassigned__";
+        const heading = groupingKey !== lastKey ? `<tr class="class-group-heading"><td colspan="10"><div><strong>${escapeHtml(student.className ? `${student.school} · ${student.college} · ${student.className}` : "班级资料不完整")}</strong><span>${classCounts.get(student.classKey) ?? "-"} 人${index === 0 && continuedKey === groupingKey ? " · 接上页" : ""}</span></div></td></tr>` : "";
         lastKey = groupingKey;
         return `${heading}<tr class="student-account-row">
           <td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td>
@@ -6877,10 +6879,10 @@ const routes = {
           <td>${classDutyControl(student)}</td>
           <td>${escapeHtml(student.studentNo)}</td>
           <td>${escapeHtml(student.phoneMasked || "未绑定")}</td>
-          <td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
+          <td>${canManageRoles ? `<select class="student-role-select" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
           <td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td>
           <td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td>
-          <td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td>
+          <td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td>
         </tr>`;
       }).join("");
     }
@@ -7211,6 +7213,24 @@ const routes = {
               }
             });
           });
+          document.querySelectorAll(".teacher-class-assignment-remove").forEach((button) => {
+            if (button.dataset.bound === "true") return;
+            button.dataset.bound = "true";
+            button.addEventListener("click", async () => {
+              button.disabled = true;
+              try {
+                await adminApi("/api/admin/classes/assignments", {
+                  method: "DELETE",
+                  body: JSON.stringify({ userId: button.dataset.userId, classId: button.dataset.classId })
+                });
+                toast("教师班级分配已移除");
+                await loadFilteredStudents();
+              } catch (error) {
+                toast(error.message);
+                button.disabled = false;
+              }
+            });
+          });
         }
         bindClassAssignmentControls();
         function bindStudentStatusButtons() {
@@ -7219,7 +7239,7 @@ const routes = {
               try {
                 await adminApi("/api/admin/students/status", {
                   method: "PUT",
-                  body: JSON.stringify({ studentNo: button.dataset.studentNo, status: button.dataset.nextStatus })
+                  body: JSON.stringify({ userId: button.dataset.userId, school: button.dataset.school, studentNo: button.dataset.studentNo, status: button.dataset.nextStatus })
                 });
                 toast(button.dataset.nextStatus === "disabled" ? "学生已停用" : "学生已启用");
                 await loadFilteredStudents();
@@ -7238,7 +7258,7 @@ const routes = {
               try {
                 const result = await adminApi("/api/admin/students/password-reset", {
                   method: "POST",
-                  body: JSON.stringify({ studentNo: button.dataset.studentNo })
+                  body: JSON.stringify({ userId: button.dataset.userId, school: button.dataset.school, studentNo: button.dataset.studentNo })
                 });
                 toast("密码已清除，请用户通过手机号登录后重新设置");
                 await loadFilteredStudents();
@@ -7257,7 +7277,7 @@ const routes = {
               try {
                 await adminApi("/api/admin/students/role", {
                   method: "PUT",
-                  body: JSON.stringify({ studentNo: select.dataset.studentNo, role: select.value })
+                  body: JSON.stringify({ userId: select.dataset.userId, school: select.dataset.school, studentNo: select.dataset.studentNo, role: select.value })
                 });
                 toast("账号角色已更新");
                 await loadFilteredStudents();
