@@ -139,6 +139,7 @@ git commit -m "feat: add class identity domain"
 **Files:**
 - Create: `server/class-store.js`
 - Create: `tests/class-store.test.js`
+- Modify: `server/schema.sql`
 - Modify: `server/data.js`
 - Modify: `server/student-store.js`
 - Modify: `server/index.js`
