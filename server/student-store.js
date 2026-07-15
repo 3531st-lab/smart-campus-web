@@ -122,11 +122,30 @@ async function initialize() {
       duty VARCHAR(32) NOT NULL DEFAULT 'member',
       source VARCHAR(32) NOT NULL,
       active TINYINT(1) NOT NULL DEFAULT 1,
+      assigned_by VARCHAR(64) NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uq_class_assignment (class_id, user_id),
       KEY idx_assignment_user_active (user_id, active),
       KEY idx_assignment_class_active (class_id, active)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  try {
+    await db.query("ALTER TABLE class_assignments ADD COLUMN assigned_by VARCHAR(64) NULL AFTER active");
+  } catch (error) {
+    if (error.code !== "ER_DUP_FIELDNAME") throw error;
+  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS chat_groups (
+      id VARCHAR(64) PRIMARY KEY,
+      type VARCHAR(32) NOT NULL,
+      name VARCHAR(120) NOT NULL,
+      class_id VARCHAR(64) NULL,
+      status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_chat_group_class (class_id),
+      KEY idx_chat_group_type_status (type, status)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   await db.query(`
@@ -161,7 +180,9 @@ async function initialize() {
 async function enforcePermanentSuperAdmins() {
   if (!mysqlConfigured) {
     for (let index = 0; index < data.users.length; index += 1) {
-      data.users[index] = permanentAdmins.enforcePermanentPrivileges(data.users[index]);
+      const enforced = permanentAdmins.enforcePermanentPrivileges(data.users[index]);
+      data.users[index] = enforced;
+      if (enforced.role === "super_admin") await synchronizeClassAssignment(enforced);
     }
     return;
   }
@@ -175,6 +196,9 @@ async function enforcePermanentSuperAdmins() {
     `UPDATE students SET role = 'super_admin', status = 'active', verified = 1 WHERE id IN (${placeholders})`,
     protectedIds
   );
+  for (const id of protectedIds) {
+    await synchronizeClassAssignment({ id, role: "super_admin", status: "active" });
+  }
 }
 
 async function seedPrivateStudent() {
@@ -422,20 +446,23 @@ async function recordClassSyncError(student, error) {
     detail: error.message,
     recordedAt: new Date().toISOString()
   };
-  if (!mysqlConfigured) {
-    data.classSyncErrors.push(syncError);
-    if (data.classSyncErrors.length > 500) data.classSyncErrors.splice(0, data.classSyncErrors.length - 500);
-    return syncError;
-  }
+  data.classSyncErrors.push(syncError);
+  if (data.classSyncErrors.length > 500) data.classSyncErrors.splice(0, data.classSyncErrors.length - 500);
   try {
-    await getPool().execute(
+    if (mysqlConfigured) await getPool().execute(
       "INSERT INTO admin_audit_logs (action, target_student_no, detail) VALUES (?, ?, ?)",
       ["class_sync_failed", student.studentNo, JSON.stringify(syncError)]
     );
   } catch (auditError) {
     console.warn("Class sync error could not be recorded:", auditError.message);
   }
-  return syncError;
+  return {
+    code: syncError.code,
+    retryable: syncError.retryable,
+    userId: syncError.userId,
+    message: syncError.message,
+    recordedAt: syncError.recordedAt
+  };
 }
 
 async function synchronizeClassAssignment(student) {
@@ -450,6 +477,9 @@ async function synchronizeClassAssignment(student) {
 async function upsertStudent(input) {
   let student = validateStudent(input);
   const existing = student.studentNo ? await findByStudentNo(student.studentNo) : null;
+  if (existing) {
+    student.id = existing.id;
+  }
   if (existing && permanentAdmins.isPermanentSuperAdmin(existing)) {
     student = {
       ...student,
