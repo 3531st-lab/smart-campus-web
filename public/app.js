@@ -6813,16 +6813,23 @@ const routes = {
   async "student-admin"() {
     let health = null;
     let students = [];
+    let classes = [];
+    let continuedClassKey = null;
     let totalCount = 0;
     let studentCount = 0;
     let roleCounts = { student: 0, teacher: 0, admin: 0, super_admin: 0 };
-    let currentAccountState = { query: "", role: "student", page: 1, pageSize: 20, totalPages: 1 };
+    let currentAccountState = { query: "", role: "student", school: "", college: "", className: "", page: 1, pageSize: 20, totalPages: 1 };
     let canManageRoles = false;
     let loadError = "";
     try {
-      const studentResult = await adminApi("/api/admin/students?role=student&page=1&pageSize=20");
+      const [studentResult, classResult] = await Promise.all([
+        adminApi("/api/admin/students?role=student&page=1&pageSize=20"),
+        adminApi("/api/admin/classes")
+      ]);
       health = { mode: studentResult.storageMode || "mysql", connected: studentResult.storageConnected !== false };
       students = studentResult.students;
+      classes = classResult.classes || [];
+      continuedClassKey = studentResult.continuedClassKey || null;
       roleCounts = { ...roleCounts, ...(studentResult.roleCounts || {}) };
       studentCount = studentResult.totalCount ?? studentResult.count ?? students.length;
       totalCount = studentResult.accountCount ?? Object.values(roleCounts).reduce((sum, count) => sum + Number(count || 0), 0);
@@ -6831,19 +6838,53 @@ const routes = {
     } catch (error) {
       loadError = error.message;
     }
-    const studentRows = students.map((student) => `
-      <tr>
-        <td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td>
-        <td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td>
-        <td>${escapeHtml(student.className || "未填写")}</td>
-        <td>${escapeHtml(student.studentNo)}</td>
-        <td>${escapeHtml(student.phoneMasked || "未绑定")}</td>
-        <td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
-        <td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td>
-        <td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td>
-        <td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td>
-      </tr>
-    `).join("");
+    const dutyLabels = {
+      member: "普通成员",
+      monitor: "班长",
+      league_secretary: "团支书",
+      class_admin: "班级管理员",
+      head_teacher: "班主任",
+      subject_teacher: "任课老师"
+    };
+    const dutyOptions = (duties, selected) => duties.map((duty) => `<option value="${duty}" ${selected === duty ? "selected" : ""}>${dutyLabels[duty]}</option>`).join("");
+    const classOptions = (selectedId = "") => classes.map((campusClass) => `<option value="${escapeHtml(campusClass.id)}" ${String(selectedId) === String(campusClass.id) ? "selected" : ""}>${escapeHtml(`${campusClass.school} · ${campusClass.college} · ${campusClass.className}`)}</option>`).join("");
+    function classDutyControl(student) {
+      if (student.role === "student") {
+        if (!student.classId) return `<span class="muted">待同步班级</span>`;
+        return `<select class="student-class-duty-select" data-user-id="${escapeHtml(student.id)}" data-class-id="${escapeHtml(student.classId)}" aria-label="${escapeHtml(student.name)}的班级职务">${dutyOptions(["member", "monitor", "league_secretary", "class_admin"], student.classDuty || "member")}</select>`;
+      }
+      if (student.role === "teacher") {
+        return `<div class="teacher-class-assignment" data-user-id="${escapeHtml(student.id)}">
+          <select class="teacher-class-select" aria-label="关联班级"><option value="">选择关联班级</option>${classOptions(student.classId)}</select>
+          <select class="teacher-class-duty-select" aria-label="教师班级职务">${dutyOptions(["subject_teacher", "head_teacher", "class_admin"], student.classDuty || "subject_teacher")}</select>
+          <button class="ghost-btn teacher-class-assignment-save" type="button">保存</button>
+        </div>`;
+      }
+      return `<span class="muted">不适用</span>`;
+    }
+    function renderStudentRows(list, continuedKey = null) {
+      if (!list.length) return `<tr><td colspan="10" class="empty">该筛选条件下暂无账号</td></tr>`;
+      const classCounts = new Map(classes.map((campusClass) => [campusClass.classKey, Number(campusClass.studentCount || 0) + Number(campusClass.teacherCount || 0)]));
+      let lastKey = null;
+      return list.map((student, index) => {
+        const groupingKey = student.classKey || `unassigned:${student.role}`;
+        const heading = groupingKey !== lastKey ? `<tr class="class-group-heading"><td colspan="10"><div><strong>${escapeHtml(student.className ? `${student.school} · ${student.college} · ${student.className}` : "班级资料不完整")}</strong><span>${classCounts.get(student.classKey) ?? "-"} 人${index === 0 && continuedKey === student.classKey ? " · 接上页" : ""}</span></div></td></tr>` : "";
+        lastKey = groupingKey;
+        return `${heading}<tr class="student-account-row">
+          <td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td>
+          <td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td>
+          <td>${escapeHtml(student.className || "未填写")}</td>
+          <td>${classDutyControl(student)}</td>
+          <td>${escapeHtml(student.studentNo)}</td>
+          <td>${escapeHtml(student.phoneMasked || "未绑定")}</td>
+          <td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
+          <td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td>
+          <td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td>
+          <td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td>
+        </tr>`;
+      }).join("");
+    }
+    const studentRows = renderStudentRows(students, continuedClassKey);
     return {
       title: "学生身份库",
       subtitle: "通过 MySQL 管理学生身份、登录资格和批量导入",
@@ -6884,7 +6925,7 @@ const routes = {
               <h2 class="section-title">Excel 批量导入</h2>
               <div class="admin-import-guide">
                 <p>支持 xlsx、xls 和 csv 文件。教师账号请在“学号”列填写工号。首行列名：</p>
-                <code>姓名、学校、学院、专业、班级、学号、手机号、状态、角色</code>
+                <code>姓名、学校、学院、专业、班级、学号、手机号、状态、角色、班级职务、关联班级</code>
               </div>
               <div class="admin-template-example">
                 <div class="admin-template-example-copy">
@@ -6912,10 +6953,17 @@ const routes = {
               <button type="button" data-account-role="teacher">老师 <span>${Number(roleCounts.teacher || 0).toLocaleString("zh-CN")}</span></button>
               ${canManageRoles ? `<button type="button" data-account-role="admin">普通管理员 <span>${Number(roleCounts.admin || 0).toLocaleString("zh-CN")}</span></button><button type="button" data-account-role="super_admin">总管理员 <span>${Number(roleCounts.super_admin || 0).toLocaleString("zh-CN")}</span></button>` : ""}
             </div>
+            <form class="student-class-filters" id="studentClassFilters" aria-label="按班级筛选账号">
+              <label><span>学校</span><select name="school"><option value="">全部学校</option>${[...new Set(classes.map((item) => item.school))].map((school) => `<option value="${escapeHtml(school)}">${escapeHtml(school)}</option>`).join("")}</select></label>
+              <label><span>学院</span><select name="college"><option value="">全部学院</option></select></label>
+              <label><span>班级</span><select name="className"><option value="">全部班级</option></select></label>
+              <button class="ghost-btn" type="submit">筛选</button>
+              <button class="ghost-btn student-class-sync" type="button">同步班级</button>
+            </form>
             <div class="table-wrap">
               <table class="student-table">
-                <thead><tr><th>账号</th><th>学校 / 专业</th><th>班级</th><th>学号 / 工号</th><th>手机号</th><th>角色</th><th>状态</th><th>密码</th><th>操作</th></tr></thead>
-                <tbody>${studentRows || `<tr><td colspan="9" class="empty">身份库暂无账号</td></tr>`}</tbody>
+                <thead><tr><th>账号</th><th>学校 / 专业</th><th>班级</th><th>班级职务</th><th>学号 / 工号</th><th>手机号</th><th>角色</th><th>状态</th><th>密码</th><th>操作</th></tr></thead>
+                <tbody>${studentRows}</tbody>
               </table>
             </div>
             <div class="student-list-pagination" aria-label="账号列表分页">
@@ -6958,6 +7006,9 @@ const routes = {
             const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
             resultNode.textContent = `成功 ${result.success} 条，失败 ${result.failed} 条，用时 ${elapsed} 秒。${result.errors.slice(0, 3).join("；")}`;
             toast("学生名单导入完成");
+            const classResult = await adminApi("/api/admin/classes");
+            classes = classResult.classes || [];
+            updateClassFilterOptions({ keepCollege: true, keepClass: true });
             await loadFilteredStudents({ role: "student", page: 1 });
           } catch (error) {
             resultNode.textContent = error.message;
@@ -6976,12 +7027,11 @@ const routes = {
         });
         function renderFilteredStudents(result) {
           const tbody = document.querySelector(".student-table tbody");
-          tbody.innerHTML = result.students.map((student) => `
-            <tr><td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td><td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td><td>${escapeHtml(student.className || "未填写")}</td><td>${escapeHtml(student.studentNo)}</td><td>${escapeHtml(student.phoneMasked)}</td><td>${canManageRoles ? `<select class="student-role-select" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td><td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td><td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td><td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td></tr>
-          `).join("") || `<tr><td colspan="9" class="empty">该筛选条件下暂无账号</td></tr>`;
+          tbody.innerHTML = renderStudentRows(result.students, result.continuedClassKey || null);
           bindStudentStatusButtons();
           bindStudentRoleSelects();
           bindStudentPasswordResetButtons();
+          bindClassAssignmentControls();
         }
         function updateAccountListMeta(result) {
           currentAccountState = {
@@ -7017,13 +7067,27 @@ const routes = {
           if (previous) previous.disabled = busy || currentAccountState.page <= 1;
           if (next) next.disabled = busy || currentAccountState.page >= currentAccountState.totalPages;
         }
-        async function loadFilteredStudents({ query = currentAccountState.query, role = currentAccountState.role, page = currentAccountState.page } = {}) {
-          currentAccountState = { ...currentAccountState, query: String(query || ""), role: String(role || ""), page: Math.max(1, Number(page) || 1) };
+        async function loadFilteredStudents({
+          query = currentAccountState.query,
+          role = currentAccountState.role,
+          school = currentAccountState.school,
+          college = currentAccountState.college,
+          className = currentAccountState.className,
+          page = currentAccountState.page
+        } = {}) {
+          currentAccountState = {
+            ...currentAccountState,
+            query: String(query || ""), role: String(role || ""), school: String(school || ""),
+            college: String(college || ""), className: String(className || ""), page: Math.max(1, Number(page) || 1)
+          };
           const activeButton = document.querySelector(`.student-role-filters button[data-account-role="${currentAccountState.role}"]`);
           document.querySelectorAll(".student-role-filters button").forEach((button) => button.classList.toggle("active", button === activeButton));
           const params = new URLSearchParams({
             query: currentAccountState.query,
             role: currentAccountState.role,
+            school: currentAccountState.school,
+            college: currentAccountState.college,
+            className: currentAccountState.className,
             page: String(currentAccountState.page),
             pageSize: String(currentAccountState.pageSize)
           });
@@ -7049,6 +7113,106 @@ const routes = {
             }
           });
         });
+        const classFilterForm = document.querySelector("#studentClassFilters");
+        const schoolFilter = classFilterForm?.elements.school;
+        const collegeFilter = classFilterForm?.elements.college;
+        const classNameFilter = classFilterForm?.elements.className;
+        function replaceFilterOptions(select, placeholder, values, selected = "") {
+          if (!select) return;
+          select.innerHTML = `<option value="">${placeholder}</option>${values.map((value) => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}`;
+        }
+        function updateClassFilterOptions({ keepCollege = false, keepClass = false } = {}) {
+          const school = schoolFilter?.value || "";
+          const priorCollege = keepCollege ? collegeFilter?.value || "" : "";
+          const matchingSchool = classes.filter((item) => !school || item.school === school);
+          const colleges = [...new Set(matchingSchool.map((item) => item.college).filter(Boolean))];
+          replaceFilterOptions(collegeFilter, "全部学院", colleges, priorCollege);
+          const college = collegeFilter?.value || "";
+          const priorClass = keepClass ? classNameFilter?.value || "" : "";
+          const classNames = [...new Set(matchingSchool.filter((item) => !college || item.college === college).map((item) => item.className).filter(Boolean))];
+          replaceFilterOptions(classNameFilter, "全部班级", classNames, priorClass);
+        }
+        schoolFilter?.addEventListener("change", () => updateClassFilterOptions());
+        collegeFilter?.addEventListener("change", () => updateClassFilterOptions({ keepCollege: true }));
+        updateClassFilterOptions();
+        classFilterForm?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          try {
+            await loadFilteredStudents({
+              school: schoolFilter?.value || "",
+              college: collegeFilter?.value || "",
+              className: classNameFilter?.value || "",
+              page: 1
+            });
+          } catch (error) {
+            toast(error.message);
+          }
+        });
+        document.querySelector(".student-class-sync")?.addEventListener("click", async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          try {
+            const result = await adminApi("/api/admin/classes/sync", { method: "POST", body: JSON.stringify({ dryRun: false }) });
+            const classResult = await adminApi("/api/admin/classes");
+            classes = classResult.classes || [];
+            updateClassFilterOptions({ keepCollege: true, keepClass: true });
+            toast(`班级同步完成：检查 ${result.summary.checked} 个账号，更新 ${result.summary.changed} 项`);
+            await loadFilteredStudents({ page: 1 });
+          } catch (error) {
+            toast(error.message);
+          } finally {
+            button.disabled = false;
+          }
+        });
+        function bindClassAssignmentControls() {
+          document.querySelectorAll(".student-class-duty-select").forEach((select) => {
+            if (select.dataset.bound === "true") return;
+            select.dataset.bound = "true";
+            select.addEventListener("change", async () => {
+              select.disabled = true;
+              try {
+                await adminApi("/api/admin/classes/assignments", {
+                  method: "PUT",
+                  body: JSON.stringify({ userId: select.dataset.userId, classId: select.dataset.classId, duty: select.value })
+                });
+                toast("班级职务已更新");
+                await loadFilteredStudents();
+              } catch (error) {
+                toast(error.message);
+                await loadFilteredStudents();
+              } finally {
+                select.disabled = false;
+              }
+            });
+          });
+          document.querySelectorAll(".teacher-class-assignment-save").forEach((button) => {
+            if (button.dataset.bound === "true") return;
+            button.dataset.bound = "true";
+            button.addEventListener("click", async () => {
+              const control = button.closest(".teacher-class-assignment");
+              const classId = control?.querySelector(".teacher-class-select")?.value || "";
+              const duty = control?.querySelector(".teacher-class-duty-select")?.value || "";
+              if (!classId) {
+                toast("请先选择关联班级");
+                return;
+              }
+              button.disabled = true;
+              try {
+                await adminApi("/api/admin/classes/assignments", {
+                  method: "PUT",
+                  body: JSON.stringify({ userId: control.dataset.userId, classId, duty })
+                });
+                toast("教师班级分配已保存");
+                await loadFilteredStudents();
+              } catch (error) {
+                toast(error.message);
+              } finally {
+                button.disabled = false;
+              }
+            });
+          });
+        }
+        bindClassAssignmentControls();
         function bindStudentStatusButtons() {
           document.querySelectorAll(".student-status-btn").forEach((button) => {
             button.addEventListener("click", async () => {
