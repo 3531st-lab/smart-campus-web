@@ -14,6 +14,60 @@ const studentStore = require("../server/student-store");
 const permanentAdmins = require("../server/permanent-admins");
 const { createMemoryClassStore } = classStore;
 
+function loadClassStoreWithFakeDb(fakeDb) {
+  const dbPath = require.resolve("../server/db");
+  const storePath = require.resolve("../server/class-store");
+  const previousDb = require.cache[dbPath];
+  const previousStore = require.cache[storePath];
+  delete require.cache[storePath];
+  require.cache[dbPath] = {
+    id: dbPath,
+    filename: dbPath,
+    loaded: true,
+    exports: { mysqlConfigured: true, getPool: () => fakeDb }
+  };
+  try {
+    return require("../server/class-store");
+  } finally {
+    if (previousDb) require.cache[dbPath] = previousDb;
+    else delete require.cache[dbPath];
+    if (previousStore) require.cache[storePath] = previousStore;
+    else delete require.cache[storePath];
+  }
+}
+
+function loadStudentStoreWithFakeDb(fakeDb, fakeClassStore) {
+  const dbPath = require.resolve("../server/db");
+  const classStorePath = require.resolve("../server/class-store");
+  const studentStorePath = require.resolve("../server/student-store");
+  const previousDb = require.cache[dbPath];
+  const previousClassStore = require.cache[classStorePath];
+  const previousStudentStore = require.cache[studentStorePath];
+  delete require.cache[studentStorePath];
+  require.cache[dbPath] = {
+    id: dbPath,
+    filename: dbPath,
+    loaded: true,
+    exports: { mysqlConfigured: true, autoMigrateSchema: false, getPool: () => fakeDb }
+  };
+  require.cache[classStorePath] = {
+    id: classStorePath,
+    filename: classStorePath,
+    loaded: true,
+    exports: fakeClassStore
+  };
+  try {
+    return require("../server/student-store");
+  } finally {
+    if (previousDb) require.cache[dbPath] = previousDb;
+    else delete require.cache[dbPath];
+    if (previousClassStore) require.cache[classStorePath] = previousClassStore;
+    else delete require.cache[classStorePath];
+    if (previousStudentStore) require.cache[studentStorePath] = previousStudentStore;
+    else delete require.cache[studentStorePath];
+  }
+}
+
 function fixtures() {
   return {
     student: {
@@ -313,4 +367,169 @@ test("runtime migration and MySQL admin assignment use the class lock order", ()
   assert.ok(adminSource.indexOf("SELECT id, role, status FROM students WHERE id = ? FOR UPDATE") < adminSource.indexOf("SELECT * FROM campus_classes WHERE id = ? FOR UPDATE"));
   assert.match(adminSource, /INSERT INTO chat_groups/);
   assert.match(adminSource, /assigned_by/);
+});
+
+test("canonical schema defines class groups assignment operators and durable sync errors", () => {
+  const schema = fs.readFileSync(path.join(__dirname, "..", "server", "schema.sql"), "utf8");
+  const studentSource = fs.readFileSync(path.join(__dirname, "..", "server", "student-store.js"), "utf8");
+
+  for (const source of [schema, studentSource]) {
+    assert.match(source, /CREATE TABLE IF NOT EXISTS chat_groups[\s\S]*id VARCHAR\(64\) PRIMARY KEY[\s\S]*type VARCHAR\(32\) NOT NULL[\s\S]*name VARCHAR\(120\) NOT NULL[\s\S]*class_id VARCHAR\(64\) NULL[\s\S]*status ENUM\('active','disabled'\) NOT NULL DEFAULT 'active'[\s\S]*UNIQUE KEY uq_chat_group_class \(class_id\)/);
+    assert.match(source, /CREATE TABLE IF NOT EXISTS class_assignments[\s\S]*assigned_by VARCHAR\(64\) NULL/);
+    assert.match(source, /CREATE TABLE IF NOT EXISTS class_sync_errors[\s\S]*user_id VARCHAR\(64\) NOT NULL[\s\S]*student_no VARCHAR\(64\) NOT NULL DEFAULT ''[\s\S]*public_message VARCHAR\(160\) NOT NULL[\s\S]*diagnostic JSON NULL[\s\S]*recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP/);
+  }
+});
+
+test("duplicate student numbers are scoped by school for upsert and ambiguous writes are rejected", async () => {
+  const studentNo = "DUP-SCHOOL-1001";
+  const schoolA = {
+    id: "school-a-id",
+    name: "School A Student",
+    school: "School A",
+    college: "College",
+    major: "Software",
+    className: "Class A",
+    studentNo,
+    phone: "13800002001",
+    status: "active",
+    role: "student"
+  };
+  const schoolB = {
+    ...schoolA,
+    id: "school-b-id",
+    name: "School B Student",
+    school: "School B",
+    className: "Class B",
+    phone: "13800002002"
+  };
+  data.users.push(schoolA, schoolB);
+  try {
+    const { id: _id, ...schoolBUpdate } = schoolB;
+    const updated = await studentStore.upsertStudent({ ...schoolBUpdate, name: "Updated School B" });
+
+    assert.equal(updated.id, schoolB.id);
+    assert.equal(data.users.find((user) => user.id === schoolA.id).name, schoolA.name);
+    assert.equal(data.users.find((user) => user.id === schoolB.id).name, "Updated School B");
+    assert.equal(data.classAssignments.some((assignment) => assignment.userId === schoolB.id && assignment.active), true);
+    assert.equal(data.classAssignments.some((assignment) => assignment.userId === schoolA.id && assignment.active), false);
+
+    await assert.rejects(() => studentStore.setStudentStatus(studentNo, "disabled"), /学校|school|ambiguous/i);
+    await assert.rejects(() => studentStore.setStudentRole(studentNo, "teacher"), /学校|school|ambiguous/i);
+
+    const statusResult = await studentStore.setStudentStatus({ school: schoolB.school, studentNo }, "disabled");
+    assert.equal(statusResult.updated, true);
+    assert.equal(data.users.find((user) => user.id === schoolA.id).status, "active");
+    assert.equal(data.users.find((user) => user.id === schoolB.id).status, "disabled");
+  } finally {
+    for (const collection of [data.users, data.classAssignments]) {
+      for (let index = collection.length - 1; index >= 0; index -= 1) {
+        if ([schoolA.id, schoolB.id].includes(collection[index].id) || [schoolA.id, schoolB.id].includes(collection[index].userId)) {
+          collection.splice(index, 1);
+        }
+      }
+    }
+    data.campusClasses.splice(0, data.campusClasses.length);
+    data.chatGroups.splice(0, data.chatGroups.length);
+  }
+});
+
+test("MySQL sync error records durable failure honestly and keeps account write successful", async () => {
+  const calls = [];
+  const fakeDb = {
+    async query(sql) {
+      calls.push({ sql, params: [] });
+      if (/SELECT id, name, school, major, student_no FROM students/.test(sql)) return [[]];
+      return [{ affectedRows: 0 }];
+    },
+    async execute(sql, params = []) {
+      calls.push({ sql, params });
+      if (/SELECT \* FROM students/.test(sql)) return [[]];
+      if (/INSERT INTO students/.test(sql)) return [{ affectedRows: 1 }];
+      if (/INSERT INTO class_sync_errors/.test(sql)) {
+        const error = new Error("class_sync_errors storage unavailable");
+        error.code = "ER_LOCK_WAIT_TIMEOUT";
+        throw error;
+      }
+      if (/INSERT INTO admin_audit_logs/.test(sql)) return [{ affectedRows: 1 }];
+      return [{ affectedRows: 0 }];
+    }
+  };
+  const isolatedStore = loadStudentStoreWithFakeDb(fakeDb, {
+    ensureStudentClassAssignment: async () => {
+      throw new Error("SELECT secret_sql FROM chat_groups");
+    }
+  });
+
+  data.classSyncErrors.splice(0, data.classSyncErrors.length);
+  const student = await isolatedStore.upsertStudent({
+    id: "durable-error-student",
+    name: "Durable Error Student",
+    school: "Durable School",
+    college: "Durable College",
+    major: "Software",
+    className: "Software 1",
+    studentNo: "DURABLE-ERR-1001",
+    phone: "13800002003",
+    status: "active",
+    role: "student"
+  });
+
+  assert.equal(student.id, "durable-error-student");
+  assert.equal(student.syncError.retryable, true);
+  assert.equal(student.syncError.recording.memoryQueued, true);
+  assert.equal(student.syncError.recording.durableRecorded, false);
+  assert.equal(student.syncError.recording.auditRecorded, true);
+  assert.doesNotMatch(JSON.stringify(student.syncError), /secret_sql|chat_groups|storage unavailable/);
+  assert.match(data.classSyncErrors.at(-1).detail, /secret_sql/);
+
+  const durableIndex = calls.findIndex((call) => /INSERT INTO class_sync_errors/.test(call.sql));
+  const auditIndex = calls.findIndex((call) => /INSERT INTO admin_audit_logs/.test(call.sql));
+  assert.ok(durableIndex >= 0);
+  assert.ok(auditIndex > durableIndex);
+  data.classSyncErrors.splice(0, data.classSyncErrors.length);
+});
+
+test("MySQL syncAllClasses dry-run reports would-change counts without opening transactions", async () => {
+  const queries = [];
+  const rows = {
+    users: [
+      { id: "mysql-ready", school: "S", college: "C", class_name: "Ready", role: "student", status: "active" },
+      { id: "mysql-missing-class", school: "S", college: "C", class_name: "Missing", role: "student", status: "active" },
+      { id: "mysql-missing-group", school: "S", college: "C", class_name: "Needs Group", role: "student", status: "active" },
+      { id: "mysql-incomplete", school: "S", college: "", class_name: "Incomplete", role: "student", status: "active" }
+    ],
+    classes: new Map([
+      ["s\u001fc\u001fready", { id: "class-ready", school: "S", college: "C", class_name: "Ready", class_key: "s\u001fc\u001fready", group_id: "group-ready", status: "active" }],
+      ["s\u001fc\u001fneedsgroup", { id: "class-needs-group", school: "S", college: "C", class_name: "Needs Group", class_key: "s\u001fc\u001fneedsgroup", group_id: null, status: "active" }]
+    ]),
+    groups: new Map([
+      ["class-ready", { id: "group-ready", type: "class", name: "Ready", class_id: "class-ready", status: "active" }]
+    ]),
+    assignments: new Map([
+      ["mysql-ready", [{ class_id: "class-ready", user_id: "mysql-ready", duty: "member", source: "student_identity", active: 1 }]],
+      ["mysql-missing-group", []]
+    ])
+  };
+  const fakeDb = {
+    async execute(sql, params = []) {
+      queries.push({ sql, params });
+      if (/SELECT \* FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
+      if (/SELECT \* FROM campus_classes WHERE class_key = \?/.test(sql)) return [[rows.classes.get(params[0])].filter(Boolean)];
+      if (/SELECT \* FROM chat_groups WHERE type = 'class' AND class_id = \?/.test(sql)) return [[rows.groups.get(params[0])].filter(Boolean)];
+      if (/FROM class_assignments/.test(sql)) return [rows.assignments.get(params[0]) || []];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+    async getConnection() {
+      throw new Error("dry-run must not open a transaction connection");
+    }
+  };
+  const isolatedClassStore = loadClassStoreWithFakeDb(fakeDb);
+
+  const summary = await isolatedClassStore.syncAllClasses({ dryRun: true });
+
+  assert.deepEqual(
+    { checked: summary.checked, changed: summary.changed, incomplete: summary.incomplete, dryRun: summary.dryRun },
+    { checked: 4, changed: 2, incomplete: 1, dryRun: true }
+  );
+  assert.equal(queries.some((query) => /beginTransaction|UPDATE |INSERT INTO/i.test(query.sql)), false);
 });

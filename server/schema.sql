@@ -47,11 +47,36 @@ CREATE TABLE IF NOT EXISTS class_assignments (
   duty VARCHAR(32) NOT NULL DEFAULT 'member',
   source VARCHAR(32) NOT NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
+  assigned_by VARCHAR(64) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_class_assignment (class_id, user_id),
   KEY idx_assignment_user_active (user_id, active),
   KEY idx_assignment_class_active (class_id, active)
+);
+
+CREATE TABLE IF NOT EXISTS chat_groups (
+  id VARCHAR(64) PRIMARY KEY,
+  type VARCHAR(32) NOT NULL,
+  name VARCHAR(120) NOT NULL,
+  class_id VARCHAR(64) NULL,
+  status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_chat_group_class (class_id),
+  KEY idx_chat_group_type_status (type, status)
+);
+
+CREATE TABLE IF NOT EXISTS class_sync_errors (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  student_no VARCHAR(64) NOT NULL DEFAULT '',
+  public_message VARCHAR(160) NOT NULL,
+  retryable TINYINT(1) NOT NULL DEFAULT 1,
+  diagnostic JSON NULL,
+  recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_class_sync_errors_user (user_id, recorded_at),
+  KEY idx_class_sync_errors_student_no (student_no, recorded_at)
 );
 
 CREATE TABLE IF NOT EXISTS admin_audit_logs (

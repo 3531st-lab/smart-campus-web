@@ -149,6 +149,19 @@ async function initialize() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   await db.query(`
+    CREATE TABLE IF NOT EXISTS class_sync_errors (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      student_no VARCHAR(64) NOT NULL DEFAULT '',
+      public_message VARCHAR(160) NOT NULL,
+      retryable TINYINT(1) NOT NULL DEFAULT 1,
+      diagnostic JSON NULL,
+      recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_class_sync_errors_user (user_id, recorded_at),
+      KEY idx_class_sync_errors_student_no (student_no, recorded_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await db.query(`
     CREATE TABLE IF NOT EXISTS admin_audit_logs (
       id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
       action VARCHAR(80) NOT NULL,
@@ -269,6 +282,29 @@ async function findLoginAccount({ school, major, studentNo }) {
 function matchesIdentityType(user, identityType) {
   if (!user || user.status === "disabled" || user.role === "guest") return false;
   return identityType === "teacher" ? user.role === "teacher" : user.role !== "teacher";
+}
+
+function normalizeStudentNoIdentity(identity) {
+  if (identity && typeof identity === "object") {
+    return {
+      school: String(identity.school || "").trim(),
+      studentNo: String(identity.studentNo ?? identity.student_no ?? "").trim()
+    };
+  }
+  return { school: "", studentNo: String(identity || "").trim() };
+}
+
+function ambiguousStudentNoError(studentNo) {
+  const error = new Error(`学校 is required for ambiguous student number ${studentNo}`);
+  error.statusCode = 400;
+  return error;
+}
+
+function memoryMatchesStudentNo(identity) {
+  return data.users.filter((user) => (
+    user.studentNo === identity.studentNo
+    && (!identity.school || user.school === identity.school)
+  ));
 }
 
 async function listActiveSchools(identityType = "student") {
@@ -446,13 +482,41 @@ async function recordClassSyncError(student, error) {
     detail: error.message,
     recordedAt: new Date().toISOString()
   };
+  const recording = {
+    durableRecorded: false,
+    memoryQueued: false,
+    auditRecorded: false
+  };
+  if (mysqlConfigured) {
+    try {
+      await getPool().execute(
+        "INSERT INTO class_sync_errors (user_id, student_no, public_message, retryable, diagnostic) VALUES (?, ?, ?, ?, ?)",
+        [
+          syncError.userId,
+          student.studentNo || "",
+          syncError.message,
+          syncError.retryable ? 1 : 0,
+          JSON.stringify({
+            code: syncError.code,
+            detail: syncError.detail,
+            recordedAt: syncError.recordedAt
+          })
+        ]
+      );
+      recording.durableRecorded = true;
+    } catch (durableError) {
+      syncError.recordingError = durableError.message;
+    }
+  }
   data.classSyncErrors.push(syncError);
+  recording.memoryQueued = true;
   if (data.classSyncErrors.length > 500) data.classSyncErrors.splice(0, data.classSyncErrors.length - 500);
   try {
     if (mysqlConfigured) await getPool().execute(
       "INSERT INTO admin_audit_logs (action, target_student_no, detail) VALUES (?, ?, ?)",
       ["class_sync_failed", student.studentNo, JSON.stringify(syncError)]
     );
+    if (mysqlConfigured) recording.auditRecorded = true;
   } catch (auditError) {
     console.warn("Class sync error could not be recorded:", auditError.message);
   }
@@ -461,7 +525,8 @@ async function recordClassSyncError(student, error) {
     retryable: syncError.retryable,
     userId: syncError.userId,
     message: syncError.message,
-    recordedAt: syncError.recordedAt
+    recordedAt: syncError.recordedAt,
+    recording
   };
 }
 
@@ -476,7 +541,7 @@ async function synchronizeClassAssignment(student) {
 
 async function upsertStudent(input) {
   let student = validateStudent(input);
-  const existing = student.studentNo ? await findByStudentNo(student.studentNo) : null;
+  const existing = student.studentNo ? await findByStudentNo({ school: student.school, studentNo: student.studentNo }) : null;
   if (existing) {
     student.id = existing.id;
   }
@@ -595,45 +660,56 @@ async function bulkUpsertStudents(items = []) {
   return { success: students.length, failed: errors.length, errors, syncErrors };
 }
 
-async function setStudentStatus(studentNo, status) {
-  const target = await findByStudentNo(studentNo);
+async function setStudentStatus(identityInput, status) {
+  const target = await findByStudentNo(identityInput);
   if (target && permanentAdmins.isPermanentSuperAdmin(target) && status !== "active") {
     throw new Error("永久总管理员账号不可停用");
   }
   if (!mysqlConfigured) {
-    const student = data.users.find((user) => user.studentNo === studentNo);
+    const student = target ? data.users.find((user) => user.id === target.id) : null;
     if (!student) return { updated: false, syncError: null };
     student.status = status;
     return { updated: true, syncError: await synchronizeClassAssignment(student) };
   }
   await initialize();
-  const [result] = await getPool().execute("UPDATE students SET status = ? WHERE student_no = ?", [status, studentNo]);
+  if (!target) return { updated: false, syncError: null };
+  const [result] = await getPool().execute("UPDATE students SET status = ? WHERE id = ?", [status, target.id]);
   if (!result.affectedRows) return { updated: false, syncError: null };
   return { updated: true, syncError: await synchronizeClassAssignment({ ...target, status }) };
 }
 
-async function setStudentRole(studentNo, role) {
-  const target = await findByStudentNo(studentNo);
+async function setStudentRole(identityInput, role) {
+  const target = await findByStudentNo(identityInput);
   if (target && permanentAdmins.isPermanentSuperAdmin(target) && role !== "super_admin") {
     throw new Error("永久总管理员账号不可降级");
   }
   if (!["student", "teacher", "admin", "super_admin"].includes(role)) throw new Error("账号角色无效");
   if (!mysqlConfigured) {
-    const student = data.users.find((user) => user.studentNo === studentNo);
+    const student = target ? data.users.find((user) => user.id === target.id) : null;
     if (!student) return { updated: false, syncError: null };
     student.role = role;
     return { updated: true, syncError: await synchronizeClassAssignment(student) };
   }
   await initialize();
-  const [result] = await getPool().execute("UPDATE students SET role = ? WHERE student_no = ?", [role, studentNo]);
+  if (!target) return { updated: false, syncError: null };
+  const [result] = await getPool().execute("UPDATE students SET role = ? WHERE id = ?", [role, target.id]);
   if (!result.affectedRows) return { updated: false, syncError: null };
   return { updated: true, syncError: await synchronizeClassAssignment({ ...target, role }) };
 }
 
-async function findByStudentNo(studentNo) {
-  if (!mysqlConfigured) return normalizeStudent(data.users.find((user) => user.studentNo === studentNo));
+async function findByStudentNo(identityInput) {
+  const identity = normalizeStudentNoIdentity(identityInput);
+  if (!identity.studentNo) return null;
+  if (!mysqlConfigured) {
+    const matches = memoryMatchesStudentNo(identity);
+    if (!identity.school && matches.length > 1) throw ambiguousStudentNoError(identity.studentNo);
+    return normalizeStudent(matches[0]);
+  }
   await initialize();
-  const [rows] = await getPool().execute("SELECT * FROM students WHERE student_no = ? LIMIT 1", [studentNo]);
+  const [rows] = identity.school
+    ? await getPool().execute("SELECT * FROM students WHERE school = ? AND student_no = ? LIMIT 1", [identity.school, identity.studentNo])
+    : await getPool().execute("SELECT * FROM students WHERE student_no = ? LIMIT 2", [identity.studentNo]);
+  if (!identity.school && rows.length > 1) throw ambiguousStudentNoError(identity.studentNo);
   return normalizeStudent(rows[0]);
 }
 

@@ -443,6 +443,44 @@ async function setStudentDuty(input) {
     : memoryStore.setStudentDuty(input);
 }
 
+async function previewMysqlStudentSync(user) {
+  const values = classValues(user);
+  if (user.status !== "active" || user.role !== "student") {
+    const [activeRows] = await getPool().execute(
+      "SELECT * FROM class_assignments WHERE user_id = ? AND active = 1",
+      [user.id]
+    );
+    return { changed: activeRows.length > 0, incomplete: false };
+  }
+  if (![values.school, values.college, values.className].every(Boolean)) {
+    return { changed: false, incomplete: true };
+  }
+
+  const key = classKey(values);
+  const [classRows] = await getPool().execute("SELECT * FROM campus_classes WHERE class_key = ?", [key]);
+  if (!classRows[0]) return { changed: true, incomplete: false };
+
+  const campusClass = classRow(classRows[0]);
+  const [groupRows] = await getPool().execute(
+    "SELECT * FROM chat_groups WHERE type = 'class' AND class_id = ?",
+    [campusClass.id]
+  );
+  const [activeRows] = await getPool().execute(
+    "SELECT * FROM class_assignments WHERE user_id = ? AND active = 1",
+    [user.id]
+  );
+  const hasClassGroup = Boolean(groupRows[0]) && (!campusClass.groupId || campusClass.groupId === String(groupRows[0].id));
+  const hasCurrentAssignment = activeRows.some((assignment) => (
+    String(assignment.class_id ?? assignment.classId) === campusClass.id
+    && (assignment.source ?? AUTO_ASSIGNMENT_SOURCE) === AUTO_ASSIGNMENT_SOURCE
+  ));
+  const hasStaleAssignment = activeRows.some((assignment) => String(assignment.class_id ?? assignment.classId) !== campusClass.id);
+  return {
+    changed: !hasClassGroup || !hasCurrentAssignment || hasStaleAssignment,
+    incomplete: false
+  };
+}
+
 async function syncAllClasses(options = {}) {
   if (!mysqlConfigured) return memoryStore.syncAllClasses(options);
   const [users] = await getPool().execute("SELECT * FROM students WHERE role = 'student'");
@@ -459,7 +497,9 @@ async function syncAllClasses(options = {}) {
     summary.checked += 1;
     try {
       if (options.dryRun) {
-        if (![user.school, user.college, user.className].every((value) => String(value || "").trim())) summary.incomplete += 1;
+        const result = await previewMysqlStudentSync(user);
+        if (result.changed) summary.changed += 1;
+        if (result.incomplete) summary.incomplete += 1;
       } else {
         const result = await syncStudentMysql(user);
         if (result.changed) summary.changed += 1;

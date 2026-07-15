@@ -1291,7 +1291,7 @@ async function handleApi(req, res) {
 
     if (route === "POST /api/admin/students") {
       const body = await parseBody(req);
-      const existing = await studentStore.findByStudentNo(String(body.studentNo || ""));
+      const existing = await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
       if (!isSuperAdmin && existing && !["student", "teacher"].includes(existing.role)) {
         sendError(res, 403, "普通管理员不能修改其他管理员");
         return;
@@ -1309,7 +1309,7 @@ async function handleApi(req, res) {
 
     if (route === "PUT /api/admin/students/status") {
       const body = await parseBody(req);
-      const target = await studentStore.findByStudentNo(String(body.studentNo || ""));
+      const target = await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
       if (!target) {
         sendError(res, 404, "未找到该账号");
         return;
@@ -1323,7 +1323,7 @@ async function handleApi(req, res) {
         return;
       }
       const status = body.status === "disabled" ? "disabled" : "active";
-      const result = await studentStore.setStudentStatus(String(body.studentNo || ""), status);
+      const result = await studentStore.setStudentStatus({ school: String(body.school || ""), studentNo: String(body.studentNo || "") }, status);
       if (!result.updated) {
         sendError(res, 404, "未找到该学号");
         return;
@@ -1340,7 +1340,7 @@ async function handleApi(req, res) {
         return;
       }
       const body = await parseBody(req);
-      const target = await studentStore.findByStudentNo(String(body.studentNo || ""));
+      const target = await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
       if (!target) {
         sendError(res, 404, "未找到该账号");
         return;
@@ -1354,7 +1354,7 @@ async function handleApi(req, res) {
         sendError(res, 400, "不能降级当前登录的总管理员账号");
         return;
       }
-      const result = await studentStore.setStudentRole(target.studentNo, role);
+      const result = await studentStore.setStudentRole({ school: target.school, studentNo: target.studentNo }, role);
       await studentStore.logAdminAction("set_student_role", target.studentNo, { operator: adminUser.studentNo, role });
       clearIdentitySchoolCache();
       sendJson(res, 200, { updated: result.updated, role, syncError: result.syncError || null });
@@ -1363,7 +1363,7 @@ async function handleApi(req, res) {
 
     if (route === "POST /api/admin/students/password-reset") {
       const body = await parseBody(req);
-      const target = await studentStore.findByStudentNo(String(body.studentNo || ""));
+      const target = await studentStore.findByStudentNo({ school: String(body.school || ""), studentNo: String(body.studentNo || "") });
       if (!target) {
         sendError(res, 404, "未找到该账号");
         return;
