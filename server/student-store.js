@@ -275,7 +275,7 @@ async function listStudents({ query = "", status = "", role = "", limit = 50, of
   const safeLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
   const safeOffset = Math.max(0, Number(offset) || 0);
   const [rows] = await getPool().execute(
-    `SELECT * FROM students ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} ORDER BY updated_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+    `SELECT * FROM students ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} ORDER BY school ASC, college ASC, class_name ASC, CASE role WHEN 'student' THEN 0 WHEN 'teacher' THEN 1 WHEN 'admin' THEN 2 WHEN 'super_admin' THEN 3 ELSE 4 END ASC, name ASC, student_no ASC LIMIT ${safeLimit} OFFSET ${safeOffset}`,
     values
   );
   return rows.map(normalizeStudent);
