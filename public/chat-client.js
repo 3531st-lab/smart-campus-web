@@ -2,6 +2,7 @@
   const VISIBLE_POLL_MS = 5000;
   const HIDDEN_POLL_MS = 30000;
   const MAX_RECONNECT_MS = 30000;
+  const MAX_CACHED_MESSAGES = 220;
 
   function requestId() {
     if (global.crypto?.randomUUID) return `chat:${global.crypto.randomUUID()}`;
@@ -20,6 +21,10 @@
       events.set(`${event.groupId}:${event.sequence}:${event.messageId || ""}`, event);
     });
     return [...events.values()].sort((left, right) => number(left.sequence) - number(right.sequence));
+  }
+
+  function boundedMessages(items = []) {
+    return items.slice(Math.max(0, items.length - MAX_CACHED_MESSAGES));
   }
 
   global.createChatClient = function createChatClient({ api, onEvent = () => {} }) {
@@ -51,7 +56,7 @@
         const current = merged.get(String(next.id));
         merged.set(String(next.id), { ...current, ...next });
       });
-      messages = [...merged.values()].sort((left, right) => number(left.sequence) - number(right.sequence) || String(left.createdAt).localeCompare(String(right.createdAt)));
+      messages = boundedMessages([...merged.values()].sort((left, right) => number(left.sequence) - number(right.sequence) || String(left.createdAt).localeCompare(String(right.createdAt))));
       lastSequence = messages.reduce((highest, message) => Math.max(highest, number(message.sequence)), lastSequence);
       return messages;
     }
@@ -61,9 +66,9 @@
       return result.groups || [];
     }
 
-    async function loadMessages({ groupId = activeGroupId, after = 0, silent = false } = {}) {
+    async function loadMessages({ groupId = activeGroupId, after = 0, silent = false, tail = false } = {}) {
       if (!groupId) return [];
-      const result = await api(`/api/chat/groups/${encodeURIComponent(groupId)}/messages?after=${encodeURIComponent(after)}&limit=100`);
+      const result = await api(`/api/chat/groups/${encodeURIComponent(groupId)}/messages?after=${encodeURIComponent(after)}&limit=100${tail ? "&tail=1" : ""}`);
       if (String(groupId) !== String(activeGroupId)) return [];
       mergeMessages(result.messages || []);
       if (!silent) emit("messages");
@@ -77,7 +82,7 @@
       lastSequence = 0;
       realtimeEvents = [];
       emit("group-selected");
-      await loadMessages({ after: 0 });
+      await loadMessages({ after: 0, tail: true });
       await markRead();
       schedulePoll();
       void openRealtime();
@@ -236,5 +241,5 @@
     document.addEventListener("visibilitychange", onVisibilityChange);
     return { loadGroups, selectGroup, loadMessages, send, retry, markRead, destroy, get activeGroupId() { return activeGroupId; }, get messages() { return [...messages]; } };
   };
-  global.CampusChatRealtime = { mergeEvents };
+  global.CampusChatRealtime = { mergeEvents, boundedMessages };
 })(window);

@@ -291,7 +291,8 @@ async function handleChatRoute(context) {
         groupId: messageGroupId,
         viewerId: user.id,
         after: url.searchParams.get("after") || 0,
-        limit: url.searchParams.get("limit") || 50
+        limit: url.searchParams.get("limit") || 50,
+        tail: url.searchParams.get("tail") === "1"
       });
       sendJson(res, 200, page);
       return true;

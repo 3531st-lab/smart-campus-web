@@ -786,14 +786,14 @@ function createMemoryChatStore(seed = {}, options = {}) {
     return safeMessage(created, account, found.type === "class" ? classAssignment(found, account.id) : null, sticker);
   }
 
-  async function listMessages({ groupId, viewerId, after = 0, limit = 50 }) {
+  async function listMessages({ groupId, viewerId, after = 0, limit = 50, tail = false }) {
     const { found } = await messageAccess(groupId, viewerId);
     const cursor = normalizeAfter(after);
     const pageSize = normalizeLimit(limit);
     const matching = store.data.messages
       .filter((item) => String(item.groupId ?? item.group_id) === String(found.id) && Number(item.sequence) > cursor)
       .sort((left, right) => Number(left.sequence) - Number(right.sequence));
-    const page = matching.slice(0, pageSize);
+    const page = tail ? matching.slice(-pageSize) : matching.slice(0, pageSize);
     return {
       messages: page.map((item) => messageProjection(item, found)),
       nextSequence: page.at(-1)?.sequence || cursor,
@@ -1580,7 +1580,7 @@ function createMysqlChatStore(pool, options = {}) {
     }
   });
 
-  const listMessages = mysqlPublic(async ({ groupId, viewerId, after = 0, limit = 50 }) => {
+  const listMessages = mysqlPublic(async ({ groupId, viewerId, after = 0, limit = 50, tail = false }) => {
     const cursor = normalizeAfter(after);
     const pageSize = normalizeLimit(limit);
     const connection = await pool.getConnection();
@@ -1597,12 +1597,12 @@ function createMysqlChatStore(pool, options = {}) {
         LEFT JOIN chat_stickers cs ON cs.id = m.sticker_id
         LEFT JOIN chat_media cm ON cm.id = cs.media_id
         WHERE m.group_id = ? AND m.sequence > ?
-        ORDER BY m.sequence ASC
+        ORDER BY m.sequence ${tail ? "DESC" : "ASC"}
         LIMIT ?
       `, [access.found.classId, access.found.id, cursor, pageSize + 1]);
       await connection.commit();
       const hasMore = rows.length > pageSize;
-      const page = rows.slice(0, pageSize);
+      const page = tail ? rows.slice(0, pageSize).reverse() : rows.slice(0, pageSize);
       return {
         messages: page.map(mysqlMessageProjection),
         nextSequence: page.at(-1)?.sequence || cursor,

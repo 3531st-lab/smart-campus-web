@@ -65,3 +65,9 @@ docs/               接口契约与后续开发路线
 
 - 接口草案见 [docs/api-contract.md](docs/api-contract.md)。
 - 安卓 Java 调用示例见 [docs/android-java-client.md](docs/android-java-client.md)。
+
+## Campus chat performance
+
+- Group startup requests the latest message page by cursor and never uses SQL offset pagination.
+- The browser keeps at most 220 active chat messages and renders at most 160 rows at once, while the database retains the complete audit history.
+- Realtime chat remains optional: when `CHAT_REALTIME_URL` is unavailable, the client falls back to visibility-aware polling.

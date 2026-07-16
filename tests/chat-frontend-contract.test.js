@@ -47,10 +47,20 @@ test("chat client supports resilient optimistic delivery and visibility-aware po
   assert.match(client, /30000/);
   assert.match(client, /mergeMessages/);
   assert.match(client, /async function markRead/);
+  assert.match(client, /MAX_CACHED_MESSAGES/);
+  assert.match(client, /tail=1/);
 });
 
 test("mobile chat keeps a single active pane instead of forcing a horizontal layout", () => {
   const css = read("public/assets/chat.css");
   assert.match(css, /@media\s*\(max-width:\s*760px\)/);
   assert.match(css, /data-mobile-pane/);
+});
+
+test("chat view caps render work and keeps dialog focusable", () => {
+  const page = read("public/chat-page.js");
+  const css = read("public/assets/chat.css");
+  assert.match(page, /MAX_RENDERED_MESSAGES/);
+  assert.match(page, /tabindex="-1"/);
+  assert.match(css, /chat-message-window-notice/);
 });

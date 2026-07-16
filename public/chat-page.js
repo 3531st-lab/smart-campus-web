@@ -1,5 +1,10 @@
 (function attachCampusChatPage(global) {
+  const MAX_RENDERED_MESSAGES = 160;
   const safe = (value, escapeHtml) => escapeHtml(String(value ?? ""));
+
+  function boundedMessages(messages = []) {
+    return messages.slice(Math.max(0, messages.length - MAX_RENDERED_MESSAGES));
+  }
 
   function avatar(name, escapeHtml) {
     return safe(String(name || "群").trim().slice(0, 1) || "群", escapeHtml);
@@ -108,9 +113,9 @@
           }
 
           function openModal(content, label) {
-            modalRoot.innerHTML = `<div class="chat-modal-backdrop" data-chat-modal-close></div><section class="chat-modal" role="dialog" aria-modal="true" aria-label="${safe(label, escapeHtml)}">${content}</section>`;
+            modalRoot.innerHTML = `<div class="chat-modal-backdrop" data-chat-modal-close></div><section class="chat-modal" role="dialog" aria-modal="true" aria-label="${safe(label, escapeHtml)}" tabindex="-1">${content}</section>`;
             modalRoot.hidden = false;
-            modalRoot.querySelector("input, textarea, button")?.focus();
+            modalRoot.querySelector("input, textarea, button")?.focus() || modalRoot.querySelector(".chat-modal")?.focus();
           }
 
           async function refreshGroups(preferredId = activeGroup?.id) {
@@ -290,8 +295,9 @@
           function renderMessages(messages) {
             if (!activeGroup) return;
             const wasNearBottom = messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight < 72;
+            const rendered = boundedMessages(messages);
             messagesNode.innerHTML = messages.length
-              ? messages.map((message) => messageMarkup(message, user?.id, escapeHtml)).join("")
+              ? `${messages.length > rendered.length ? '<p class="chat-message-window-notice" role="status">为保持群聊流畅，已折叠较早消息。</p>' : ""}${rendered.map((message) => messageMarkup(message, user?.id, escapeHtml)).join("")}`
               : `<div class="chat-empty-stage"><span>${iconSvg("news")}</span><h2>还没有消息</h2><p>和同学打个招呼，开始第一段对话吧。</p></div>`;
             if (keepBottom || wasNearBottom) messagesNode.scrollTop = messagesNode.scrollHeight;
             keepBottom = false;
@@ -406,7 +412,7 @@
             const pending = client.messages.find((message) => message.clientRequestId === row?.dataset.chatClientId);
             if (pending) client.retry(pending).catch((error) => toast(error.message || "重新发送失败"));
           });
-          messagesNode.addEventListener("scroll", () => { keepBottom = messagesNode.scrollTop + messagesNode.clientHeight >= messagesNode.scrollHeight - 72; });
+          messagesNode.addEventListener("scroll", () => { keepBottom = messagesNode.scrollTop + messagesNode.clientHeight >= messagesNode.scrollHeight - 72; }, { passive: true });
           input.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
               event.preventDefault();
