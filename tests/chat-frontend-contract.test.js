@@ -64,3 +64,16 @@ test("chat view caps render work and keeps dialog focusable", () => {
   assert.match(page, /tabindex="-1"/);
   assert.match(css, /chat-message-window-notice/);
 });
+
+test("chat sticker panel can be explicitly hidden and dismissed through common controls", () => {
+  const html = read("public/index.html");
+  const page = read("public/chat-page.js");
+  const css = read("public/assets/chat.css");
+
+  assert.match(html, /\/assets\/chat\.css\?v=\d+/);
+  assert.match(html, /\/chat-page\.js\?v=\d+/);
+  assert.match(page, /function closeStickerPanel\(\)/);
+  assert.match(page, /data-chat-sticker-close/);
+  assert.match(page, /onStickerEscape/);
+  assert.match(css, /\.chat-sticker-panel\[hidden\]\s*\{\s*display:\s*none/);
+});

@@ -522,36 +522,166 @@ async function previewMysqlStudentSync(user) {
   };
 }
 
+function mysqlChunks(rows, size = 250) {
+  const chunks = [];
+  for (let index = 0; index < rows.length; index += size) chunks.push(rows.slice(index, index + size));
+  return chunks;
+}
+
+function collectClassSyncStudents(rows) {
+  const students = rows.map((row) => ({
+    id: String(row.id),
+    school: String(row.school || "").trim(),
+    college: String(row.college || "").trim(),
+    className: String(row.class_name || "").trim(),
+    role: row.role,
+    status: row.status
+  }));
+  const active = students.filter((student) => (
+    student.status === "active" && student.school && student.college && student.className
+  ));
+  const classes = new Map();
+  active.forEach((student) => {
+    const values = { school: student.school, college: student.college, className: student.className };
+    classes.set(classKey(values), values);
+  });
+  return {
+    students,
+    active,
+    classes,
+    incomplete: students.length - active.length
+  };
+}
+
+async function selectMysqlClassesByKeys(connection, keys) {
+  const rows = [];
+  for (const chunk of mysqlChunks(keys)) {
+    const [found] = await connection.execute(
+      `SELECT * FROM campus_classes WHERE class_key IN (${chunk.map(() => "?").join(", ")})`,
+      chunk
+    );
+    rows.push(...found);
+  }
+  return rows;
+}
+
+async function syncAllClassesMysql({ dryRun = false } = {}) {
+  const connection = dryRun ? getPool() : await getPool().getConnection();
+  try {
+    const [studentRows] = await connection.execute(
+      "SELECT id, school, college, class_name, status FROM students WHERE role = 'student'"
+    );
+    const source = collectClassSyncStudents(studentRows);
+    const keys = [...source.classes.keys()];
+    const existingClasses = keys.length ? await selectMysqlClassesByKeys(connection, keys) : [];
+    const classesByKey = new Map(existingClasses.map((row) => [String(row.class_key), classRow(row)]));
+    const existingIds = existingClasses.map((row) => String(row.id));
+    const groupsByClassId = new Map();
+    for (const chunk of mysqlChunks(existingIds)) {
+      const [groups] = await connection.execute(
+        `SELECT * FROM chat_groups WHERE type = 'class' AND class_id IN (${chunk.map(() => "?").join(", ")})`,
+        chunk
+      );
+      groups.forEach((group) => groupsByClassId.set(String(group.class_id), groupRow(group)));
+    }
+    const assignmentsByUser = new Map();
+    const [assignments] = await connection.execute(`
+      SELECT ca.user_id, ca.class_id
+      FROM class_assignments ca
+      INNER JOIN students s ON s.id = ca.user_id
+      WHERE ca.active = 1 AND s.role = 'student' AND s.status = 'active'
+    `);
+    assignments.forEach((assignment) => {
+      const userId = String(assignment.user_id);
+      assignmentsByUser.set(userId, [...(assignmentsByUser.get(userId) || []), String(assignment.class_id)]);
+    });
+
+    let changed = 0;
+    source.active.forEach((student) => {
+      const campusClass = classesByKey.get(classKey(student));
+      const group = campusClass && groupsByClassId.get(campusClass.id);
+      const assignments = assignmentsByUser.get(student.id) || [];
+      if (!campusClass || !group || campusClass.groupId !== group.id || !assignments.includes(campusClass.id) || assignments.some((id) => id !== campusClass.id)) changed += 1;
+    });
+    if (dryRun) return { checked: source.students.length, changed, incomplete: source.incomplete, errors: [], dryRun: true };
+
+    await connection.beginTransaction();
+    for (const chunk of mysqlChunks([...source.classes.entries()], 100)) {
+      const values = chunk.flatMap(([key, campusClass]) => [
+        `class-${crypto.randomUUID()}`, campusClass.school, campusClass.college, campusClass.className, key
+      ]);
+      await connection.execute(`
+        INSERT INTO campus_classes (id, school, college, class_name, class_key, status)
+        VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, 'active')").join(", ")}
+        ON DUPLICATE KEY UPDATE status = 'active'
+      `, values);
+    }
+
+    const allClasses = keys.length ? (await selectMysqlClassesByKeys(connection, keys)).map(classRow) : [];
+    for (const chunk of mysqlChunks(allClasses, 100)) {
+      await connection.execute(`
+        INSERT INTO chat_groups (id, type, name, class_id, status)
+        VALUES ${chunk.map(() => "(?, 'class', ?, ?, 'active')").join(", ")}
+        ON DUPLICATE KEY UPDATE name = VALUES(name), status = 'active'
+      `, chunk.flatMap((campusClass) => [
+        `class-group-${crypto.randomUUID()}`, campusClass.className, campusClass.id
+      ]));
+    }
+    const groupsAfterWrite = new Map();
+    for (const chunk of mysqlChunks(allClasses.map((campusClass) => campusClass.id))) {
+      const [groups] = await connection.execute(
+        `SELECT id, class_id FROM chat_groups WHERE type = 'class' AND class_id IN (${chunk.map(() => "?").join(", ")})`,
+        chunk
+      );
+      groups.forEach((group) => groupsAfterWrite.set(String(group.class_id), String(group.id)));
+    }
+    for (const chunk of mysqlChunks(allClasses, 100)) {
+      const values = chunk.flatMap((campusClass) => [campusClass.id, groupsAfterWrite.get(campusClass.id)]);
+      values.push(...chunk.map((campusClass) => campusClass.id));
+      await connection.execute(
+        `UPDATE campus_classes SET group_id = CASE id ${chunk.map(() => "WHEN ? THEN ?").join(" ")} ELSE group_id END WHERE id IN (${chunk.map(() => "?").join(", ")})`,
+        values
+      );
+    }
+
+    const classesAfterWrite = new Map(allClasses.map((campusClass) => [campusClass.classKey, campusClass]));
+    const expectedAssignments = source.active.map((student) => [
+      classesAfterWrite.get(classKey(student)).id, student.id, AUTO_ASSIGNMENT_SOURCE
+    ]);
+    for (const chunk of mysqlChunks(expectedAssignments)) {
+      await connection.execute(`
+        INSERT INTO class_assignments (class_id, user_id, duty, source, active)
+        VALUES ${chunk.map(() => "(?, ?, 'member', ?, 1)").join(", ")}
+        ON DUPLICATE KEY UPDATE active = 1
+      `, chunk.flat());
+    }
+    await connection.execute(`
+      UPDATE class_assignments ca
+      INNER JOIN students s ON s.id = ca.user_id
+      INNER JOIN campus_classes cc ON cc.school = s.school AND cc.college = s.college AND cc.class_name = s.class_name
+      SET ca.active = 0
+      WHERE ca.active = 1 AND s.role = 'student' AND s.status = 'active'
+        AND s.school <> '' AND s.college <> '' AND s.class_name <> '' AND ca.class_id <> cc.id
+    `);
+    await connection.execute(`
+      UPDATE class_assignments ca INNER JOIN students s ON s.id = ca.user_id
+      SET ca.active = 0
+      WHERE ca.active = 1 AND s.role = 'student'
+        AND (s.status <> 'active' OR s.school = '' OR s.college = '' OR s.class_name = '')
+    `);
+    await connection.commit();
+    return { checked: source.students.length, changed, incomplete: source.incomplete, errors: [], dryRun: false };
+  } catch (error) {
+    if (!dryRun) await connection.rollback();
+    throw error;
+  } finally {
+    if (!dryRun) connection.release();
+  }
+}
+
 async function syncAllClasses(options = {}) {
   if (!mysqlConfigured) return memoryStore.syncAllClasses(options);
-  const [users] = await getPool().execute("SELECT * FROM students WHERE role = 'student'");
-  const summary = { checked: 0, changed: 0, incomplete: 0, errors: [], dryRun: Boolean(options.dryRun) };
-  for (const row of users) {
-    const user = {
-      id: row.id,
-      school: row.school,
-      college: row.college,
-      className: row.class_name,
-      role: row.role,
-      status: row.status
-    };
-    summary.checked += 1;
-    try {
-      if (options.dryRun) {
-        const result = await previewMysqlStudentSync(user);
-        if (result.changed) summary.changed += 1;
-        if (result.incomplete) summary.incomplete += 1;
-      } else {
-        const result = await syncStudentMysql(user);
-        if (result.changed) summary.changed += 1;
-        if (result.incomplete) summary.incomplete += 1;
-      }
-    } catch (error) {
-      console.error("class synchronization failed", { userId: user.id, error: error.message });
-      summary.errors.push({ userId: user.id, message: "班级同步失败", retryable: true });
-    }
-  }
-  return summary;
+  return syncAllClassesMysql(options);
 }
 
 module.exports = {

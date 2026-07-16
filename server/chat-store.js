@@ -41,6 +41,15 @@ function userIdOf(userOrId) {
   return String(typeof userOrId === "object" ? userOrId?.id : userOrId || "");
 }
 
+function sameClassIdentity(account, campusClass) {
+  const accountClass = String(account?.className ?? account?.class_name ?? "").trim();
+  const className = String(campusClass?.className ?? campusClass?.class_name ?? "").trim();
+  return Boolean(accountClass)
+    && String(account?.school || "").trim() === String(campusClass?.school || "").trim()
+    && String(account?.college || "").trim() === String(campusClass?.college || "").trim()
+    && accountClass === className;
+}
+
 function defaultInviteToken() {
   return crypto.randomBytes(INVITE_TOKEN_BYTES).toString("base64url");
 }
@@ -404,13 +413,18 @@ function createMemoryChatStore(seed = {}, options = {}) {
     const classIds = new Set(store.data.assignments
       .filter((item) => String(item.userId ?? item.user_id) === String(userId) && item.active !== false)
       .map((item) => String(item.classId ?? item.class_id)));
+    if (PLATFORM_ROLES.has(account.role)) {
+      store.data.classes
+        .filter((campusClass) => campusClass.status !== "disabled" && sameClassIdentity(account, campusClass))
+        .forEach((campusClass) => classIds.add(String(campusClass.id)));
+    }
     const memberGroupIds = new Set(store.data.members
       .filter((item) => String(item.userId ?? item.user_id) === String(userId) && item.active !== false)
       .map((item) => String(item.groupId ?? item.group_id)));
     return store.data.groups
       .filter((item) => item.status !== "disabled")
       .filter((item) => (
-        (item.type === "class" && !PLATFORM_ROLES.has(account.role) && classIds.has(String(item.classId ?? item.class_id)))
+        (item.type === "class" && classIds.has(String(item.classId ?? item.class_id)))
         || (item.type !== "class" && memberGroupIds.has(String(item.id)))
       ))
       .map(safeGroup)
@@ -956,7 +970,7 @@ function createMysqlChatStore(pool, options = {}) {
 
   async function activeUser(userInput, connection = pool) {
     const userId = userIdOf(userInput);
-    const [rows] = await connection.execute("SELECT id, name, role, status, avatar_color FROM students WHERE id = ?", [userId]);
+    const [rows] = await connection.execute("SELECT id, name, role, status, avatar_color, school, college, class_name FROM students WHERE id = ?", [userId]);
     return requiredActiveUser(rows, userId);
   }
 
@@ -1042,10 +1056,17 @@ function createMysqlChatStore(pool, options = {}) {
       LEFT JOIN chat_members cm ON cm.group_id = cg.id AND cm.user_id = ? AND cm.active = 1
       LEFT JOIN class_assignments ca ON ca.class_id = cg.class_id AND ca.user_id = ? AND ca.active = 1
       WHERE cg.status <> 'disabled'
-        AND ((cg.type = 'class' AND ca.user_id IS NOT NULL AND ? NOT IN ('admin','super_admin'))
+        AND ((cg.type = 'class' AND (
+            (ca.user_id IS NOT NULL AND ? NOT IN ('admin','super_admin'))
+            OR (? IN ('admin','super_admin') AND EXISTS (
+              SELECT 1 FROM campus_classes own_class
+              WHERE own_class.id = cg.class_id AND own_class.status = 'active'
+                AND own_class.school = ? AND own_class.college = ? AND own_class.class_name = ?
+            ))
+          ))
           OR (cg.type <> 'class' AND cm.user_id IS NOT NULL))
       ORDER BY CASE WHEN cg.type = 'class' THEN 0 ELSE 1 END, cg.name, cg.id
-    `, [account.id, account.id, account.role]);
+    `, [account.id, account.id, account.role, account.role, account.school, account.college, account.class_name]);
     return rows.map(safeGroup);
   });
 
@@ -1539,7 +1560,12 @@ function createMysqlChatStore(pool, options = {}) {
       // All message writes serialize on the group row before member and message rows.
       const access = await mysqlMessageAccess(groupId, senderId, connection, { writable: true });
       const sticker = normalizedStickerId ? await mysqlStickerForUser(normalizedStickerId, access.account.id, connection) : null;
-      const [existingRows] = await connection.execute(`
+      // TiDB rejects a NULL prepared-statement parameter in this JOIN for ordinary groups.
+      // Ordinary groups have no class, so an empty key safely yields no class-duty match.
+      const messageClassId = String(access.found.classId || "");
+      // TiDB rejects this multi-join statement through the binary prepared-statement protocol.
+      // mysql2's query() still safely escapes every bound value while avoiding that protocol path.
+      const [existingRows] = await connection.query(`
         SELECT m.*, s.id AS sender_id, s.name AS sender_name, s.role AS sender_role,
           s.avatar_color AS sender_avatar_color, ca.duty AS class_duty,
           cs.name AS sticker_name, cm.public_url AS sticker_public_url, cm.mime_type AS sticker_mime_type
@@ -1550,7 +1576,7 @@ function createMysqlChatStore(pool, options = {}) {
         LEFT JOIN chat_media cm ON cm.id = cs.media_id
         WHERE m.group_id = ? AND m.sender_id = ? AND m.client_request_id = ?
         FOR UPDATE
-      `, [access.found.classId, access.found.id, access.account.id, requestId]);
+      `, [messageClassId, access.found.id, access.account.id, requestId]);
       if (existingRows[0]) {
         await connection.commit();
         return mysqlMessageProjection(existingRows[0]);
@@ -1568,8 +1594,8 @@ function createMysqlChatStore(pool, options = {}) {
       const id = `chat-message-${crypto.randomUUID()}`;
       const createdAt = new Date().toISOString();
       await connection.execute(
-        "INSERT INTO chat_messages (id, group_id, sequence, sender_id, client_request_id, text, sticker_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [id, access.found.id, sequence, access.account.id, requestId, normalizedText, normalizedStickerId || null, createdAt]
+        "INSERT INTO chat_messages (id, group_id, sequence, sender_id, client_request_id, text, sticker_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [id, access.found.id, sequence, access.account.id, requestId, normalizedText, normalizedStickerId || null]
       );
       await connection.commit();
       return safeMessage({ id, group_id: access.found.id, sequence, client_request_id: requestId, text: normalizedText, sticker_id: normalizedStickerId || null, created_at: createdAt }, access.account, access.assignment, sticker);
@@ -1589,7 +1615,10 @@ function createMysqlChatStore(pool, options = {}) {
     try {
       await connection.beginTransaction();
       const access = await mysqlMessageAccess(groupId, viewerId, connection);
-      const [rows] = await connection.execute(`
+      // See createMessage: use a concrete no-match key for ordinary groups on TiDB.
+      const messageClassId = String(access.found.classId || "");
+      // See createMessage: use the text protocol for this TiDB-incompatible multi-join query.
+      const [rows] = await connection.query(`
         SELECT m.*, s.id AS sender_id, s.name AS sender_name, s.role AS sender_role,
           s.avatar_color AS sender_avatar_color, ca.duty AS class_duty,
           cs.name AS sticker_name, cm.public_url AS sticker_public_url, cm.mime_type AS sticker_mime_type
@@ -1601,7 +1630,7 @@ function createMysqlChatStore(pool, options = {}) {
         WHERE m.group_id = ? AND m.sequence > ? AND (? = 0 OR m.sequence < ?)
         ORDER BY m.sequence ${tail ? "DESC" : "ASC"}
         LIMIT ?
-      `, [access.found.classId, access.found.id, cursor, beforeCursor, beforeCursor, pageSize + 1]);
+      `, [messageClassId, access.found.id, cursor, beforeCursor, beforeCursor, pageSize + 1]);
       await connection.commit();
       const hasMore = rows.length > pageSize;
       const page = tail ? rows.slice(0, pageSize).reverse() : rows.slice(0, pageSize);

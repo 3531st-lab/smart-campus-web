@@ -155,6 +155,7 @@
 .chat-composer-foot button { min-width: 72px; height: 32px; border: 1px solid rgba(80, 214, 236, 0.54); border-radius: 8px; background: linear-gradient(135deg, #2c70e5, #159c9c); color: #fff; font-weight: 800; }
 .chat-composer-foot button:disabled { cursor: not-allowed; opacity: 0.45; }
 .chat-sticker-panel { display: grid; gap: 8px; max-height: 228px; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(4, 19, 48, 0.62); }
+.chat-sticker-panel[hidden] { display: none; }
 .chat-sticker-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
 .chat-sticker-panel-head strong { color: var(--text); }
 .chat-sticker-panel-head button { border: 0; background: transparent; color: var(--cyan); font: inherit; font-weight: 700; }

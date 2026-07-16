@@ -19,7 +19,7 @@ function fixtures(options = {}) {
     { id: "student-a", name: "甲同学", role: "student", status: "active" },
     { id: "student-b", name: "乙同学", role: "student", status: "active" },
     { id: "teacher-a", name: "甲老师", role: "teacher", status: "active" },
-    { id: "platform-admin", name: "平台管理员", role: "admin", status: "active" },
+    { id: "platform-admin", name: "平台管理员", role: "admin", status: "active", school: "泰州学院", college: "经管学院", className: "24数字经济" },
     { id: "owner", name: "群主", role: "student", status: "active" },
     { id: "group-admin", name: "群管理员", role: "student", status: "active" },
     { id: "member", name: "群成员", role: "student", status: "active" },
@@ -34,7 +34,6 @@ function fixtures(options = {}) {
   const classAssignments = [
     { id: "ca-1", classId: "class-a", userId: "student-a", duty: "monitor", source: "student_identity", active: true },
     { id: "ca-2", classId: "class-a", userId: "teacher-a", duty: "subject_teacher", source: "teacher_assignment", active: true },
-    { id: "ca-3", classId: "class-a", userId: "platform-admin", duty: "class_admin", source: "student_identity", active: true },
     { id: "ca-4", classId: "class-b", userId: "student-b", duty: "member", source: "student_identity", active: true }
   ];
   const chatGroups = [
@@ -69,8 +68,9 @@ function createMysqlHarness(initial = {}) {
       { id: "invitee", name: "Invitee", role: "student", status: "active" },
       { id: "outsider", name: "Outsider", role: "student", status: "active" }
     ],
-    groups: initial.groups || [{ id: "group-a", type: "custom", public_no: "1234567890", name: "Test", status: "active", frozen: 0 }],
+    groups: initial.groups || [{ id: "group-a", type: "custom", public_no: "1234567890", name: "Test", status: "active", frozen: 0, next_message_sequence: 0 }],
     members: initial.members || [{ id: "owner-member", group_id: "group-a", user_id: "owner", role: "owner", active: 1, joined_via: "created" }],
+    messages: initial.messages || [],
     invites: initial.invites || [],
     requests: initial.requests || [],
     tokens: initial.tokens || []
@@ -81,6 +81,7 @@ function createMysqlHarness(initial = {}) {
   function resultRows(sql, params) {
     if (/FROM students WHERE id/.test(sql)) return state.users.filter((row) => String(row.id) === String(params[0]));
     if (/FROM chat_groups WHERE id/.test(sql)) return state.groups.filter((row) => String(row.id) === String(params[0]));
+    if (/FROM chat_messages m/.test(sql)) return state.messages;
     if (/FROM chat_members/.test(sql)) {
       return state.members.filter((row) => (
         String(row.group_id) === String(params[0])
@@ -149,6 +150,27 @@ function createMysqlHarness(initial = {}) {
       request.pending_key = null;
       return [{ affectedRows: 1 }];
     }
+    if (/UPDATE chat_groups SET next_message_sequence/.test(sql)) {
+      const group = state.groups.find((row) => String(row.id) === String(params[0]));
+      group.next_message_sequence = Number(group.next_message_sequence || 0) + 1;
+      return [{ affectedRows: 1 }];
+    }
+    if (/INSERT INTO chat_messages/.test(sql)) {
+      if (params.length > 7 && /T/.test(String(params[7] || ""))) {
+        throw new Error(`Incorrect datetime value: '${params[7]}' for column 'created_at'`);
+      }
+      state.messages.push({
+        id: params[0],
+        group_id: params[1],
+        sequence: params[2],
+        sender_id: params[3],
+        client_request_id: params[4],
+        text: params[5],
+        sticker_id: params[6] || null,
+        created_at: new Date().toISOString()
+      });
+      return [{ affectedRows: 1 }];
+    }
     throw new Error(`Unexpected SQL: ${sql}`);
   }
 
@@ -167,7 +189,8 @@ function createMysqlHarness(initial = {}) {
       snapshot = null;
     },
     release() { events.push({ type: "release" }); },
-    execute
+    execute,
+    query: execute
   };
   return {
     state,
@@ -196,6 +219,8 @@ test("class groups deny cross-class users but allow platform governance without 
   const { store, users } = fixtures();
 
   await assert.rejects(() => store.getGroupForUser("class-group-a", users["student-b"]), /无权访问/);
+  const groups = await store.listUserGroups(users["platform-admin"].id);
+  assert.deepEqual(groups.map((group) => group.id), ["class-group-a"]);
   const governed = await store.getGroupForUser("class-group-a", users["platform-admin"]);
   assert.equal(governed.governance, true);
   assert.equal(governed.membership, null);
@@ -527,6 +552,34 @@ test("MySQL rejects disabled groups even when a stale frozen flag is also presen
   const store = createMysqlChatStore(pool);
 
   await assert.rejects(() => store.getGroupForUser("group-a", "owner"), /群聊不可用/);
+});
+
+test("MySQL custom-group message reads use a concrete no-match class key", async () => {
+  const harness = createMysqlHarness();
+  const store = createMysqlChatStore(harness.pool);
+
+  const page = await store.listMessages({ groupId: "group-a", viewerId: "owner", tail: true });
+  assert.deepEqual(page.messages, []);
+  const messageQuery = harness.events.find((event) => event.type === "sql" && /FROM chat_messages m/.test(event.sql));
+  assert.equal(messageQuery.params[0], "");
+  assert.notEqual(messageQuery.params[0], null);
+});
+
+test("MySQL message writes let the database generate TIMESTAMP values", async () => {
+  const harness = createMysqlHarness();
+  const store = createMysqlChatStore(harness.pool);
+
+  const message = await store.createMessage({
+    groupId: "group-a",
+    senderId: "owner",
+    clientRequestId: "message-request-0001",
+    text: "你好"
+  });
+
+  assert.equal(message.text, "你好");
+  const insert = harness.events.find((event) => event.type === "sql" && /INSERT INTO chat_messages/.test(event.sql));
+  assert.doesNotMatch(insert.sql, /created_at/);
+  assert.equal(insert.params.length, 7);
 });
 
 test("MySQL invite replay and expired invites do not reactivate members and rollback cleanly", async () => {

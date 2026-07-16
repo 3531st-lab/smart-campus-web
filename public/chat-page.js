@@ -334,6 +334,10 @@
             stickerPanel.innerHTML = `<div class="chat-sticker-panel-head"><strong>基础表情</strong><button type="button" data-chat-sticker-close>关闭</button></div><div class="chat-sticker-grid">${unicode || '<span>暂无基础表情</span>'}</div><div class="chat-sticker-panel-head"><strong>我的图片表情</strong><button type="button" data-chat-sticker-upload>上传</button></div><div class="chat-sticker-grid images">${images || '<span class="chat-sticker-empty">上传的图片表情仅你自己可见</span>'}</div>`;
           }
 
+          function closeStickerPanel() {
+            stickerPanel.hidden = true;
+          }
+
           async function toggleStickerPanel() {
             if (stickerPanel.hidden) {
               try {
@@ -341,8 +345,16 @@
                 renderStickers();
                 stickerPanel.hidden = false;
               } catch (error) { toast(error.message || "表情加载失败"); }
-            } else stickerPanel.hidden = true;
+            } else closeStickerPanel();
           }
+
+          function onStickerEscape(event) {
+            if (event.key !== "Escape" || stickerPanel.hidden) return;
+            closeStickerPanel();
+            input.focus();
+          }
+
+          document.addEventListener("keydown", onStickerEscape);
 
           async function selectGroup(groupId) {
             const selected = groups.find((group) => String(group.id) === String(groupId));
@@ -372,6 +384,7 @@
           joinButton.addEventListener("click", openJoinGroup);
           search.addEventListener("input", renderGroups);
           page.addEventListener("click", (event) => {
+            if (!stickerPanel.hidden && !event.target.closest("#chatComposer")) closeStickerPanel();
             if (event.target.closest("[data-chat-modal-close]")) {
               closeModal();
               return;
@@ -443,7 +456,7 @@
             if (toggle) { event.preventDefault(); await toggleStickerPanel(); return; }
             const upload = event.target.closest("[data-chat-sticker-upload]");
             if (upload) { event.preventDefault(); stickerUpload.click(); return; }
-            if (event.target.closest("[data-chat-sticker-close]")) { stickerPanel.hidden = true; return; }
+            if (event.target.closest("[data-chat-sticker-close]")) { closeStickerPanel(); return; }
             const unicode = event.target.closest("[data-chat-unicode]");
             if (unicode) { input.value += unicode.dataset.chatUnicode || ""; input.focus(); return; }
             const image = event.target.closest("[data-chat-sticker-id]");
@@ -479,7 +492,7 @@
             keepBottom = true;
             const sticker = selectedSticker;
             selectedSticker = null;
-            stickerPanel.hidden = true;
+            closeStickerPanel();
             client.send(text, null, sticker?.id || "").catch((error) => toast(error.message || "消息发送失败，可点击重新发送"));
           });
 
@@ -496,6 +509,7 @@
 
           global.__campusChatCleanup = () => {
             historyObserver?.disconnect();
+            document.removeEventListener("keydown", onStickerEscape);
             client.destroy();
           };
         }

@@ -548,10 +548,10 @@ test("MySQL syncAllClasses dry-run reports would-change counts without opening t
   const fakeDb = {
     async execute(sql, params = []) {
       queries.push({ sql, params });
-      if (/SELECT \* FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
-      if (/SELECT \* FROM campus_classes WHERE class_key = \?/.test(sql)) return [[rows.classes.get(params[0])].filter(Boolean)];
-      if (/SELECT \* FROM chat_groups WHERE type = 'class' AND class_id = \?/.test(sql)) return [[rows.groups.get(params[0])].filter(Boolean)];
-      if (/FROM class_assignments/.test(sql)) return [rows.assignments.get(params[0]) || []];
+      if (/FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
+      if (/FROM campus_classes WHERE class_key IN/.test(sql)) return [params.map((key) => rows.classes.get(key)).filter(Boolean)];
+      if (/FROM chat_groups WHERE type = 'class' AND class_id IN/.test(sql)) return [params.map((id) => rows.groups.get(id)).filter(Boolean)];
+      if (/FROM class_assignments/.test(sql)) return [[...rows.assignments.values()].flat()];
       throw new Error(`Unexpected SQL: ${sql}`);
     },
     async getConnection() {
@@ -662,9 +662,9 @@ test("MySQL dry-run counts class group id repair when group exists but class lin
   };
   const fakeDb = {
     async execute(sql, params = []) {
-      if (/SELECT \* FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
-      if (/SELECT \* FROM campus_classes WHERE class_key = \?/.test(sql)) return [[rows.classRow]];
-      if (/SELECT \* FROM chat_groups WHERE type = 'class' AND class_id = \?/.test(sql)) return [[rows.groupRow]];
+      if (/FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
+      if (/FROM campus_classes WHERE class_key IN/.test(sql)) return [[rows.classRow]];
+      if (/FROM chat_groups WHERE type = 'class' AND class_id IN/.test(sql)) return [[rows.groupRow]];
       if (/FROM class_assignments/.test(sql)) return [[rows.assignmentRow]];
       throw new Error(`Unexpected SQL: ${sql}`);
     },
