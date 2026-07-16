@@ -1415,6 +1415,20 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (url.pathname.startsWith("/api/admin/chat")) {
+    const handled = await handleChatRoute({
+      req,
+      res,
+      url,
+      route,
+      requireUser,
+      parseBody,
+      sendJson,
+      sendError
+    });
+    if (handled) return;
+  }
+
   if (route.startsWith("GET /api/admin/") || route.startsWith("POST /api/admin/") || route.startsWith("PUT /api/admin/") || route.startsWith("DELETE /api/admin/")) {
     const adminUser = await requireUser(req, res);
     if (!adminUser) return;

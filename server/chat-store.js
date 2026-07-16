@@ -9,6 +9,17 @@ const JOIN_SOURCES = new Set(["group_number", "qr"]);
 const GROUP_NUMBER_ATTEMPTS = 20;
 const INVITE_TOKEN_BYTES = 32;
 const DEFAULT_INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const GROUP_TRANSITIONS = Object.freeze({
+  active: new Set(["frozen"]),
+  frozen: new Set(["active", "closed"]),
+  closed: new Set()
+});
+const APPEAL_TRANSITIONS = Object.freeze({
+  submitted: new Set(["reviewing"]),
+  reviewing: new Set(["approved", "rejected"]),
+  approved: new Set(),
+  rejected: new Set()
+});
 
 class PublicChatError extends Error {
   constructor(message, statusCode = 400) {
@@ -71,7 +82,8 @@ function requiredActiveUser(users, userOrId) {
 function safeGroup(row) {
   if (!row) return null;
   const disabled = row.status === "disabled";
-  const frozen = !disabled && (Boolean(row.frozen) || row.status === "frozen");
+  const closed = row.status === "closed";
+  const frozen = !disabled && (closed || Boolean(row.frozen) || row.status === "frozen");
   return {
     id: String(row.id),
     type: row.type,
@@ -79,10 +91,44 @@ function safeGroup(row) {
     publicNo: row.public_no ?? row.publicNo ?? null,
     name: row.name,
     ownerId: row.owner_id ?? row.ownerId ?? null,
-    status: disabled ? "disabled" : (frozen ? "frozen" : (row.status || "active")),
+    status: disabled ? "disabled" : (closed ? "closed" : (frozen ? "frozen" : (row.status || "active"))),
     frozen,
     description: row.description || "",
     joinPolicy: row.join_policy ?? row.joinPolicy ?? "review"
+  };
+}
+
+function safeAppeal(row) {
+  return {
+    id: String(row.id),
+    groupId: String(row.group_id ?? row.groupId),
+    appellantId: String(row.appellant_id ?? row.appellantId),
+    reason: row.reason || "",
+    status: row.status,
+    reviewerId: row.reviewer_id ?? row.reviewerId ?? null,
+    reviewedAt: row.reviewed_at ?? row.reviewedAt ?? null,
+    createdAt: row.created_at ?? row.createdAt ?? null
+  };
+}
+
+function safeAuditLog(row) {
+  const rawMetadata = row.metadata ?? row.metadata_json ?? null;
+  let metadata = rawMetadata;
+  if (typeof rawMetadata === "string") {
+    try {
+      metadata = JSON.parse(rawMetadata);
+    } catch {
+      metadata = null;
+    }
+  }
+  return {
+    id: String(row.id),
+    operatorId: String(row.operator_id ?? row.operatorId),
+    action: row.action,
+    targetType: row.target_type ?? row.targetType,
+    targetId: String(row.target_id ?? row.targetId),
+    createdAt: row.created_at ?? row.createdAt ?? null,
+    metadata
   };
 }
 
@@ -207,7 +253,9 @@ function createMemoryChatStore(seed = {}, options = {}) {
       invites: seed.invites || seed.chatInvites || [],
       inviteTokens: seed.inviteTokens || seed.chatInviteTokens || [],
       messages: seed.messages || seed.chatMessages || [],
-      readCursors: seed.readCursors || seed.chatReadCursors || []
+      readCursors: seed.readCursors || seed.chatReadCursors || [],
+      appeals: seed.appeals || seed.chatAppeals || [],
+      auditLogs: seed.auditLogs || seed.chatAuditLogs || []
     }
   };
   const groupNumberGenerator = options.groupNumberGenerator || defaultGroupNumber;
@@ -226,6 +274,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
   function availableGroup(groupId, { writable = false } = {}) {
     const found = group(groupId);
     if (found.status === "disabled") throw publicError("群聊不可用", 403);
+    if (found.status === "closed") throw publicError("群聊已关闭", 403);
     if (writable && (found.status === "frozen" || found.frozen)) throw publicError("群聊已冻结", 423);
     return found;
   }
@@ -373,6 +422,26 @@ function createMemoryChatStore(seed = {}, options = {}) {
     const membership = member(groupId, account.id);
     if (!membership || !GROUP_ADMIN_ROLES.has(membership.role)) throw publicError(errorMessage, 403);
     return account;
+  }
+
+  function requiredPlatformAdmin(actor, errorMessage = "仅平台管理员可以管理群聊") {
+    const account = user(actor);
+    if (!PLATFORM_ROLES.has(account.role)) throw publicError(errorMessage, 403);
+    return account;
+  }
+
+  function addAuditLog({ operatorId, action, targetType, targetId, metadata = null }) {
+    const row = {
+      id: `chat-audit-${crypto.randomUUID()}`,
+      operatorId: String(operatorId),
+      action,
+      targetType,
+      targetId: String(targetId),
+      metadata,
+      createdAt: new Date().toISOString()
+    };
+    store.data.auditLogs.push(row);
+    return safeAuditLog(row);
   }
 
   function ensureCustomWritable(groupId) {
@@ -625,6 +694,91 @@ function createMemoryChatStore(seed = {}, options = {}) {
     return { groupId: String(found.id), userId: String(account.id), sequence: Number(row.sequence) };
   }
 
+  async function listGovernanceGroups(actor) {
+    requiredPlatformAdmin(actor);
+    const groups = store.data.groups
+      .filter((item) => item.status !== "disabled")
+      .map(safeGroup)
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+    const appeals = store.data.appeals
+      .filter((item) => ["submitted", "reviewing"].includes(item.status))
+      .sort((left, right) => String(right.createdAt ?? right.created_at ?? "").localeCompare(String(left.createdAt ?? left.created_at ?? "")))
+      .map(safeAppeal);
+    return { groups, appeals };
+  }
+
+  async function setGroupStatus({ groupId, status, operator }) {
+    const account = requiredPlatformAdmin(operator);
+    const found = group(groupId);
+    const target = String(status || "").trim();
+    const current = found.status === "closed" ? "closed" : (found.status === "frozen" || found.frozen ? "frozen" : "active");
+    if (!GROUP_TRANSITIONS[current]?.has(target)) throw publicError("群聊状态不能这样切换", 409);
+    found.status = target;
+    found.frozen = target === "frozen" || target === "closed";
+    const result = safeGroup(found);
+    addAuditLog({
+      operatorId: account.id,
+      action: `group_${target}`,
+      targetType: "chat_group",
+      targetId: found.id,
+      metadata: { previousStatus: current, status: target }
+    });
+    return result;
+  }
+
+  async function createAppeal({ groupId, appellantId, reason }) {
+    const found = group(groupId);
+    const appellant = user(appellantId);
+    if (String(found.ownerId ?? found.owner_id) !== String(appellant.id)) throw publicError("仅群主可以提交解冻申诉", 403);
+    if (found.status !== "frozen" && !found.frozen) throw publicError("仅冻结中的群聊可以申诉", 409);
+    const active = store.data.appeals.find((item) => String(item.groupId ?? item.group_id) === String(found.id)
+      && ["submitted", "reviewing"].includes(item.status));
+    if (active) throw publicError("该群已有待处理申诉", 409);
+    const created = {
+      id: `chat-appeal-${crypto.randomUUID()}`,
+      groupId: found.id,
+      appellantId: appellant.id,
+      reason: requiredText(reason, "请填写申诉原因"),
+      status: "submitted",
+      reviewerId: null,
+      reviewedAt: null,
+      createdAt: new Date().toISOString()
+    };
+    store.data.appeals.push(created);
+    return safeAppeal(created);
+  }
+
+  async function reviewAppeal({ appealId, status, reviewer }) {
+    const account = requiredPlatformAdmin(reviewer);
+    const appeal = store.data.appeals.find((item) => String(item.id) === String(appealId));
+    if (!appeal) throw publicError("群聊申诉不存在", 404);
+    const target = String(status || "").trim();
+    if (!APPEAL_TRANSITIONS[appeal.status]?.has(target)) throw publicError("申诉状态不能这样切换", 409);
+    appeal.status = target;
+    appeal.reviewerId = account.id;
+    appeal.reviewedAt = new Date().toISOString();
+    if (target === "approved") {
+      const found = group(appeal.groupId ?? appeal.group_id);
+      found.status = "active";
+      found.frozen = false;
+      addAuditLog({ operatorId: account.id, action: "appeal_approved_and_group_restored", targetType: "chat_group", targetId: found.id, metadata: { appealId: appeal.id } });
+    } else {
+      addAuditLog({ operatorId: account.id, action: `appeal_${target}`, targetType: "chat_appeal", targetId: appeal.id, metadata: { groupId: appeal.groupId ?? appeal.group_id } });
+    }
+    return safeAppeal(appeal);
+  }
+
+  async function listAuditLogs(actor, { groupId = "", limit = 100 } = {}) {
+    requiredPlatformAdmin(actor);
+    const pageSize = normalizeLimit(limit, 100);
+    return store.data.auditLogs
+      .filter((item) => !groupId || String(item.targetId ?? item.target_id) === String(groupId)
+        || String(item.metadata?.groupId || "") === String(groupId))
+      .sort((left, right) => String(right.createdAt ?? right.created_at ?? "").localeCompare(String(left.createdAt ?? left.created_at ?? "")))
+      .slice(0, pageSize)
+      .map(safeAuditLog);
+  }
+
   return {
     ...store,
     createCustomGroup,
@@ -641,7 +795,12 @@ function createMemoryChatStore(seed = {}, options = {}) {
     searchGroupByNumber,
     createMessage,
     listMessages,
-    updateReadCursor
+    updateReadCursor,
+    listGovernanceGroups,
+    setGroupStatus,
+    createAppeal,
+    reviewAppeal,
+    listAuditLogs
   };
 }
 
@@ -680,7 +839,21 @@ function createMysqlChatStore(pool, options = {}) {
 
   function checkGroupState(group, writable = false) {
     if (group.status === "disabled") throw publicError("群聊不可用", 403);
+    if (group.status === "closed") throw publicError("群聊已关闭", 403);
     if (writable && group.frozen) throw publicError("群聊已冻结", 423);
+  }
+
+  async function requiredMysqlPlatformAdmin(actor, connection = pool) {
+    const account = await activeUser(actor, connection);
+    if (!PLATFORM_ROLES.has(account.role)) throw publicError("仅平台管理员可以管理群聊", 403);
+    return account;
+  }
+
+  async function mysqlAudit(connection, { operatorId, action, targetType, targetId, metadata = null }) {
+    await connection.execute(
+      "INSERT INTO chat_audit_logs (id, operator_id, action, target_type, target_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+      [`chat-audit-${crypto.randomUUID()}`, String(operatorId), action, targetType, String(targetId), metadata ? JSON.stringify(metadata) : null]
+    );
   }
 
   async function mysqlMember(groupId, userId, connection = pool, { forUpdate = false, includeInactive = false } = {}) {
@@ -1233,6 +1406,111 @@ function createMysqlChatStore(pool, options = {}) {
     }
   });
 
+  const listGovernanceGroups = mysqlPublic(async (actor) => {
+    await requiredMysqlPlatformAdmin(actor);
+    const [groups] = await execute("SELECT * FROM chat_groups WHERE status <> 'disabled' ORDER BY name, id");
+    const [appeals] = await execute("SELECT * FROM chat_appeals WHERE status IN ('submitted', 'reviewing') ORDER BY created_at DESC, id DESC");
+    return { groups: groups.map(safeGroup), appeals: appeals.map(safeAppeal) };
+  });
+
+  const setGroupStatus = mysqlPublic(async ({ groupId, status, operator }) => {
+    const target = String(status || "").trim();
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const account = await requiredMysqlPlatformAdmin(operator, connection);
+      const found = await groupById(groupId, connection, { forUpdate: true });
+      const current = found.status === "closed" ? "closed" : (found.status === "frozen" || found.frozen ? "frozen" : "active");
+      if (!GROUP_TRANSITIONS[current]?.has(target)) throw publicError("群聊状态不能这样切换", 409);
+      const frozen = target === "frozen" || target === "closed";
+      await connection.execute("UPDATE chat_groups SET status = ?, frozen = ? WHERE id = ?", [target, frozen ? 1 : 0, found.id]);
+      await mysqlAudit(connection, {
+        operatorId: account.id,
+        action: `group_${target}`,
+        targetType: "chat_group",
+        targetId: found.id,
+        metadata: { previousStatus: current, status: target }
+      });
+      await connection.commit();
+      return safeGroup({ ...found, status: target, frozen });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const createAppeal = mysqlPublic(async ({ groupId, appellantId, reason }) => {
+    const normalizedReason = requiredText(reason, "请填写申诉原因");
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const appellant = await activeUser(appellantId, connection);
+      const found = await groupById(groupId, connection, { forUpdate: true });
+      if (String(found.ownerId) !== String(appellant.id)) throw publicError("仅群主可以提交解冻申诉", 403);
+      if (found.status !== "frozen" && !found.frozen) throw publicError("仅冻结中的群聊可以申诉", 409);
+      const [active] = await connection.execute(
+        "SELECT id FROM chat_appeals WHERE group_id = ? AND status IN ('submitted', 'reviewing') FOR UPDATE",
+        [found.id]
+      );
+      if (active[0]) throw publicError("该群已有待处理申诉", 409);
+      const id = `chat-appeal-${crypto.randomUUID()}`;
+      await connection.execute(
+        "INSERT INTO chat_appeals (id, group_id, appellant_id, reason, status, active_key) VALUES (?, ?, ?, ?, 'submitted', ?)",
+        [id, found.id, appellant.id, normalizedReason, found.id]
+      );
+      await connection.commit();
+      return safeAppeal({ id, group_id: found.id, appellant_id: appellant.id, reason: normalizedReason, status: "submitted", created_at: new Date().toISOString() });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const reviewAppeal = mysqlPublic(async ({ appealId, status, reviewer }) => {
+    const target = String(status || "").trim();
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const account = await requiredMysqlPlatformAdmin(reviewer, connection);
+      const [appealRows] = await connection.execute("SELECT * FROM chat_appeals WHERE id = ? FOR UPDATE", [appealId]);
+      if (!appealRows[0]) throw publicError("群聊申诉不存在", 404);
+      const appeal = appealRows[0];
+      if (!APPEAL_TRANSITIONS[appeal.status]?.has(target)) throw publicError("申诉状态不能这样切换", 409);
+      const found = await groupById(appeal.group_id, connection, { forUpdate: true });
+      const reviewedAt = new Date().toISOString();
+      await connection.execute(
+        "UPDATE chat_appeals SET status = ?, reviewer_id = ?, reviewed_at = ?, active_key = NULL WHERE id = ?",
+        [target, account.id, reviewedAt, appeal.id]
+      );
+      if (target === "approved") {
+        await connection.execute("UPDATE chat_groups SET status = 'active', frozen = 0 WHERE id = ?", [found.id]);
+        await mysqlAudit(connection, { operatorId: account.id, action: "appeal_approved_and_group_restored", targetType: "chat_group", targetId: found.id, metadata: { appealId: appeal.id } });
+      } else {
+        await mysqlAudit(connection, { operatorId: account.id, action: `appeal_${target}`, targetType: "chat_appeal", targetId: appeal.id, metadata: { groupId: found.id } });
+      }
+      await connection.commit();
+      return safeAppeal({ ...appeal, status: target, reviewer_id: account.id, reviewed_at: reviewedAt });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const listAuditLogs = mysqlPublic(async (actor, { groupId = "", limit = 100 } = {}) => {
+    await requiredMysqlPlatformAdmin(actor);
+    const pageSize = normalizeLimit(limit, 100);
+    const [rows] = groupId
+      ? await execute("SELECT * FROM chat_audit_logs WHERE target_id = ? OR JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.groupId')) = ? ORDER BY created_at DESC, id DESC LIMIT ?", [String(groupId), String(groupId), pageSize])
+      : await execute("SELECT * FROM chat_audit_logs ORDER BY created_at DESC, id DESC LIMIT ?", [pageSize]);
+    return rows.map(safeAuditLog);
+  });
+
   return {
     createCustomGroup,
     listUserGroups,
@@ -1248,7 +1526,12 @@ function createMysqlChatStore(pool, options = {}) {
     searchGroupByNumber,
     createMessage,
     listMessages,
-    updateReadCursor
+    updateReadCursor,
+    listGovernanceGroups,
+    setGroupStatus,
+    createAppeal,
+    reviewAppeal,
+    listAuditLogs
   };
 }
 
@@ -1262,7 +1545,9 @@ const memoryStore = createMemoryChatStore({
   chatInvites: data.chatInvites,
   chatInviteTokens: data.chatInviteTokens,
   chatMessages: data.chatMessages,
-  chatReadCursors: data.chatReadCursors
+  chatReadCursors: data.chatReadCursors,
+  chatAppeals: data.chatAppeals,
+  chatAuditLogs: data.chatAuditLogs
 });
 
 function selectedStore() {
@@ -1287,5 +1572,10 @@ module.exports = {
   searchGroupByNumber: (...args) => selectedStore().searchGroupByNumber(...args),
   createMessage: (...args) => selectedStore().createMessage(...args),
   listMessages: (...args) => selectedStore().listMessages(...args),
-  updateReadCursor: (...args) => selectedStore().updateReadCursor(...args)
+  updateReadCursor: (...args) => selectedStore().updateReadCursor(...args),
+  listGovernanceGroups: (...args) => selectedStore().listGovernanceGroups(...args),
+  setGroupStatus: (...args) => selectedStore().setGroupStatus(...args),
+  createAppeal: (...args) => selectedStore().createAppeal(...args),
+  reviewAppeal: (...args) => selectedStore().reviewAppeal(...args),
+  listAuditLogs: (...args) => selectedStore().listAuditLogs(...args)
 };

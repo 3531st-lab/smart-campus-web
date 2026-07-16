@@ -286,6 +286,8 @@ const chatInvites = [];
 const chatInviteTokens = [];
 const chatMessages = [];
 const chatReadCursors = [];
+const chatAppeals = [];
+const chatAuditLogs = [];
 const classSyncErrors = [];
 
 module.exports = {
@@ -309,5 +311,7 @@ module.exports = {
   chatInviteTokens,
   chatMessages,
   chatReadCursors,
+  chatAppeals,
+  chatAuditLogs,
   classSyncErrors
 };

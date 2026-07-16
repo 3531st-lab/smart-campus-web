@@ -20,6 +20,16 @@ function routeInviteToken(pathname) {
   };
 }
 
+function routeAdminGroupStatus(pathname) {
+  const match = pathname.match(/^\/api\/admin\/chat\/groups\/([^/]+)\/status$/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function routeAppealId(pathname) {
+  const match = pathname.match(/^\/api\/admin\/chat\/appeals\/([^/]+)$/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 function inviteUrl(url, token) {
   return `${url.origin}/?chatInvite=${encodeURIComponent(token)}#chat`;
 }
@@ -33,13 +43,44 @@ function chatError(error) {
 async function handleChatRoute(context) {
   const { route, url, res, requireUser, parseBody, sendJson, sendError } = context;
   const store = context.store || defaultStore;
-  if (!route.includes(" /api/chat")) return false;
+  if (!route.includes(" /api/chat") && !route.includes(" /api/admin/chat")) return false;
   const routeName = `${String(route).split(" ")[0]} ${url.pathname}`;
 
   const user = await requireUser(context.req, res);
   if (!user) return true;
 
   try {
+    if (routeName === "GET /api/admin/chat/groups") {
+      const payload = await store.listGovernanceGroups(user);
+      sendJson(res, 200, payload);
+      return true;
+    }
+
+    const adminGroupId = routeAdminGroupStatus(url.pathname);
+    if (route.startsWith("PUT /api/admin/chat/groups/") && adminGroupId) {
+      const body = await parseBody(context.req);
+      const group = await store.setGroupStatus({ groupId: adminGroupId, status: body.status, operator: user });
+      sendJson(res, 200, { group });
+      return true;
+    }
+
+    const appealId = routeAppealId(url.pathname);
+    if (route.startsWith("PUT /api/admin/chat/appeals/") && appealId) {
+      const body = await parseBody(context.req);
+      const appeal = await store.reviewAppeal({ appealId, status: body.status, reviewer: user });
+      sendJson(res, 200, { appeal });
+      return true;
+    }
+
+    if (routeName === "GET /api/admin/chat/audit-logs") {
+      const logs = await store.listAuditLogs(user, {
+        groupId: url.searchParams.get("groupId") || "",
+        limit: url.searchParams.get("limit") || 100
+      });
+      sendJson(res, 200, { logs });
+      return true;
+    }
+
     if (routeName === "GET /api/chat/groups") {
       sendJson(res, 200, { groups: await store.listUserGroups(user.id) });
       return true;
@@ -134,6 +175,18 @@ async function handleChatRoute(context) {
     if (route.startsWith("GET /api/chat/groups/") && requestGroupId) {
       const requests = await store.listJoinRequests(requestGroupId, user);
       sendJson(res, 200, { requests });
+      return true;
+    }
+
+    const appealGroupId = routeGroupId(url.pathname, "/appeals");
+    if (route.startsWith("POST /api/chat/groups/") && appealGroupId) {
+      const body = await parseBody(context.req);
+      const appeal = await store.createAppeal({
+        groupId: appealGroupId,
+        appellantId: user.id,
+        reason: body.reason
+      });
+      sendJson(res, 201, { appeal });
       return true;
     }
 

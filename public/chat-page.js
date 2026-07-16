@@ -219,6 +219,32 @@
             }
           }
 
+          function openAppeal() {
+            if (!activeGroup) return;
+            openModal(`
+              <header class="chat-modal-head"><div><h2>提交解冻申诉</h2><p>请说明群聊用途与后续管理措施，管理员审核后会恢复或维持冻结状态。</p></div><button type="button" data-chat-modal-close aria-label="关闭">×</button></header>
+              <form class="chat-modal-form" id="chatAppealForm">
+                <label>申诉原因<textarea name="reason" maxlength="500" rows="4" required placeholder="例如：用于班级学习资料沟通，已明确群规并安排群管理员。"></textarea></label>
+                <div class="chat-modal-actions"><button type="button" data-chat-modal-close>取消</button><button class="primary" type="submit">提交申诉</button></div>
+              </form>`, "提交解冻申诉");
+            modalRoot.querySelector("#chatAppealForm").addEventListener("submit", async (event) => {
+              event.preventDefault();
+              const submit = event.currentTarget.querySelector("[type=submit]");
+              submit.disabled = true;
+              try {
+                await api(`/api/chat/groups/${encodeURIComponent(activeGroup.id)}/appeals`, {
+                  method: "POST",
+                  body: JSON.stringify({ reason: new FormData(event.currentTarget).get("reason") })
+                });
+                closeModal();
+                toast("申诉已提交，等待平台管理员审核");
+              } catch (error) {
+                submit.disabled = false;
+                toast(error.message || "申诉提交失败");
+              }
+            });
+          }
+
           async function applyInviteFromUrl() {
             const pageUrl = new URL(global.location.href);
             const token = pageUrl.searchParams.get("chatInvite");
@@ -251,7 +277,7 @@
                 <h3>${safe(activeGroup.name, escapeHtml)}</h3>
                 <p>${safe(activeGroup.description || (activeGroup.type === "class" ? "学校、学院与班级成员自动加入。" : "自主创建的校园兴趣群。"), escapeHtml)}</p>
                 <dl><div><dt>群类型</dt><dd>${activeGroup.type === "class" ? "班级群" : "普通群"}</dd></div>${activeGroup.publicNo ? `<div><dt>群号</dt><dd>${safe(activeGroup.publicNo, escapeHtml)}</dd></div>` : ""}<div><dt>群状态</dt><dd>${activeGroup.frozen ? "已冻结" : "正常"}</dd></div></dl>
-                ${activeGroup.frozen ? '<div class="chat-frozen-note">该群暂时冻结，消息保留但不能发送。</div>' : `<div class="chat-detail-actions"><button type="button" class="chat-detail-action" data-chat-members>查看群成员</button>${activeGroup.type === "custom" && String(activeGroup.ownerId) === String(user?.id) ? '<button type="button" class="chat-detail-action" data-chat-review>入群审核</button><button type="button" class="chat-detail-action" data-chat-qr>生成入群二维码</button>' : ""}</div>`}
+                ${activeGroup.frozen ? `<div class="chat-frozen-note">该群暂时冻结，消息保留但不能发送。</div>${activeGroup.type === "custom" && String(activeGroup.ownerId) === String(user?.id) ? '<button type="button" class="chat-detail-action" data-chat-appeal>提交解冻申诉</button>' : ""}` : `<div class="chat-detail-actions"><button type="button" class="chat-detail-action" data-chat-members>查看群成员</button>${activeGroup.type === "custom" && String(activeGroup.ownerId) === String(user?.id) ? '<button type="button" class="chat-detail-action" data-chat-review>入群审核</button><button type="button" class="chat-detail-action" data-chat-qr>生成入群二维码</button>' : ""}</div>`}
               </div>`;
           }
 
@@ -320,6 +346,10 @@
               openReviewRequests();
               return;
             }
+            if (event.target.closest("[data-chat-appeal]")) {
+              openAppeal();
+              return;
+            }
             const reviewButton = event.target.closest("[data-chat-review-id]");
             if (reviewButton) {
               reviewButton.disabled = true;
@@ -376,6 +406,87 @@
           })();
 
           global.__campusChatCleanup = () => client.destroy();
+        }
+      };
+    },
+
+    async renderAdmin(context) {
+      const { api, escapeHtml, toast } = context;
+      return {
+        title: "群聊管理",
+        subtitle: "平台管理员审核群聊状态与解冻申诉",
+        content: `
+          <section class="chat-admin-page" id="chatAdminPage">
+            <section class="dash-card chat-admin-hero"><div><span>群聊治理</span><h2>群聊管理中心</h2><p>冻结群聊仍保留历史消息；关闭后不可恢复。所有操作都会记入治理审计。</p></div><button type="button" class="chat-admin-refresh" data-chat-admin-refresh>刷新</button></section>
+            <section class="chat-admin-layout">
+              <div class="dash-card chat-admin-card"><header><h2>群聊状态</h2><span id="chatAdminGroupCount">--</span></header><div id="chatAdminGroups" class="chat-admin-list"><p>正在加载群聊…</p></div></div>
+              <div class="dash-card chat-admin-card"><header><h2>解冻申诉</h2><span id="chatAdminAppealCount">--</span></header><div id="chatAdminAppeals" class="chat-admin-list"><p>正在加载申诉…</p></div></div>
+            </section>
+            <section class="dash-card chat-admin-card"><header><h2>治理审计</h2><span>最近 100 条</span></header><div id="chatAdminLogs" class="chat-admin-log"><p>正在加载审计记录…</p></div></section>
+          </section>`,
+        afterRender() {
+          const page = document.querySelector("#chatAdminPage");
+          const groupsNode = page.querySelector("#chatAdminGroups");
+          const appealsNode = page.querySelector("#chatAdminAppeals");
+          const logsNode = page.querySelector("#chatAdminLogs");
+          const groupCount = page.querySelector("#chatAdminGroupCount");
+          const appealCount = page.querySelector("#chatAdminAppealCount");
+          const formatStatus = { active: "正常", frozen: "冻结", closed: "已关闭", submitted: "待处理", reviewing: "审核中", approved: "已通过", rejected: "已驳回" };
+          const renderGroups = (groups) => {
+            groupCount.textContent = `${groups.length} 个`;
+            groupsNode.innerHTML = groups.map((group) => {
+              const actions = group.status === "active"
+                ? '<button data-chat-admin-status="frozen">冻结</button>'
+                : group.status === "frozen"
+                  ? '<button data-chat-admin-status="active">恢复</button><button class="danger" data-chat-admin-status="closed">关闭</button>'
+                  : '<span class="chat-admin-closed">不可恢复</span>';
+              return `<article class="chat-admin-row" data-chat-admin-group="${safe(group.id, escapeHtml)}"><div><strong>${safe(group.name, escapeHtml)}</strong><small>${group.type === "class" ? "班级群" : `群号 ${safe(group.publicNo || "--", escapeHtml)}`} · ${formatStatus[group.status] || group.status}</small></div><div class="chat-admin-actions">${actions}</div></article>`;
+            }).join("") || '<p class="chat-admin-empty">暂无可治理群聊。</p>';
+          };
+          const renderAppeals = (appeals) => {
+            appealCount.textContent = `${appeals.length} 条`;
+            appealsNode.innerHTML = appeals.map((appeal) => `<article class="chat-admin-row" data-chat-admin-appeal="${safe(appeal.id, escapeHtml)}"><div><strong>${safe(appeal.reason, escapeHtml)}</strong><small>${formatStatus[appeal.status] || appeal.status} · 群聊 ${safe(appeal.groupId, escapeHtml)}</small></div><div class="chat-admin-actions">${appeal.status === "submitted" ? '<button data-chat-admin-appeal-status="reviewing">受理</button>' : ""}${appeal.status === "reviewing" ? '<button data-chat-admin-appeal-status="approved">恢复群聊</button><button class="danger" data-chat-admin-appeal-status="rejected">驳回</button>' : ""}</div></article>`).join("") || '<p class="chat-admin-empty">暂无待处理申诉。</p>';
+          };
+          const renderLogs = (logs) => {
+            logsNode.innerHTML = logs.map((log) => `<div><strong>${safe(log.action, escapeHtml)}</strong><span>${safe(log.targetType, escapeHtml)} · ${safe(log.targetId, escapeHtml)} · ${safe(log.createdAt || "", escapeHtml)}</span></div>`).join("") || '<p class="chat-admin-empty">暂无治理记录。</p>';
+          };
+          const load = async () => {
+            try {
+              const [payload, audit] = await Promise.all([api("/api/admin/chat/groups"), api("/api/admin/chat/audit-logs?limit=100")]);
+              renderGroups(Array.isArray(payload.groups) ? payload.groups : []);
+              renderAppeals(Array.isArray(payload.appeals) ? payload.appeals : []);
+              renderLogs(Array.isArray(audit.logs) ? audit.logs : []);
+            } catch (error) {
+              const message = safe(error.message || "群聊治理数据加载失败", escapeHtml);
+              groupsNode.innerHTML = `<p class="chat-admin-empty">${message}</p>`;
+              appealsNode.innerHTML = `<p class="chat-admin-empty">${message}</p>`;
+            }
+          };
+          page.addEventListener("click", async (event) => {
+            if (event.target.closest("[data-chat-admin-refresh]")) return load();
+            const groupButton = event.target.closest("[data-chat-admin-status]");
+            if (groupButton) {
+              const row = groupButton.closest("[data-chat-admin-group]");
+              groupButton.disabled = true;
+              try {
+                await api(`/api/admin/chat/groups/${encodeURIComponent(row.dataset.chatAdminGroup)}/status`, { method: "PUT", body: JSON.stringify({ status: groupButton.dataset.chatAdminStatus }) });
+                toast("群聊状态已更新");
+                await load();
+              } catch (error) { groupButton.disabled = false; toast(error.message || "更新失败"); }
+              return;
+            }
+            const appealButton = event.target.closest("[data-chat-admin-appeal-status]");
+            if (appealButton) {
+              const row = appealButton.closest("[data-chat-admin-appeal]");
+              appealButton.disabled = true;
+              try {
+                await api(`/api/admin/chat/appeals/${encodeURIComponent(row.dataset.chatAdminAppeal)}`, { method: "PUT", body: JSON.stringify({ status: appealButton.dataset.chatAdminAppealStatus }) });
+                toast("申诉状态已更新");
+                await load();
+              } catch (error) { appealButton.disabled = false; toast(error.message || "处理失败"); }
+            }
+          });
+          load();
         }
       };
     }

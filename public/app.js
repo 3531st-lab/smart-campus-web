@@ -160,6 +160,7 @@ const moduleGroups = [
     items: [
       { id: "student-admin", label: "学生身份库", icon: "database", desc: "学生、老师与管理员账号管理", adminOnly: true },
       { id: "class-timetable-admin", label: "班级课表导入", icon: "calendar", desc: "管理员按班级集中发布课表", adminOnly: true },
+      { id: "chat-admin", label: "群聊管理", icon: "news", desc: "冻结、申诉与群聊治理审计", adminOnly: true },
       { id: "ai-admin", label: "AI 模型配置", icon: "settings", desc: "AI 助手与课表 OCR 服务配置", adminOnly: true, superAdminOnly: true }
     ]
   }
@@ -297,6 +298,7 @@ function commandCenterCommands() {
     { id: "action:ai-config", route: "ai", label: "配置个人 AI", desc: "在 AI 助手右侧填写自己的 API Key", group: "快捷操作", icon: "sparkles", keywords: "AI API Key 模型 配置" },
     { id: "admin:student", route: "student-admin", label: "学生身份库", desc: "维护学生、老师、管理员账号", group: "权限管理", icon: "database", keywords: "学生身份库 账号 管理员 老师 学生" },
     { id: "admin:class-timetable", route: "class-timetable-admin", label: "班级课表导入", desc: "管理员按班级集中发布课表", group: "权限管理", icon: "calendar", keywords: "班级课表 管理员 集中导入" },
+    { id: "admin:chat", route: "chat-admin", label: "群聊管理", desc: "审核群聊冻结、关闭和解冻申诉", group: "权限管理", icon: "news", keywords: "群聊管理 冻结 申诉 审计" },
     { id: "admin:lab-approval", route: "lab-approval", label: "预约审批", desc: "管理员审批实验室预约申请", group: "教学服务", icon: "award", keywords: "实验室 审批 管理员 预约审批" }
   ].filter((item) => {
     const module = navItems.find((nav) => nav.id === item.route);
@@ -4279,6 +4281,19 @@ const routes = {
       iconSvg,
       escapeHtml,
       theme: document.documentElement.dataset.theme || "day"
+    });
+  },
+
+  async "chat-admin"() {
+    if (!window.CampusChatPage?.renderAdmin) {
+      throw new Error("群聊管理资源加载失败，请刷新页面后重试");
+    }
+    return window.CampusChatPage.renderAdmin({
+      api,
+      user: state.user,
+      toast,
+      iconSvg,
+      escapeHtml
     });
   },
 

@@ -9,6 +9,7 @@ function fixtures() {
     owner: { id: "chat-owner", name: "群主同学", role: "student", status: "active", avatarColor: "#188aa3" },
     peer: { id: "chat-peer", name: "同班同学", role: "student", status: "active", avatarColor: "#8e6ee8" },
     outsider: { id: "chat-outsider", name: "隔壁班同学", role: "student", status: "active", avatarColor: "#ef9462" },
+    admin: { id: "chat-admin", name: "平台管理员", role: "admin", status: "active", avatarColor: "#3974d6" },
     guest: { id: "chat-guest", name: "游客", role: "guest", status: "active", avatarColor: "#74839a" }
   };
   const store = createMemoryChatStore({
@@ -165,4 +166,57 @@ test("ordinary groups expose limited search, reviewed joins, and renewable QR ap
   assert.equal(qrJoin.status, 201);
   const qrApproved = await callRoute(store, `PUT /api/chat/join-requests/${qrJoin.payload.request.id}`, users.owner, { decision: "approved" });
   assert.equal(qrApproved.status, 200);
+});
+
+test("platform administrators govern frozen groups without joining them and review one active appeal", async () => {
+  const { store, users } = fixtures();
+  const created = await callRoute(store, "POST /api/chat/groups", users.owner, { name: "治理测试群" });
+  const groupId = created.payload.group.id;
+  const sent = await callRoute(store, `POST /api/chat/groups/${groupId}/messages`, users.owner, {
+    clientRequestId: "governance-message-001",
+    text: "冻结前的消息"
+  });
+  assert.equal(sent.status, 201);
+
+  const managed = await callRoute(store, "GET /api/admin/chat/groups", users.admin);
+  assert.equal(managed.status, 200);
+  assert.ok(managed.payload.groups.some((group) => group.id === groupId));
+  const frozen = await callRoute(store, `PUT /api/admin/chat/groups/${groupId}/status`, users.admin, { status: "frozen" });
+  assert.equal(frozen.status, 200);
+  assert.equal(frozen.payload.group.status, "frozen");
+  assert.equal(store.data.members.some((member) => member.userId === users.admin.id), false);
+
+  const history = await callRoute(store, `GET /api/chat/groups/${groupId}/messages?after=0`, users.owner);
+  assert.equal(history.status, 200);
+  assert.equal(history.payload.messages[0].text, "冻结前的消息");
+  const blockedMessage = await callRoute(store, `POST /api/chat/groups/${groupId}/messages`, users.owner, {
+    clientRequestId: "governance-message-002",
+    text: "不应发送"
+  });
+  const blockedToken = await callRoute(store, `POST /api/chat/groups/${groupId}/invite-token`, users.owner, {});
+  assert.equal(blockedMessage.status, 423);
+  assert.equal(blockedToken.status, 423);
+
+  const appeal = await callRoute(store, `POST /api/chat/groups/${groupId}/appeals`, users.owner, { reason: "已制定群规，请恢复学习讨论" });
+  assert.equal(appeal.status, 201);
+  const duplicate = await callRoute(store, `POST /api/chat/groups/${groupId}/appeals`, users.owner, { reason: "重复申诉" });
+  assert.equal(duplicate.status, 409);
+  const reviewing = await callRoute(store, `PUT /api/admin/chat/appeals/${appeal.payload.appeal.id}`, users.admin, { status: "reviewing" });
+  assert.equal(reviewing.status, 200);
+  const approved = await callRoute(store, `PUT /api/admin/chat/appeals/${appeal.payload.appeal.id}`, users.admin, { status: "approved" });
+  assert.equal(approved.status, 200);
+  assert.equal(approved.payload.appeal.status, "approved");
+
+  const restored = await callRoute(store, `POST /api/chat/groups/${groupId}/messages`, users.owner, {
+    clientRequestId: "governance-message-003",
+    text: "恢复后的消息"
+  });
+  assert.equal(restored.status, 201);
+  const members = await callRoute(store, `GET /api/chat/groups/${groupId}/members`, users.owner);
+  assert.equal(members.status, 200);
+  assert.equal(members.payload.members.some((member) => member.userId === users.admin.id), false);
+  const audit = await callRoute(store, "GET /api/admin/chat/audit-logs?limit=100", users.admin);
+  assert.equal(audit.status, 200);
+  assert.ok(audit.payload.logs.some((log) => log.action === "group_frozen"));
+  assert.ok(audit.payload.logs.some((log) => log.action === "appeal_approved_and_group_restored"));
 });

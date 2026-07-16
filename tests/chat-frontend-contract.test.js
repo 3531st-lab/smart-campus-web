@@ -23,6 +23,8 @@ test("campus-life navigation and route delegate to the chat page", () => {
   assert.match(app, /id:\s*["']chat["']/);
   assert.match(app, /async chat\(\)\s*\{/);
   assert.match(app, /CampusChatPage\.render/);
+  assert.match(app, /id:\s*["']chat-admin["']/);
+  assert.match(app, /renderAdmin/);
 });
 
 test("chat page keeps group list, messages, and details as independent regions", () => {
@@ -32,6 +34,8 @@ test("chat page keeps group list, messages, and details as independent regions",
   assert.match(page, /chat-detail-panel/);
   assert.match(page, /data-chat-send/);
   assert.match(page, /client\.selectGroup/);
+  assert.match(page, /data-chat-appeal/);
+  assert.match(page, /chat-admin-page/);
 });
 
 test("chat client supports resilient optimistic delivery and visibility-aware polling", () => {

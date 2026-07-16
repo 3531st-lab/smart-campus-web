@@ -220,13 +220,41 @@ html[data-theme="day"] .chat-group-item.active { background: linear-gradient(135
 .chat-review-actions .primary { border-color: rgba(77, 210, 230, 0.58); background: linear-gradient(135deg, #2675da, #159b9d); color: #fff; }
 .chat-modal-empty { margin: 0; padding: 28px 16px; color: var(--muted); text-align: center; }
 
+.chat-admin-page { display: grid; gap: 14px; max-width: 1240px; }
+.chat-admin-hero { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(120deg, rgba(37, 108, 206, 0.2), rgba(24, 164, 157, 0.14)); }
+.chat-admin-hero span { color: var(--cyan); font-size: 12px; font-weight: 800; }
+.chat-admin-hero h2 { margin: 6px 0; color: var(--text); font-size: 24px; }
+.chat-admin-hero p { max-width: 620px; margin: 0; color: var(--muted); line-height: 1.6; }
+.chat-admin-refresh { min-height: 36px; padding: 0 14px; border: 1px solid rgba(80, 214, 236, 0.54); border-radius: 8px; background: rgba(12, 51, 101, 0.36); color: var(--text); font-weight: 800; }
+.chat-admin-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.chat-admin-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(8, 27, 62, 0.28); }
+.chat-admin-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 11px; border-bottom: 1px solid var(--line); }
+.chat-admin-card h2 { margin: 0; color: var(--text); font-size: 16px; }
+.chat-admin-card > header span { color: var(--muted); font-size: 12px; }
+.chat-admin-list { display: grid; gap: 8px; margin-top: 12px; }
+.chat-admin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: rgba(41, 99, 182, 0.12); }
+.chat-admin-row > div:first-child { display: grid; min-width: 0; gap: 3px; }
+.chat-admin-row strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.chat-admin-row small { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.chat-admin-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.chat-admin-actions button { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: rgba(55, 106, 185, 0.22); color: var(--text); font-weight: 700; }
+.chat-admin-actions .danger { border-color: rgba(242, 129, 129, 0.48); color: #ffb0b0; }
+.chat-admin-closed { color: var(--muted); font-size: 12px; }
+.chat-admin-log { display: grid; gap: 0; margin-top: 8px; }
+.chat-admin-log > div { display: grid; gap: 3px; padding: 10px 2px; border-bottom: 1px solid var(--line); }
+.chat-admin-log strong { color: var(--text); font-size: 13px; }
+.chat-admin-log span { color: var(--muted); font-size: 12px; }
+.chat-admin-empty { margin: 0; padding: 22px 8px; color: var(--muted); text-align: center; }
+
 html[data-theme="day"] .chat-modal { background: linear-gradient(160deg, rgba(255, 255, 255, 0.98), rgba(238, 251, 252, 0.98)); box-shadow: 0 22px 64px rgba(22, 78, 95, 0.2); }
 html[data-theme="day"] .chat-modal-form input,
 html[data-theme="day"] .chat-modal-form textarea,
 html[data-theme="day"] .chat-qr-content input { background: rgba(255, 255, 255, 0.88); color: #16404a; }
 html[data-theme="day"] .chat-inline-error { color: #ad3b47; }
 html[data-theme="day"] .chat-member-row,
-html[data-theme="day"] .chat-review-row { background: rgba(239, 252, 252, 0.82); }
+html[data-theme="day"] .chat-review-row,
+html[data-theme="day"] .chat-admin-card,
+html[data-theme="day"] .chat-admin-row { background: rgba(255, 255, 255, 0.74); }
 
 @media (max-width: 760px) {
   .chat-page { min-height: calc(100vh - 94px); display: block; }
@@ -247,4 +275,8 @@ html[data-theme="day"] .chat-review-row { background: rgba(239, 252, 252, 0.82);
   .chat-modal { width: 100%; max-height: calc(100vh - 20px); overflow: auto; }
   .chat-review-row { align-items: flex-start; flex-wrap: wrap; }
   .chat-review-actions { width: 100%; justify-content: flex-end; margin-left: 44px; }
+  .chat-admin-hero,
+  .chat-admin-row { align-items: flex-start; flex-direction: column; }
+  .chat-admin-layout { grid-template-columns: 1fr; }
+  .chat-admin-actions { width: 100%; justify-content: flex-end; }
 }

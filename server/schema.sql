@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS campus_classes (
   class_name VARCHAR(120) NOT NULL,
   class_key VARCHAR(400) NOT NULL,
   group_id VARCHAR(64) NULL,
-  status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+  status ENUM('active','frozen','closed','disabled') NOT NULL DEFAULT 'active',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_class_key (class_key),
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS chat_groups (
   name VARCHAR(120) NOT NULL,
   owner_id VARCHAR(64) NULL,
   class_id VARCHAR(64) NULL,
-  status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+  status ENUM('active','frozen','closed','disabled') NOT NULL DEFAULT 'active',
   frozen TINYINT(1) NOT NULL DEFAULT 0,
   next_message_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
   description VARCHAR(500) NOT NULL DEFAULT '',
@@ -82,6 +82,9 @@ ALTER TABLE chat_groups
   ADD COLUMN IF NOT EXISTS next_message_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS description VARCHAR(500) NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS join_policy VARCHAR(32) NOT NULL DEFAULT 'review';
+
+ALTER TABLE chat_groups
+  MODIFY COLUMN status ENUM('active','frozen','closed','disabled') NOT NULL DEFAULT 'active';
 
 ALTER TABLE chat_groups
   ADD UNIQUE INDEX IF NOT EXISTS uq_chat_group_public_no (public_no),
@@ -177,6 +180,34 @@ CREATE TABLE IF NOT EXISTS chat_read_cursors (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (group_id, user_id),
   KEY idx_chat_read_cursor_user (user_id, updated_at)
+);
+
+CREATE TABLE IF NOT EXISTS chat_appeals (
+  id VARCHAR(64) PRIMARY KEY,
+  group_id VARCHAR(64) NOT NULL,
+  appellant_id VARCHAR(64) NOT NULL,
+  reason VARCHAR(1000) NOT NULL,
+  status ENUM('submitted','reviewing','approved','rejected') NOT NULL DEFAULT 'submitted',
+  reviewer_id VARCHAR(64) NULL,
+  reviewed_at TIMESTAMP NULL,
+  active_key VARCHAR(160) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_chat_appeal_active (active_key),
+  KEY idx_chat_appeal_group_status (group_id, status, created_at),
+  KEY idx_chat_appeal_appellant (appellant_id, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS chat_audit_logs (
+  id VARCHAR(64) PRIMARY KEY,
+  operator_id VARCHAR(64) NOT NULL,
+  action VARCHAR(64) NOT NULL,
+  target_type VARCHAR(32) NOT NULL,
+  target_id VARCHAR(64) NOT NULL,
+  metadata_json JSON NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_chat_audit_target (target_type, target_id, created_at),
+  KEY idx_chat_audit_operator (operator_id, created_at)
 );
 
 CREATE TABLE IF NOT EXISTS class_sync_errors (
