@@ -1,5 +1,6 @@
 const defaultStore = require("./chat-store");
 const defaultMediaStore = require("./media-store");
+const defaultRealtime = require("./chat-realtime");
 const QRCode = require("qrcode");
 
 function stickerFavoriteId(pathname) {
@@ -66,6 +67,7 @@ async function handleChatRoute(context) {
   const { route, url, res, requireUser, parseBody, sendJson, sendError } = context;
   const store = context.store || defaultStore;
   const mediaStore = context.mediaStore || defaultMediaStore;
+  const realtime = context.realtime || defaultRealtime;
   if (!route.includes(" /api/chat") && !route.includes(" /api/admin/chat")) return false;
   const routeName = `${String(route).split(" ")[0]} ${url.pathname}`;
 
@@ -106,6 +108,24 @@ async function handleChatRoute(context) {
 
     if (routeName === "GET /api/chat/groups") {
       sendJson(res, 200, { groups: await store.listUserGroups(user.id) });
+      return true;
+    }
+
+    const realtimeGroupId = routeGroupId(url.pathname, "/realtime-token");
+    if (route.startsWith("POST /api/chat/groups/") && realtimeGroupId) {
+      await store.getGroupForUser(realtimeGroupId, user);
+      const realtimeUrl = realtime.realtimeUrl();
+      if (!realtimeUrl) {
+        sendJson(res, 200, { configured: false });
+        return true;
+      }
+      const expiresAt = Date.now() + Math.max(60_000, Number(process.env.CHAT_REALTIME_TOKEN_TTL_MS || 5 * 60_000));
+      sendJson(res, 200, {
+        configured: true,
+        realtimeUrl,
+        expiresAt,
+        token: realtime.createRealtimeToken({ userId: user.id, groupId: realtimeGroupId, expiresAt })
+      });
       return true;
     }
 
@@ -256,6 +276,12 @@ async function handleChatRoute(context) {
         clientRequestId: body.clientRequestId,
         text: body.text,
         stickerId: body.stickerId
+      });
+      void realtime.publishRealtimeEvent(messageGroupId, {
+        type: "message.created",
+        groupId: messageGroupId,
+        sequence: message.sequence,
+        messageId: message.id
       });
       sendJson(res, 201, { message });
       return true;

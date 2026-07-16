@@ -27,6 +27,7 @@ const reservationStore = require("./reservation-store");
 const notificationStore = require("./notification-store");
 const paymentStore = require("./payment-store");
 const { handleChatRoute } = require("./chat-routes");
+const chatRealtime = require("./chat-realtime");
 const integrations = require("./integrations");
 const campusNewsService = require("./campus-news");
 const examCatalog = require("./exams-data.json");
@@ -1424,7 +1425,8 @@ async function handleApi(req, res) {
       requireUser,
       parseBody,
       sendJson,
-      sendError
+      sendError,
+      realtime: chatRealtime
     });
     if (handled) return;
   }
@@ -1861,7 +1863,8 @@ async function handleApi(req, res) {
       requireUser,
       parseBody,
       sendJson,
-      sendError
+      sendError,
+      realtime: chatRealtime
     });
     if (handled) return;
   }

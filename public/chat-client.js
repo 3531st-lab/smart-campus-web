@@ -1,6 +1,7 @@
 (function attachCampusChatClient(global) {
   const VISIBLE_POLL_MS = 5000;
   const HIDDEN_POLL_MS = 30000;
+  const MAX_RECONNECT_MS = 30000;
 
   function requestId() {
     if (global.crypto?.randomUUID) return `chat:${global.crypto.randomUUID()}`;
@@ -12,6 +13,15 @@
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
+  function mergeEvents(existing = [], incoming = []) {
+    const events = new Map(existing.map((event) => [`${event.groupId}:${event.sequence}:${event.messageId || ""}`, event]));
+    incoming.forEach((event) => {
+      if (!event || !event.groupId || !Number.isFinite(number(event.sequence))) return;
+      events.set(`${event.groupId}:${event.sequence}:${event.messageId || ""}`, event);
+    });
+    return [...events.values()].sort((left, right) => number(left.sequence) - number(right.sequence));
+  }
+
   global.createChatClient = function createChatClient({ api, onEvent = () => {} }) {
     let activeGroupId = "";
     let messages = [];
@@ -19,6 +29,10 @@
     let pollTimer = null;
     let destroyed = false;
     let requestInFlight = false;
+    let websocket = null;
+    let reconnectTimer = null;
+    let reconnectAttempts = 0;
+    let realtimeEvents = [];
 
     const emit = (type, payload = {}) => onEvent({ type, activeGroupId, messages: [...messages], lastSequence, ...payload });
 
@@ -57,14 +71,73 @@
     }
 
     async function selectGroup(groupId) {
+      closeRealtime();
       activeGroupId = String(groupId || "");
       messages = [];
       lastSequence = 0;
+      realtimeEvents = [];
       emit("group-selected");
       await loadMessages({ after: 0 });
       await markRead();
       schedulePoll();
+      void openRealtime();
       return messages;
+    }
+
+    function closeRealtime() {
+      if (reconnectTimer) global.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      if (websocket && websocket.readyState <= 1) websocket.close(1000, "group changed");
+      websocket = null;
+    }
+
+    function scheduleReconnect() {
+      if (destroyed || !activeGroupId || reconnectTimer) return;
+      const delay = Math.min(MAX_RECONNECT_MS, 1000 * (2 ** reconnectAttempts));
+      reconnectAttempts += 1;
+      reconnectTimer = global.setTimeout(() => {
+        reconnectTimer = null;
+        void openRealtime();
+      }, delay);
+    }
+
+    async function openRealtime() {
+      if (destroyed || !activeGroupId || !global.WebSocket || websocket?.readyState === 1) return;
+      const selectedGroupId = activeGroupId;
+      try {
+        const credentials = await api(`/api/chat/groups/${encodeURIComponent(selectedGroupId)}/realtime-token`, { method: "POST" });
+        if (destroyed || selectedGroupId !== activeGroupId || !credentials.configured || !credentials.realtimeUrl || !credentials.token) return;
+        const url = new URL(credentials.realtimeUrl);
+        url.pathname = `${url.pathname.replace(/\/+$/, "")}/groups/${encodeURIComponent(selectedGroupId)}/connect`;
+        url.searchParams.set("token", credentials.token);
+        const socket = new global.WebSocket(url.toString());
+        websocket = socket;
+        socket.onopen = () => {
+          reconnectAttempts = 0;
+          emit("realtime-open");
+        };
+        socket.onmessage = async (message) => {
+          try {
+            const event = JSON.parse(message.data);
+            if (event.type !== "message.created" || String(event.groupId) !== String(activeGroupId)) return;
+            const before = realtimeEvents;
+            realtimeEvents = mergeEvents(realtimeEvents, [event]);
+            if (before.length === realtimeEvents.length && before.some((item) => item.sequence === event.sequence && item.messageId === event.messageId)) return;
+            await loadMessages({ groupId: activeGroupId, after: lastSequence, silent: false });
+            await markRead();
+          } catch (error) {
+            emit("realtime-error", { error });
+          }
+        };
+        socket.onerror = () => socket.close();
+        socket.onclose = () => {
+          if (websocket === socket) websocket = null;
+          scheduleReconnect();
+        };
+      } catch (error) {
+        emit("realtime-error", { error });
+        scheduleReconnect();
+      }
     }
 
     async function poll() {
@@ -156,10 +229,12 @@
       destroyed = true;
       if (pollTimer) global.clearTimeout(pollTimer);
       pollTimer = null;
+      closeRealtime();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     }
 
     document.addEventListener("visibilitychange", onVisibilityChange);
     return { loadGroups, selectGroup, loadMessages, send, retry, markRead, destroy, get activeGroupId() { return activeGroupId; }, get messages() { return [...messages]; } };
   };
+  global.CampusChatRealtime = { mergeEvents };
 })(window);
