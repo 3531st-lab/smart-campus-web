@@ -99,6 +99,58 @@ test("serves the single-page app for direct deep links", async () => {
   }
 });
 
+test("routes authenticated group messages through the HTTP API", async (t) => {
+  const suffix = String(Date.now());
+  const member = {
+    id: `chat-http-member-${suffix}`,
+    name: "群聊 HTTP 测试同学",
+    school: "测试大学",
+    college: "测试学院",
+    major: "测试专业",
+    className: "HTTP 测试班",
+    studentNo: `CHAT-${suffix}`,
+    phone: "13800000000",
+    status: "active",
+    role: "student",
+    verified: true,
+    avatarColor: "#188aa3"
+  };
+  const classId = `chat-http-class-${suffix}`;
+  const groupId = `chat-http-group-${suffix}`;
+  data.users.push(member);
+  data.campusClasses.push({ id: classId, school: member.school, college: member.college, className: "HTTP 测试班", status: "active" });
+  data.classAssignments.push({ id: `assignment-${suffix}`, classId, userId: member.id, duty: "member", active: true });
+  data.chatGroups.push({ id: groupId, type: "class", classId, name: "HTTP 测试班群", status: "active", frozen: false });
+  t.after(() => {
+    const memberIndex = data.users.findIndex((user) => user.id === member.id);
+    if (memberIndex >= 0) data.users.splice(memberIndex, 1);
+    for (const collection of [data.chatMessages, data.chatReadCursors, data.chatGroups, data.classAssignments, data.campusClasses]) {
+      for (let index = collection.length - 1; index >= 0; index -= 1) {
+        if (String(collection[index].groupId ?? collection[index].group_id ?? collection[index].id ?? collection[index].classId ?? collection[index].class_id) .includes(suffix)) {
+          collection.splice(index, 1);
+        }
+      }
+    }
+  });
+
+  const headers = {
+    Authorization: `Bearer ${createTestToken(member.id)}`,
+    "Content-Type": "application/json"
+  };
+  const created = await fetch(`${baseUrl}/api/chat/groups/${groupId}/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ clientRequestId: `http-${suffix}`, text: "HTTP 消息回归测试" })
+  });
+  assert.equal(created.status, 201);
+  const message = (await created.json()).message;
+  assert.equal(message.sequence, 1);
+
+  const history = await fetch(`${baseUrl}/api/chat/groups/${groupId}/messages?after=0&limit=10`, { headers });
+  assert.equal(history.status, 200);
+  assert.equal((await history.json()).messages[0].id, message.id);
+});
+
 test("rejects untrusted CORS origins and malformed JSON", async () => {
   const preflight = await fetch(`${baseUrl}/api/me`, {
     method: "OPTIONS",

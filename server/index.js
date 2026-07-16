@@ -26,6 +26,7 @@ const timetableStore = require("./timetable-store");
 const reservationStore = require("./reservation-store");
 const notificationStore = require("./notification-store");
 const paymentStore = require("./payment-store");
+const { handleChatRoute } = require("./chat-routes");
 const integrations = require("./integrations");
 const campusNewsService = require("./campus-news");
 const examCatalog = require("./exams-data.json");
@@ -1835,6 +1836,20 @@ async function handleApi(req, res) {
 
     sendError(res, 404, "管理员接口不存在");
     return;
+  }
+
+  if (url.pathname.startsWith("/api/chat")) {
+    const handled = await handleChatRoute({
+      req,
+      res,
+      url,
+      route,
+      requireUser,
+      parseBody,
+      sendJson,
+      sendError
+    });
+    if (handled) return;
   }
 
   const user = await requireUser(req, res);

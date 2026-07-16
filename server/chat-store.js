@@ -10,10 +10,15 @@ const GROUP_NUMBER_ATTEMPTS = 20;
 const INVITE_TOKEN_BYTES = 32;
 const DEFAULT_INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-class PublicChatError extends Error {}
+class PublicChatError extends Error {
+  constructor(message, statusCode = 400) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
 
-function publicError(message) {
-  return new PublicChatError(message);
+function publicError(message, statusCode = 400) {
+  return new PublicChatError(message, statusCode);
 }
 
 function inviteTokenDigest(token) {
@@ -59,7 +64,7 @@ function requiredText(value, message) {
 function requiredActiveUser(users, userOrId) {
   const id = userIdOf(userOrId);
   const user = users.find((item) => String(item.id) === id);
-  if (!user || user.status !== "active" || user.role === "guest") throw publicError("账号不可用");
+  if (!user || user.status !== "active" || user.role === "guest") throw publicError("账号不可用", 403);
   return user;
 }
 
@@ -132,6 +137,54 @@ function safeInviteToken(row) {
   };
 }
 
+function publicChatUser(user, assignment = null) {
+  return {
+    id: String(user?.id ?? ""),
+    name: user?.name || "",
+    avatarColor: user?.avatarColor ?? user?.avatar_color ?? null,
+    identity: user?.role === "teacher" ? "teacher" : "student",
+    classDuty: assignment?.duty ?? assignment?.class_duty ?? "member"
+  };
+}
+
+function safeMessage(row, user, assignment = null) {
+  return {
+    id: String(row.id),
+    groupId: String(row.group_id ?? row.groupId),
+    sequence: Number(row.sequence),
+    clientRequestId: row.client_request_id ?? row.clientRequestId ?? null,
+    text: row.text || "",
+    createdAt: row.created_at ?? row.createdAt ?? null,
+    sender: publicChatUser(user || row, assignment || row)
+  };
+}
+
+function normalizeMessageText(value) {
+  const text = String(value || "").trim();
+  if (!text) throw publicError("消息不能为空");
+  if (text.length > 4000) throw publicError("消息长度不能超过 4000 个字符");
+  return text;
+}
+
+function normalizeClientRequestId(value) {
+  const id = String(value || "").trim();
+  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(id)) throw publicError("消息请求标识无效");
+  return id;
+}
+
+function normalizeAfter(value) {
+  const parsed = Number(value || 0);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw publicError("消息游标无效");
+  return parsed;
+}
+
+function normalizeLimit(value, fallback = 50) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) throw publicError("消息数量范围无效");
+  return parsed;
+}
+
 function groupAccessShape(group, membership, governance = false) {
   return {
     ...safeGroup(group),
@@ -151,7 +204,9 @@ function createMemoryChatStore(seed = {}, options = {}) {
       members: seed.members || seed.chatMembers || [],
       joinRequests: seed.joinRequests || seed.chatJoinRequests || [],
       invites: seed.invites || seed.chatInvites || [],
-      inviteTokens: seed.inviteTokens || seed.chatInviteTokens || []
+      inviteTokens: seed.inviteTokens || seed.chatInviteTokens || [],
+      messages: seed.messages || seed.chatMessages || [],
+      readCursors: seed.readCursors || seed.chatReadCursors || []
     }
   };
   const groupNumberGenerator = options.groupNumberGenerator || defaultGroupNumber;
@@ -169,8 +224,8 @@ function createMemoryChatStore(seed = {}, options = {}) {
 
   function availableGroup(groupId, { writable = false } = {}) {
     const found = group(groupId);
-    if (found.status === "disabled") throw publicError("群聊不可用");
-    if (writable && (found.status === "frozen" || found.frozen)) throw publicError("群聊已冻结");
+    if (found.status === "disabled") throw publicError("群聊不可用", 403);
+    if (writable && (found.status === "frozen" || found.frozen)) throw publicError("群聊已冻结", 423);
     return found;
   }
 
@@ -272,11 +327,11 @@ function createMemoryChatStore(seed = {}, options = {}) {
       if (PLATFORM_ROLES.has(account.role)) return groupAccessShape(found, null, true);
       const assignment = classAssignment(found, account.id);
       const derived = assignment ? classMember(found, assignment) : null;
-      if (!derived) throw publicError("无权访问该群聊");
+      if (!derived) throw publicError("无权访问该群聊", 403);
       return groupAccessShape(found, derived, false);
     }
     const membership = customMembership(found.id, account.id);
-    if (!membership) throw publicError("无权访问该群聊");
+    if (!membership) throw publicError("无权访问该群聊", 403);
     return groupAccessShape(found, membership, false);
   }
 
@@ -449,6 +504,76 @@ function createMemoryChatStore(seed = {}, options = {}) {
     return { ...safeInviteToken(row), token };
   }
 
+  async function messageAccess(groupId, accountInput, { writable = false } = {}) {
+    const found = availableGroup(groupId, { writable });
+    const access = await getGroupForUser(groupId, accountInput);
+    if (writable && access.governance) throw publicError("平台管理员不能以隐身治理身份发送群消息", 403);
+    return { found, access, account: user(accountInput) };
+  }
+
+  function messageProjection(row, found) {
+    const sender = store.data.users.find((item) => String(item.id) === String(row.senderId ?? row.sender_id));
+    const assignment = found.type === "class" && sender ? classAssignment(found, sender.id) : null;
+    return safeMessage(row, sender, assignment);
+  }
+
+  async function createMessage({ groupId, senderId, clientRequestId, text }) {
+    const { found, account } = await messageAccess(groupId, senderId, { writable: true });
+    const requestId = normalizeClientRequestId(clientRequestId);
+    const existing = store.data.messages.find((item) => (
+      String(item.groupId ?? item.group_id) === String(found.id)
+      && String(item.senderId ?? item.sender_id) === String(account.id)
+      && String(item.clientRequestId ?? item.client_request_id) === requestId
+    ));
+    if (existing) return messageProjection(existing, found);
+    const sequence = store.data.messages
+      .filter((item) => String(item.groupId ?? item.group_id) === String(found.id))
+      .reduce((highest, item) => Math.max(highest, Number(item.sequence) || 0), 0) + 1;
+    const created = {
+      id: `chat-message-${crypto.randomUUID()}`,
+      groupId: found.id,
+      sequence,
+      senderId: account.id,
+      clientRequestId: requestId,
+      text: normalizeMessageText(text),
+      createdAt: new Date().toISOString()
+    };
+    store.data.messages.push(created);
+    return messageProjection(created, found);
+  }
+
+  async function listMessages({ groupId, viewerId, after = 0, limit = 50 }) {
+    const { found } = await messageAccess(groupId, viewerId);
+    const cursor = normalizeAfter(after);
+    const pageSize = normalizeLimit(limit);
+    const matching = store.data.messages
+      .filter((item) => String(item.groupId ?? item.group_id) === String(found.id) && Number(item.sequence) > cursor)
+      .sort((left, right) => Number(left.sequence) - Number(right.sequence));
+    const page = matching.slice(0, pageSize);
+    return {
+      messages: page.map((item) => messageProjection(item, found)),
+      nextSequence: page.at(-1)?.sequence || cursor,
+      hasMore: matching.length > page.length
+    };
+  }
+
+  async function updateReadCursor({ groupId, readerId, sequence }) {
+    const { found, account } = await messageAccess(groupId, readerId);
+    const nextSequence = normalizeAfter(sequence);
+    let row = store.data.readCursors.find((item) => (
+      String(item.groupId ?? item.group_id) === String(found.id)
+      && String(item.userId ?? item.user_id) === String(account.id)
+    ));
+    if (!row) {
+      row = { groupId: found.id, userId: account.id, sequence: nextSequence, updatedAt: new Date().toISOString() };
+      store.data.readCursors.push(row);
+    } else {
+      row.sequence = Math.max(Number(row.sequence) || 0, nextSequence);
+      row.updatedAt = new Date().toISOString();
+    }
+    return { groupId: String(found.id), userId: String(account.id), sequence: Number(row.sequence) };
+  }
+
   return {
     ...store,
     createCustomGroup,
@@ -459,7 +584,10 @@ function createMemoryChatStore(seed = {}, options = {}) {
     reviewJoinRequest,
     createInvite,
     acceptInvite,
-    createInviteToken
+    createInviteToken,
+    createMessage,
+    listMessages,
+    updateReadCursor
   };
 }
 
@@ -497,8 +625,8 @@ function createMysqlChatStore(pool, options = {}) {
   }
 
   function checkGroupState(group, writable = false) {
-    if (group.status === "disabled") throw publicError("群聊不可用");
-    if (writable && group.frozen) throw publicError("群聊已冻结");
+    if (group.status === "disabled") throw publicError("群聊不可用", 403);
+    if (writable && group.frozen) throw publicError("群聊已冻结", 423);
   }
 
   async function mysqlMember(groupId, userId, connection = pool, { forUpdate = false, includeInactive = false } = {}) {
@@ -578,7 +706,7 @@ function createMysqlChatStore(pool, options = {}) {
         WHERE ca.class_id = ? AND ca.user_id = ? AND ca.active = 1
           AND s.status = 'active' AND s.role NOT IN ('admin','super_admin')
       `, [found.classId, account.id]);
-      if (!rows[0]) throw publicError("无权访问该群聊");
+      if (!rows[0]) throw publicError("无权访问该群聊", 403);
       return groupAccessShape(found, {
         id: `class:${found.id}:${account.id}`,
         groupId: found.id,
@@ -590,7 +718,7 @@ function createMysqlChatStore(pool, options = {}) {
       });
     }
     const membership = await mysqlMember(found.id, account.id);
-    if (!membership) throw publicError("无权访问该群聊");
+    if (!membership) throw publicError("无权访问该群聊", 403);
     return groupAccessShape(found, membership);
   });
 
@@ -823,6 +951,146 @@ function createMysqlChatStore(pool, options = {}) {
     }
   });
 
+  async function mysqlMessageAccess(groupId, accountInput, connection, { writable = false } = {}) {
+    const account = await activeUser(accountInput, connection);
+    const found = await groupById(groupId, connection, { forUpdate: true });
+    checkGroupState(found, writable);
+    if (found.type === "class") {
+      if (PLATFORM_ROLES.has(account.role)) {
+        if (writable) throw publicError("平台管理员不能以隐身治理身份发送群消息", 403);
+        return { found, account, governance: true, assignment: null };
+      }
+      const [rows] = await connection.execute(`
+        SELECT ca.duty
+        FROM class_assignments ca
+        INNER JOIN students s ON s.id = ca.user_id
+        WHERE ca.class_id = ? AND ca.user_id = ? AND ca.active = 1
+          AND s.status = 'active' AND s.role NOT IN ('admin', 'super_admin', 'guest')
+        FOR UPDATE
+      `, [found.classId, account.id]);
+      if (!rows[0]) throw publicError("无权访问该群聊", 403);
+      return { found, account, governance: false, assignment: rows[0] };
+    }
+    const membership = await mysqlMember(found.id, account.id, connection, { forUpdate: true });
+    if (!membership) throw publicError("无权访问该群聊", 403);
+    return { found, account, governance: false, membership, assignment: null };
+  }
+
+  function mysqlMessageProjection(row) {
+    const sender = {
+      id: row.sender_id,
+      name: row.sender_name,
+      role: row.sender_role,
+      avatar_color: row.sender_avatar_color
+    };
+    return safeMessage(row, sender, { class_duty: row.class_duty });
+  }
+
+  const createMessage = mysqlPublic(async ({ groupId, senderId, clientRequestId, text }) => {
+    const requestId = normalizeClientRequestId(clientRequestId);
+    const normalizedText = normalizeMessageText(text);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      // All message writes serialize on the group row before member and message rows.
+      const access = await mysqlMessageAccess(groupId, senderId, connection, { writable: true });
+      const [existingRows] = await connection.execute(`
+        SELECT m.*, s.id AS sender_id, s.name AS sender_name, s.role AS sender_role,
+          s.avatar_color AS sender_avatar_color, ca.duty AS class_duty
+        FROM chat_messages m
+        INNER JOIN students s ON s.id = m.sender_id
+        LEFT JOIN class_assignments ca ON ca.class_id = ? AND ca.user_id = m.sender_id AND ca.active = 1
+        WHERE m.group_id = ? AND m.sender_id = ? AND m.client_request_id = ?
+        FOR UPDATE
+      `, [access.found.classId, access.found.id, access.account.id, requestId]);
+      if (existingRows[0]) {
+        await connection.commit();
+        return mysqlMessageProjection(existingRows[0]);
+      }
+      await connection.execute(
+        "UPDATE chat_groups SET next_message_sequence = next_message_sequence + 1 WHERE id = ?",
+        [access.found.id]
+      );
+      const [sequenceRows] = await connection.execute(
+        "SELECT next_message_sequence FROM chat_groups WHERE id = ? FOR UPDATE",
+        [access.found.id]
+      );
+      const sequence = Number(sequenceRows[0]?.next_message_sequence);
+      if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error("chat message sequence allocation failed");
+      const id = `chat-message-${crypto.randomUUID()}`;
+      const createdAt = new Date().toISOString();
+      await connection.execute(
+        "INSERT INTO chat_messages (id, group_id, sequence, sender_id, client_request_id, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [id, access.found.id, sequence, access.account.id, requestId, normalizedText, createdAt]
+      );
+      await connection.commit();
+      return safeMessage({ id, group_id: access.found.id, sequence, client_request_id: requestId, text: normalizedText, created_at: createdAt }, access.account, access.assignment);
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const listMessages = mysqlPublic(async ({ groupId, viewerId, after = 0, limit = 50 }) => {
+    const cursor = normalizeAfter(after);
+    const pageSize = normalizeLimit(limit);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const access = await mysqlMessageAccess(groupId, viewerId, connection);
+      const [rows] = await connection.execute(`
+        SELECT m.*, s.id AS sender_id, s.name AS sender_name, s.role AS sender_role,
+          s.avatar_color AS sender_avatar_color, ca.duty AS class_duty
+        FROM chat_messages m
+        INNER JOIN students s ON s.id = m.sender_id
+        LEFT JOIN class_assignments ca ON ca.class_id = ? AND ca.user_id = m.sender_id AND ca.active = 1
+        WHERE m.group_id = ? AND m.sequence > ?
+        ORDER BY m.sequence ASC
+        LIMIT ?
+      `, [access.found.classId, access.found.id, cursor, pageSize + 1]);
+      await connection.commit();
+      const hasMore = rows.length > pageSize;
+      const page = rows.slice(0, pageSize);
+      return {
+        messages: page.map(mysqlMessageProjection),
+        nextSequence: page.at(-1)?.sequence || cursor,
+        hasMore
+      };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const updateReadCursor = mysqlPublic(async ({ groupId, readerId, sequence }) => {
+    const nextSequence = normalizeAfter(sequence);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const access = await mysqlMessageAccess(groupId, readerId, connection);
+      await connection.execute(`
+        INSERT INTO chat_read_cursors (group_id, user_id, sequence)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE sequence = GREATEST(sequence, VALUES(sequence)), updated_at = CURRENT_TIMESTAMP
+      `, [access.found.id, access.account.id, nextSequence]);
+      const [rows] = await connection.execute(
+        "SELECT sequence FROM chat_read_cursors WHERE group_id = ? AND user_id = ?",
+        [access.found.id, access.account.id]
+      );
+      await connection.commit();
+      return { groupId: String(access.found.id), userId: String(access.account.id), sequence: Number(rows[0]?.sequence ?? nextSequence) };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
   return {
     createCustomGroup,
     listUserGroups,
@@ -832,7 +1100,10 @@ function createMysqlChatStore(pool, options = {}) {
     reviewJoinRequest,
     createInvite,
     acceptInvite,
-    createInviteToken
+    createInviteToken,
+    createMessage,
+    listMessages,
+    updateReadCursor
   };
 }
 
@@ -844,7 +1115,9 @@ const memoryStore = createMemoryChatStore({
   chatMembers: data.chatMembers,
   chatJoinRequests: data.chatJoinRequests,
   chatInvites: data.chatInvites,
-  chatInviteTokens: data.chatInviteTokens
+  chatInviteTokens: data.chatInviteTokens,
+  chatMessages: data.chatMessages,
+  chatReadCursors: data.chatReadCursors
 });
 
 function selectedStore() {
@@ -863,5 +1136,8 @@ module.exports = {
   reviewJoinRequest: (...args) => selectedStore().reviewJoinRequest(...args),
   createInvite: (...args) => selectedStore().createInvite(...args),
   acceptInvite: (...args) => selectedStore().acceptInvite(...args),
-  createInviteToken: (...args) => selectedStore().createInviteToken(...args)
+  createInviteToken: (...args) => selectedStore().createInviteToken(...args),
+  createMessage: (...args) => selectedStore().createMessage(...args),
+  listMessages: (...args) => selectedStore().listMessages(...args),
+  updateReadCursor: (...args) => selectedStore().updateReadCursor(...args)
 };

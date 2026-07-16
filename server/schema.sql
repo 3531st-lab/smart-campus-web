@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS chat_groups (
   class_id VARCHAR(64) NULL,
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
   frozen TINYINT(1) NOT NULL DEFAULT 0,
+  next_message_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
   description VARCHAR(500) NOT NULL DEFAULT '',
   join_policy VARCHAR(32) NOT NULL DEFAULT 'review',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -78,6 +79,7 @@ ALTER TABLE chat_groups
   ADD COLUMN IF NOT EXISTS public_no VARCHAR(32) NULL,
   ADD COLUMN IF NOT EXISTS owner_id VARCHAR(64) NULL,
   ADD COLUMN IF NOT EXISTS frozen TINYINT(1) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS next_message_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS description VARCHAR(500) NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS join_policy VARCHAR(32) NOT NULL DEFAULT 'review';
 
@@ -152,6 +154,29 @@ CREATE TABLE IF NOT EXISTS chat_invite_tokens (
   KEY idx_chat_token_group_active (group_id, revoked, expires_at),
   KEY idx_chat_token_creator (creator_id, created_at),
   CONSTRAINT chk_chat_token_usage CHECK (use_count <= max_uses)
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id VARCHAR(64) PRIMARY KEY,
+  group_id VARCHAR(64) NOT NULL,
+  sequence BIGINT UNSIGNED NOT NULL,
+  sender_id VARCHAR(64) NOT NULL,
+  client_request_id VARCHAR(128) NOT NULL,
+  text TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_chat_message_sequence (group_id, sequence),
+  UNIQUE KEY uq_chat_message_request (group_id, sender_id, client_request_id),
+  KEY idx_chat_message_group_sequence (group_id, sequence),
+  KEY idx_chat_message_sender_created (sender_id, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS chat_read_cursors (
+  group_id VARCHAR(64) NOT NULL,
+  user_id VARCHAR(64) NOT NULL,
+  sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (group_id, user_id),
+  KEY idx_chat_read_cursor_user (user_id, updated_at)
 );
 
 CREATE TABLE IF NOT EXISTS class_sync_errors (
