@@ -7,6 +7,8 @@ const CLASS_ADMIN_DUTIES = new Set(["monitor", "league_secretary", "class_admin"
 const GROUP_ADMIN_ROLES = new Set(["owner", "admin"]);
 const JOIN_SOURCES = new Set(["group_number", "qr"]);
 const GROUP_NUMBER_ATTEMPTS = 20;
+const INVITE_TOKEN_BYTES = 32;
+const DEFAULT_INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 class PublicChatError extends Error {}
 
@@ -16,6 +18,29 @@ function publicError(message) {
 
 function inviteTokenDigest(token) {
   return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+function userIdOf(userOrId) {
+  return String(typeof userOrId === "object" ? userOrId?.id : userOrId || "");
+}
+
+function defaultInviteToken() {
+  return crypto.randomBytes(INVITE_TOKEN_BYTES).toString("base64url");
+}
+
+function inviteExpiry(expiresAt) {
+  if (expiresAt !== null && expiresAt !== undefined && String(expiresAt).trim()) {
+    const parsed = new Date(expiresAt);
+    if (Number.isNaN(parsed.getTime())) throw publicError("邀请有效期无效");
+    return parsed.toISOString();
+  }
+  return new Date(Date.now() + DEFAULT_INVITE_TTL_MS).toISOString();
+}
+
+function hasExpired(expiresAt) {
+  if (!expiresAt) return false;
+  const timestamp = new Date(expiresAt).getTime();
+  return Number.isNaN(timestamp) || timestamp <= Date.now();
 }
 
 function defaultGroupNumber() {
@@ -32,7 +57,7 @@ function requiredText(value, message) {
 }
 
 function requiredActiveUser(users, userOrId) {
-  const id = String(typeof userOrId === "object" ? userOrId?.id : userOrId || "");
+  const id = userIdOf(userOrId);
   const user = users.find((item) => String(item.id) === id);
   if (!user || user.status !== "active" || user.role === "guest") throw publicError("账号不可用");
   return user;
@@ -40,7 +65,8 @@ function requiredActiveUser(users, userOrId) {
 
 function safeGroup(row) {
   if (!row) return null;
-  const frozen = Boolean(row.frozen) || row.status === "frozen";
+  const disabled = row.status === "disabled";
+  const frozen = !disabled && (Boolean(row.frozen) || row.status === "frozen");
   return {
     id: String(row.id),
     type: row.type,
@@ -48,7 +74,7 @@ function safeGroup(row) {
     publicNo: row.public_no ?? row.publicNo ?? null,
     name: row.name,
     ownerId: row.owner_id ?? row.ownerId ?? null,
-    status: frozen ? "frozen" : (row.status || "active"),
+    status: disabled ? "disabled" : (frozen ? "frozen" : (row.status || "active")),
     frozen,
     description: row.description || "",
     joinPolicy: row.join_policy ?? row.joinPolicy ?? "review"
@@ -89,6 +115,7 @@ function safeInvite(row) {
     inviterId: String(row.inviter_id ?? row.inviterId),
     inviteeId: String(row.invitee_id ?? row.inviteeId),
     status: row.status,
+    expiresAt: row.expires_at ?? row.expiresAt ?? null,
     acceptedAt: row.accepted_at ?? row.acceptedAt ?? null
   };
 }
@@ -128,6 +155,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
     }
   };
   const groupNumberGenerator = options.groupNumberGenerator || defaultGroupNumber;
+  const inviteTokenGenerator = options.inviteTokenGenerator || defaultInviteToken;
 
   function user(userOrId) {
     return requiredActiveUser(store.data.users, userOrId);
@@ -295,14 +323,33 @@ function createMemoryChatStore(seed = {}, options = {}) {
     return safeMember(existing, store.data.users.find((entry) => String(entry.id) === String(userId)));
   }
 
-  async function createJoinRequest({ groupId, applicantId, source }) {
-    ensureCustomWritable(groupId);
+  function verifyJoinSource(found, source, input) {
+    if (!JOIN_SOURCES.has(source)) throw publicError("入群来源无效");
+    if (source === "group_number") {
+      const groupNumber = requiredText(input?.groupNumber ?? input?.proof, "请提供正确群号");
+      if (groupNumber !== String(found.publicNo ?? found.public_no)) throw publicError("群号与目标群不一致");
+      return null;
+    }
+    const token = requiredText(input?.token ?? input?.proof, "请提供有效二维码凭证");
+    const digest = inviteTokenDigest(token);
+    const tokenRow = store.data.inviteTokens.find((item) => item.tokenDigest === digest);
+    if (!tokenRow || String(tokenRow.groupId ?? tokenRow.group_id) !== String(found.id)) throw publicError("二维码凭证无效");
+    if (tokenRow.revoked || hasExpired(tokenRow.expiresAt ?? tokenRow.expires_at) || Number(tokenRow.useCount ?? tokenRow.use_count ?? 0) >= Number(tokenRow.maxUses ?? tokenRow.max_uses ?? 1)) {
+      throw publicError("二维码凭证已失效");
+    }
+    return tokenRow;
+  }
+
+  async function createJoinRequest(input = {}) {
+    const { groupId, applicantId, source } = input;
+    const found = ensureCustomWritable(groupId);
     const applicant = user(applicantId);
     if (!JOIN_SOURCES.has(source)) throw publicError("入群来源无效");
     if (member(groupId, applicant.id)) throw publicError("已经是群成员");
     const pending = store.data.joinRequests.find((item) => String(item.groupId ?? item.group_id) === String(groupId)
       && String(item.applicantId ?? item.applicant_id) === String(applicant.id) && item.status === "pending");
     if (pending) return safeJoinRequest(pending);
+    const tokenRow = verifyJoinSource(found, source, input);
     const request = {
       id: `join-request-${crypto.randomUUID()}`,
       groupId,
@@ -314,6 +361,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
       pendingKey: `${groupId}:${applicant.id}`
     };
     store.data.joinRequests.push(request);
+    if (tokenRow) tokenRow.useCount = Number(tokenRow.useCount ?? tokenRow.use_count ?? 0) + 1;
     return safeJoinRequest(request);
   }
 
@@ -335,7 +383,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
     return safeJoinRequest(request);
   }
 
-  async function createInvite({ groupId, inviterId, inviteeId }) {
+  async function createInvite({ groupId, inviterId, inviteeId, expiresAt = null }) {
     ensureCustomWritable(groupId);
     const inviter = requiredGroupAdmin(groupId, inviterId, "无权邀请群成员");
     const invitee = user(inviteeId);
@@ -349,6 +397,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
       inviterId: inviter.id,
       inviteeId: invitee.id,
       status: "pending",
+      expiresAt: inviteExpiry(expiresAt),
       acceptedAt: null,
       pendingKey: `${groupId}:${invitee.id}`
     };
@@ -362,32 +411,42 @@ function createMemoryChatStore(seed = {}, options = {}) {
     if (!invite) throw publicError("群邀请不存在");
     if (String(invite.inviteeId ?? invite.invitee_id) !== String(invitee.id)) throw publicError("仅限被邀请人确认");
     ensureCustomWritable(invite.groupId ?? invite.group_id);
-    if (invite.status === "accepted") return addMember(invite.groupId, invitee.id, "invite");
+    if (invite.status === "accepted") {
+      const existing = store.data.members.find((item) => String(item.groupId ?? item.group_id) === String(invite.groupId ?? invite.group_id) && String(item.userId ?? item.user_id) === String(invitee.id));
+      if (!existing) throw publicError("群邀请已失效");
+      return safeMember(existing, invitee);
+    }
     if (invite.status !== "pending") throw publicError("群邀请已失效");
+    if (hasExpired(invite.expiresAt ?? invite.expires_at)) {
+      invite.status = "expired";
+      invite.pendingKey = null;
+      throw publicError("群邀请已过期");
+    }
     invite.status = "accepted";
     invite.acceptedAt = new Date().toISOString();
     invite.pendingKey = null;
     return addMember(invite.groupId, invitee.id, "invite");
   }
 
-  async function createInviteToken({ groupId, creatorId, token, expiresAt = null, maxUses = 1 }) {
+  async function createInviteToken({ groupId, creatorId, expiresAt = null, maxUses = 1 }) {
     ensureCustomWritable(groupId);
     const creator = requiredGroupAdmin(groupId, creatorId, "无权创建群二维码");
-    const digest = inviteTokenDigest(requiredText(token, "邀请令牌不能为空"));
+    const token = requiredText(inviteTokenGenerator(), "二维码生成失败");
+    const digest = inviteTokenDigest(token);
     const existing = store.data.inviteTokens.find((item) => item.tokenDigest === digest);
-    if (existing) return safeInviteToken(existing);
+    if (existing) throw publicError("二维码令牌已存在，请重新生成");
     const row = {
       id: `chat-token-${crypto.randomUUID()}`,
       groupId,
       creatorId: creator.id,
       tokenDigest: digest,
-      expiresAt,
+      expiresAt: inviteExpiry(expiresAt),
       maxUses: Math.max(1, Number(maxUses) || 1),
       useCount: 0,
       revoked: false
     };
     store.data.inviteTokens.push(row);
-    return safeInviteToken(row);
+    return { ...safeInviteToken(row), token };
   }
 
   return {
@@ -419,18 +478,20 @@ function mysqlPublic(operation) {
 function createMysqlChatStore(pool, options = {}) {
   if (!pool) throw new Error("MySQL pool is required");
   const groupNumberGenerator = options.groupNumberGenerator || defaultGroupNumber;
+  const inviteTokenGenerator = options.inviteTokenGenerator || defaultInviteToken;
 
   async function execute(sql, params = []) {
     return pool.execute(sql, params);
   }
 
-  async function activeUser(userId) {
-    const [rows] = await execute("SELECT id, name, role, status, avatar_color FROM students WHERE id = ?", [userId]);
+  async function activeUser(userInput, connection = pool) {
+    const userId = userIdOf(userInput);
+    const [rows] = await connection.execute("SELECT id, name, role, status, avatar_color FROM students WHERE id = ?", [userId]);
     return requiredActiveUser(rows, userId);
   }
 
-  async function groupById(groupId, connection = pool) {
-    const [rows] = await connection.execute("SELECT * FROM chat_groups WHERE id = ?", [groupId]);
+  async function groupById(groupId, connection = pool, { forUpdate = false } = {}) {
+    const [rows] = await connection.execute(`SELECT * FROM chat_groups WHERE id = ?${forUpdate ? " FOR UPDATE" : ""}`, [groupId]);
     if (!rows[0]) throw publicError("群聊不存在");
     return safeGroup(rows[0]);
   }
@@ -440,9 +501,9 @@ function createMysqlChatStore(pool, options = {}) {
     if (writable && group.frozen) throw publicError("群聊已冻结");
   }
 
-  async function mysqlMember(groupId, userId, connection = pool) {
+  async function mysqlMember(groupId, userId, connection = pool, { forUpdate = false, includeInactive = false } = {}) {
     const [rows] = await connection.execute(
-      "SELECT * FROM chat_members WHERE group_id = ? AND user_id = ? AND active = 1",
+      `SELECT * FROM chat_members WHERE group_id = ? AND user_id = ?${includeInactive ? "" : " AND active = 1"}${forUpdate ? " FOR UPDATE" : ""}`,
       [groupId, userId]
     );
     return rows[0] ? safeMember(rows[0]) : null;
@@ -459,7 +520,7 @@ function createMysqlChatStore(pool, options = {}) {
   }
 
   const createCustomGroup = mysqlPublic(async (input, ownerInput) => {
-    const owner = await activeUser(ownerInput?.id);
+    const owner = await activeUser(ownerInput);
     const name = requiredText(input?.name, "群名称不能为空");
     for (let attempt = 0; attempt < GROUP_NUMBER_ATTEMPTS; attempt += 1) {
       const connection = await pool.getConnection();
@@ -505,7 +566,7 @@ function createMysqlChatStore(pool, options = {}) {
   });
 
   const getGroupForUser = mysqlPublic(async (groupId, accountInput) => {
-    const account = await activeUser(accountInput?.id);
+    const account = await activeUser(accountInput);
     const found = await groupById(groupId);
     checkGroupState(found);
     if (found.type === "class") {
@@ -560,68 +621,100 @@ function createMysqlChatStore(pool, options = {}) {
 
   async function requiredMysqlAdmin(groupId, reviewerId, connection, message) {
     const [rows] = await connection.execute(
-      "SELECT * FROM chat_members WHERE group_id = ? AND user_id = ? AND active = 1 AND role IN ('owner','admin')",
+      "SELECT * FROM chat_members WHERE group_id = ? AND user_id = ? AND active = 1 AND role IN ('owner','admin') FOR UPDATE",
       [groupId, reviewerId]
     );
     if (!rows[0]) throw publicError(message);
   }
 
-  async function mysqlCustomWritable(groupId, connection = pool) {
-    const found = await groupById(groupId, connection);
+  async function mysqlCustomWritable(groupId, connection = pool, { forUpdate = false } = {}) {
+    const found = await groupById(groupId, connection, { forUpdate });
     checkGroupState(found, true);
     if (found.type === "class") throw publicError("班级群成员由班级身份同步");
     return found;
   }
 
-  const createJoinRequest = mysqlPublic(async ({ groupId, applicantId, source }) => {
-    const applicant = await activeUser(applicantId);
+  const createJoinRequest = mysqlPublic(async (input = {}) => {
+    const { groupId, applicantId, source } = input;
     if (!JOIN_SOURCES.has(source)) throw publicError("入群来源无效");
-    await mysqlCustomWritable(groupId);
-    if (await mysqlMember(groupId, applicant.id)) throw publicError("已经是群成员");
-    const pendingKey = `${groupId}:${applicant.id}`;
-    const [existing] = await execute("SELECT * FROM chat_join_requests WHERE pending_key = ?", [pendingKey]);
-    if (existing[0]) return safeJoinRequest(existing[0]);
-    const id = `join-request-${crypto.randomUUID()}`;
+    const connection = await pool.getConnection();
     try {
-      await execute(
+      await connection.beginTransaction();
+      // Lock order for membership changes: group -> member/request/token.
+      const found = await mysqlCustomWritable(groupId, connection, { forUpdate: true });
+      const applicant = await activeUser(applicantId, connection);
+      if (await mysqlMember(groupId, applicant.id, connection, { forUpdate: true })) throw publicError("已经是群成员");
+      const pendingKey = `${groupId}:${applicant.id}`;
+      const [existing] = await connection.execute("SELECT * FROM chat_join_requests WHERE pending_key = ? FOR UPDATE", [pendingKey]);
+      if (existing[0]) {
+        await connection.commit();
+        return safeJoinRequest(existing[0]);
+      }
+      if (source === "group_number") {
+        const groupNumber = requiredText(input.groupNumber ?? input.proof, "请提供正确群号");
+        if (groupNumber !== String(found.publicNo)) throw publicError("群号与目标群不一致");
+      } else {
+        const token = requiredText(input.token ?? input.proof, "请提供有效二维码凭证");
+        const digest = inviteTokenDigest(token);
+        const [tokenRows] = await connection.execute("SELECT * FROM chat_invite_tokens WHERE token_digest = ? FOR UPDATE", [digest]);
+        const tokenRow = tokenRows[0];
+        if (!tokenRow || String(tokenRow.group_id) !== String(found.id)) throw publicError("二维码凭证无效");
+        if (tokenRow.revoked || hasExpired(tokenRow.expires_at) || Number(tokenRow.use_count) >= Number(tokenRow.max_uses)) {
+          throw publicError("二维码凭证已失效");
+        }
+        await connection.execute("UPDATE chat_invite_tokens SET use_count = use_count + 1 WHERE id = ?", [tokenRow.id]);
+      }
+      const id = `join-request-${crypto.randomUUID()}`;
+      await connection.execute(
         "INSERT INTO chat_join_requests (id, group_id, applicant_id, source, status, pending_key) VALUES (?, ?, ?, ?, 'pending', ?)",
         [id, groupId, applicant.id, source, pendingKey]
       );
+      await connection.commit();
       return safeJoinRequest({ id, group_id: groupId, applicant_id: applicant.id, source, status: "pending" });
     } catch (error) {
-      if (error?.code !== "ER_DUP_ENTRY") throw error;
-      const [rows] = await execute("SELECT * FROM chat_join_requests WHERE pending_key = ?", [pendingKey]);
-      return safeJoinRequest(rows[0]);
+      await connection.rollback();
+      if (error?.code === "ER_DUP_ENTRY") {
+        const pendingKey = `${groupId}:${userIdOf(applicantId)}`;
+        const [rows] = await execute("SELECT * FROM chat_join_requests WHERE pending_key = ?", [pendingKey]);
+        if (rows[0]) return safeJoinRequest(rows[0]);
+      }
+      throw error;
+    } finally {
+      connection.release();
     }
   });
 
   const reviewJoinRequest = mysqlPublic(async ({ requestId, decision, reviewer }) => {
     if (!["approved", "rejected"].includes(decision)) throw publicError("审核决定无效");
-    const account = await activeUser(reviewer?.id);
+    const [lookupRows] = await execute("SELECT group_id FROM chat_join_requests WHERE id = ?", [requestId]);
+    if (!lookupRows[0]) throw publicError("入群申请不存在");
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
+      const requestGroupId = lookupRows[0].group_id;
+      await mysqlCustomWritable(requestGroupId, connection, { forUpdate: true });
       const [rows] = await connection.execute("SELECT * FROM chat_join_requests WHERE id = ? FOR UPDATE", [requestId]);
       if (!rows[0]) throw publicError("入群申请不存在");
       const request = rows[0];
-      await mysqlCustomWritable(request.group_id, connection);
+      const account = await activeUser(reviewer, connection);
       await requiredMysqlAdmin(request.group_id, account.id, connection, "无权审核该申请");
       if (request.status !== "pending") {
         if (request.status !== decision) throw publicError("入群申请已处理");
         await connection.commit();
         return safeJoinRequest(request);
       }
-      await connection.execute(
-        "UPDATE chat_join_requests SET status = ?, reviewer_id = ?, reviewed_at = CURRENT_TIMESTAMP, pending_key = NULL WHERE id = ?",
-        [decision, account.id, requestId]
-      );
       if (decision === "approved") {
+        await mysqlMember(request.group_id, request.applicant_id, connection, { forUpdate: true, includeInactive: true });
         await connection.execute(`
           INSERT INTO chat_members (id, group_id, user_id, role, joined_via, active)
           VALUES (?, ?, ?, 'member', ?, 1)
           ON DUPLICATE KEY UPDATE active = 1, joined_via = VALUES(joined_via)
         `, [`chat-member-${crypto.randomUUID()}`, request.group_id, request.applicant_id, request.source]);
       }
+      await connection.execute(
+        "UPDATE chat_join_requests SET status = ?, reviewer_id = ?, reviewed_at = CURRENT_TIMESTAMP, pending_key = NULL WHERE id = ?",
+        [decision, account.id, requestId]
+      );
       await connection.commit();
       return safeJoinRequest({ ...request, status: decision, reviewer_id: account.id, reviewed_at: new Date().toISOString() });
     } catch (error) {
@@ -632,40 +725,56 @@ function createMysqlChatStore(pool, options = {}) {
     }
   });
 
-  const createInvite = mysqlPublic(async ({ groupId, inviterId, inviteeId }) => {
-    const inviter = await activeUser(inviterId);
-    const invitee = await activeUser(inviteeId);
-    await mysqlCustomWritable(groupId);
-    await requiredMysqlAdmin(groupId, inviter.id, pool, "无权邀请群成员");
-    if (await mysqlMember(groupId, invitee.id)) throw publicError("已经是群成员");
-    const pendingKey = `${groupId}:${invitee.id}`;
-    const [existing] = await execute("SELECT * FROM chat_invites WHERE pending_key = ?", [pendingKey]);
-    if (existing[0]) return safeInvite(existing[0]);
-    const id = `chat-invite-${crypto.randomUUID()}`;
+  const createInvite = mysqlPublic(async ({ groupId, inviterId, inviteeId, expiresAt = null }) => {
+    const connection = await pool.getConnection();
     try {
-      await execute(
-        "INSERT INTO chat_invites (id, group_id, inviter_id, invitee_id, status, pending_key) VALUES (?, ?, ?, ?, 'pending', ?)",
-        [id, groupId, inviter.id, invitee.id, pendingKey]
+      await connection.beginTransaction();
+      await mysqlCustomWritable(groupId, connection, { forUpdate: true });
+      const inviter = await activeUser(inviterId, connection);
+      const invitee = await activeUser(inviteeId, connection);
+      await requiredMysqlAdmin(groupId, inviter.id, connection, "无权邀请群成员");
+      if (await mysqlMember(groupId, invitee.id, connection, { forUpdate: true })) throw publicError("已经是群成员");
+      const pendingKey = `${groupId}:${invitee.id}`;
+      const [existing] = await connection.execute("SELECT * FROM chat_invites WHERE pending_key = ? FOR UPDATE", [pendingKey]);
+      if (existing[0]) {
+        await connection.commit();
+        return safeInvite(existing[0]);
+      }
+      const id = `chat-invite-${crypto.randomUUID()}`;
+      const resolvedExpiry = inviteExpiry(expiresAt);
+      await connection.execute(
+        "INSERT INTO chat_invites (id, group_id, inviter_id, invitee_id, status, pending_key, expires_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        [id, groupId, inviter.id, invitee.id, pendingKey, resolvedExpiry]
       );
-      return safeInvite({ id, group_id: groupId, inviter_id: inviter.id, invitee_id: invitee.id, status: "pending" });
+      await connection.commit();
+      return safeInvite({ id, group_id: groupId, inviter_id: inviter.id, invitee_id: invitee.id, status: "pending", expires_at: resolvedExpiry });
     } catch (error) {
-      if (error?.code !== "ER_DUP_ENTRY") throw error;
-      const [rows] = await execute("SELECT * FROM chat_invites WHERE pending_key = ?", [pendingKey]);
-      return safeInvite(rows[0]);
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
     }
   });
 
   const acceptInvite = mysqlPublic(async ({ inviteId, inviteeId }) => {
-    const invitee = await activeUser(inviteeId);
+    const [lookupRows] = await execute("SELECT group_id FROM chat_invites WHERE id = ?", [inviteId]);
+    if (!lookupRows[0]) throw publicError("群邀请不存在");
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
+      await mysqlCustomWritable(lookupRows[0].group_id, connection, { forUpdate: true });
       const [rows] = await connection.execute("SELECT * FROM chat_invites WHERE id = ? FOR UPDATE", [inviteId]);
       if (!rows[0]) throw publicError("群邀请不存在");
       const invite = rows[0];
+      const invitee = await activeUser(inviteeId, connection);
       if (String(invite.invitee_id) !== String(invitee.id)) throw publicError("仅限被邀请人确认");
-      await mysqlCustomWritable(invite.group_id, connection);
-      if (invite.status !== "pending" && invite.status !== "accepted") throw publicError("群邀请已失效");
+      const existingMember = await mysqlMember(invite.group_id, invitee.id, connection, { forUpdate: true, includeInactive: true });
+      if (invite.status === "accepted") {
+        if (!existingMember) throw publicError("群邀请已失效");
+        await connection.commit();
+        return existingMember;
+      }
+      if (invite.status !== "pending" || hasExpired(invite.expires_at)) throw publicError("群邀请已过期");
       await connection.execute(`
         INSERT INTO chat_members (id, group_id, user_id, role, joined_via, active)
         VALUES (?, ?, ?, 'member', 'invite', 1)
@@ -686,19 +795,32 @@ function createMysqlChatStore(pool, options = {}) {
     }
   });
 
-  const createInviteToken = mysqlPublic(async ({ groupId, creatorId, token, expiresAt = null, maxUses = 1 }) => {
-    const creator = await activeUser(creatorId);
-    await mysqlCustomWritable(groupId);
-    await requiredMysqlAdmin(groupId, creator.id, pool, "无权创建群二维码");
-    const digest = inviteTokenDigest(requiredText(token, "邀请令牌不能为空"));
-    const [existing] = await execute("SELECT * FROM chat_invite_tokens WHERE token_digest = ?", [digest]);
-    if (existing[0]) return safeInviteToken(existing[0]);
-    const id = `chat-token-${crypto.randomUUID()}`;
-    await execute(
-      "INSERT INTO chat_invite_tokens (id, group_id, creator_id, token_digest, expires_at, max_uses, use_count, revoked) VALUES (?, ?, ?, ?, ?, ?, 0, 0)",
-      [id, groupId, creator.id, digest, expiresAt, Math.max(1, Number(maxUses) || 1)]
-    );
-    return safeInviteToken({ id, group_id: groupId, creator_id: creator.id, expires_at: expiresAt, max_uses: maxUses, use_count: 0, revoked: 0 });
+  const createInviteToken = mysqlPublic(async ({ groupId, creatorId, expiresAt = null, maxUses = 1 }) => {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await mysqlCustomWritable(groupId, connection, { forUpdate: true });
+      const creator = await activeUser(creatorId, connection);
+      await requiredMysqlAdmin(groupId, creator.id, connection, "无权创建群二维码");
+      const token = requiredText(inviteTokenGenerator(), "二维码生成失败");
+      const digest = inviteTokenDigest(token);
+      const [existing] = await connection.execute("SELECT * FROM chat_invite_tokens WHERE token_digest = ? FOR UPDATE", [digest]);
+      if (existing[0]) throw publicError("二维码令牌已存在，请重新生成");
+      const id = `chat-token-${crypto.randomUUID()}`;
+      const resolvedExpiry = inviteExpiry(expiresAt);
+      const normalizedMaxUses = Math.max(1, Number(maxUses) || 1);
+      await connection.execute(
+        "INSERT INTO chat_invite_tokens (id, group_id, creator_id, token_digest, expires_at, max_uses, use_count, revoked) VALUES (?, ?, ?, ?, ?, ?, 0, 0)",
+        [id, groupId, creator.id, digest, resolvedExpiry, normalizedMaxUses]
+      );
+      await connection.commit();
+      return { ...safeInviteToken({ id, group_id: groupId, creator_id: creator.id, expires_at: resolvedExpiry, max_uses: normalizedMaxUses, use_count: 0, revoked: 0 }), token };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   });
 
   return {

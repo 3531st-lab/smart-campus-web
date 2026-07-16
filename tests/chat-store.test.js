@@ -53,10 +53,119 @@ function fixtures(options = {}) {
   };
   let groupNumberIndex = 0;
   const groupNumbers = options.groupNumbers || ["1234567890", "1234567891", "1234567892"];
+  let inviteTokenIndex = 0;
+  const inviteTokens = options.inviteTokens || ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccccccccc"];
   const store = createMemoryChatStore(seed, {
-    groupNumberGenerator: () => groupNumbers[Math.min(groupNumberIndex++, groupNumbers.length - 1)]
+    groupNumberGenerator: () => groupNumbers[Math.min(groupNumberIndex++, groupNumbers.length - 1)],
+    inviteTokenGenerator: () => inviteTokens[Math.min(inviteTokenIndex++, inviteTokens.length - 1)]
   });
   return { store, users: Object.fromEntries(users.map((user) => [user.id, user])) };
+}
+
+function createMysqlHarness(initial = {}) {
+  const state = {
+    users: initial.users || [
+      { id: "owner", name: "Owner", role: "student", status: "active" },
+      { id: "invitee", name: "Invitee", role: "student", status: "active" },
+      { id: "outsider", name: "Outsider", role: "student", status: "active" }
+    ],
+    groups: initial.groups || [{ id: "group-a", type: "custom", public_no: "1234567890", name: "Test", status: "active", frozen: 0 }],
+    members: initial.members || [{ id: "owner-member", group_id: "group-a", user_id: "owner", role: "owner", active: 1, joined_via: "created" }],
+    invites: initial.invites || [],
+    requests: initial.requests || [],
+    tokens: initial.tokens || []
+  };
+  const events = [];
+  let snapshot = null;
+
+  function resultRows(sql, params) {
+    if (/FROM students WHERE id/.test(sql)) return state.users.filter((row) => String(row.id) === String(params[0]));
+    if (/FROM chat_groups WHERE id/.test(sql)) return state.groups.filter((row) => String(row.id) === String(params[0]));
+    if (/FROM chat_members/.test(sql)) {
+      return state.members.filter((row) => (
+        String(row.group_id) === String(params[0])
+        && String(row.user_id) === String(params[1])
+        && (!/active = 1/.test(sql) || Number(row.active) === 1)
+        && (!/role IN/.test(sql) || ["owner", "admin"].includes(row.role))
+      ));
+    }
+    if (/FROM chat_invites WHERE id/.test(sql)) return state.invites.filter((row) => String(row.id) === String(params[0]));
+    if (/FROM chat_invites WHERE pending_key/.test(sql)) return state.invites.filter((row) => String(row.pending_key) === String(params[0]));
+    if (/FROM chat_join_requests WHERE id/.test(sql)) return state.requests.filter((row) => String(row.id) === String(params[0]));
+    if (/FROM chat_join_requests WHERE pending_key/.test(sql)) return state.requests.filter((row) => String(row.pending_key) === String(params[0]));
+    if (/FROM chat_invite_tokens WHERE token_digest/.test(sql)) return state.tokens.filter((row) => String(row.token_digest) === String(params[0]));
+    return null;
+  }
+
+  async function execute(sql, params = []) {
+    events.push({ type: "sql", sql, params });
+    const rows = resultRows(sql, params);
+    if (rows) return [rows];
+    if (/INSERT INTO chat_members/.test(sql)) {
+      const existing = state.members.find((row) => String(row.group_id) === String(params[1]) && String(row.user_id) === String(params[2]));
+      if (existing) {
+        existing.active = 1;
+        existing.joined_via = params[3] || "invite";
+      } else state.members.push({ id: params[0], group_id: params[1], user_id: params[2], role: "member", joined_via: params[3] || "invite", active: 1 });
+      return [{ affectedRows: 1 }];
+    }
+    if (/INSERT INTO chat_join_requests/.test(sql)) {
+      state.requests.push({ id: params[0], group_id: params[1], applicant_id: params[2], source: params[3], status: "pending", pending_key: params[4] });
+      return [{ affectedRows: 1 }];
+    }
+    if (/INSERT INTO chat_invites/.test(sql)) {
+      state.invites.push({ id: params[0], group_id: params[1], inviter_id: params[2], invitee_id: params[3], status: "pending", pending_key: params[4], expires_at: params[5] });
+      return [{ affectedRows: 1 }];
+    }
+    if (/INSERT INTO chat_invite_tokens/.test(sql)) {
+      state.tokens.push({ id: params[0], group_id: params[1], creator_id: params[2], token_digest: params[3], expires_at: params[4], max_uses: params[5], use_count: 0, revoked: 0 });
+      return [{ affectedRows: 1 }];
+    }
+    if (/UPDATE chat_invite_tokens SET use_count/.test(sql)) {
+      const token = state.tokens.find((row) => String(row.id) === String(params[0]));
+      token.use_count += 1;
+      return [{ affectedRows: 1 }];
+    }
+    if (/UPDATE chat_invites SET status = 'accepted'/.test(sql)) {
+      const invite = state.invites.find((row) => String(row.id) === String(params[0]));
+      invite.status = "accepted";
+      invite.pending_key = null;
+      return [{ affectedRows: 1 }];
+    }
+    if (/UPDATE chat_join_requests SET status/.test(sql)) {
+      const request = state.requests.find((row) => String(row.id) === String(params[2]));
+      request.status = params[0];
+      request.pending_key = null;
+      return [{ affectedRows: 1 }];
+    }
+    throw new Error(`Unexpected SQL: ${sql}`);
+  }
+
+  const connection = {
+    async beginTransaction() {
+      events.push({ type: "begin" });
+      snapshot = structuredClone(state);
+    },
+    async commit() {
+      events.push({ type: "commit" });
+      snapshot = null;
+    },
+    async rollback() {
+      events.push({ type: "rollback" });
+      if (snapshot) Object.assign(state, structuredClone(snapshot));
+      snapshot = null;
+    },
+    release() { events.push({ type: "release" }); },
+    execute
+  };
+  return {
+    state,
+    events,
+    pool: {
+      execute,
+      async getConnection() { return connection; }
+    }
+  };
 }
 
 test("mandatory class membership derives from active assignments without platform-admin member rows", async () => {
@@ -110,8 +219,8 @@ test("group-number joins require owner or group-admin review and duplicate pendi
   const group = await store.createCustomGroup({ name: "考研交流" }, users.owner);
   store.data.members.push({ id: "member-admin", groupId: group.id, userId: users["group-admin"].id, role: "admin", active: true, joinedVia: "owner" });
 
-  const first = await store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "group_number" });
-  const duplicate = await store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "group_number" });
+  const first = await store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "group_number", groupNumber: group.publicNo });
+  const duplicate = await store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "group_number", groupNumber: group.publicNo });
   assert.equal(first.id, duplicate.id);
   assert.equal(first.status, "pending");
   assert.equal(store.data.joinRequests.length, 1);
@@ -132,7 +241,7 @@ test("join reviewers cannot approve requests belonging to another group", async 
   const { store, users } = fixtures();
   const firstGroup = await store.createCustomGroup({ name: "第一群" }, users.owner);
   const secondGroup = await store.createCustomGroup({ name: "第二群" }, users["group-admin"]);
-  const request = await store.createJoinRequest({ groupId: firstGroup.id, applicantId: users.outsider.id, source: "group_number" });
+  const request = await store.createJoinRequest({ groupId: firstGroup.id, applicantId: users.outsider.id, source: "group_number", groupNumber: firstGroup.publicNo });
 
   await assert.rejects(
     () => store.reviewJoinRequest({ requestId: request.id, decision: "approved", reviewer: users["group-admin"] }),
@@ -156,6 +265,98 @@ test("direct invites require the intended invitee confirmation and acceptance is
   const replay = await store.acceptInvite({ inviteId: first.id, inviteeId: users.invitee.id });
   assert.equal(replay.id, member.id);
   assert.equal(store.data.members.filter((item) => item.groupId === group.id && item.userId === users.invitee.id && item.active).length, 1);
+});
+
+test("accepted invite replay never reactivates a member who later left the group", async () => {
+  const { store, users } = fixtures();
+  const group = await store.createCustomGroup({ name: "invite replay" }, users.owner);
+  const invite = await store.createInvite({ groupId: group.id, inviterId: users.owner.id, inviteeId: users.invitee.id });
+
+  await store.acceptInvite({ inviteId: invite.id, inviteeId: users.invitee.id });
+  const member = store.data.members.find((item) => item.groupId === group.id && item.userId === users.invitee.id);
+  member.active = false;
+  member.joinedVia = "left";
+
+  const replay = await store.acceptInvite({ inviteId: invite.id, inviteeId: users.invitee.id });
+  assert.equal(replay.active, false);
+  assert.equal(member.active, false);
+  assert.equal(member.joinedVia, "left");
+});
+
+test("group-number join requests require a matching public group number", async () => {
+  const { store, users } = fixtures();
+  const group = await store.createCustomGroup({ name: "verified group number" }, users.owner);
+
+  await assert.rejects(
+    () => store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "group_number" }),
+    /群号|来源|凭证/
+  );
+  await assert.rejects(
+    () => store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "group_number", groupNumber: "0000000000" }),
+    /群号|来源|凭证/
+  );
+
+  const request = await store.createJoinRequest({
+    groupId: group.id,
+    applicantId: users.outsider.id,
+    source: "group_number",
+    groupNumber: group.publicNo
+  });
+  assert.equal(request.status, "pending");
+});
+
+test("QR join requests validate a generated unexpired token and consume one use only once", async () => {
+  const { store, users } = fixtures();
+  const group = await store.createCustomGroup({ name: "verified qr" }, users.owner);
+  const created = await store.createInviteToken({
+    groupId: group.id,
+    creatorId: users.owner.id,
+    token: "attacker-known-token",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    maxUses: 1
+  });
+
+  assert.match(created.token, /^[A-Za-z0-9_-]{32,}$/);
+  assert.notEqual(created.token, "attacker-known-token");
+  assert.equal(store.data.inviteTokens[0].token, undefined);
+  assert.doesNotMatch(JSON.stringify(store.data), /attacker-known-token/);
+
+  await assert.rejects(
+    () => store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "qr", token: "wrong-token" }),
+    /二维码|凭证|失效/
+  );
+  const request = await store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "qr", token: created.token });
+  const duplicate = await store.createJoinRequest({ groupId: group.id, applicantId: users.outsider.id, source: "qr", token: created.token });
+  assert.equal(request.id, duplicate.id);
+  assert.equal(store.data.inviteTokens[0].useCount, 1);
+});
+
+test("invite token digests cannot be reused by another group", async () => {
+  const { store, users } = fixtures({ inviteTokens: ["same-token-value", "same-token-value"] });
+  const first = await store.createCustomGroup({ name: "first token group" }, users.owner);
+  const second = await store.createCustomGroup({ name: "second token group" }, users["group-admin"]);
+  await store.createInviteToken({ groupId: first.id, creatorId: users.owner.id });
+  await assert.rejects(
+    () => store.createInviteToken({ groupId: second.id, creatorId: users["group-admin"].id }),
+    /二维码|令牌|已存在/
+  );
+});
+
+test("invites expire before they can add a member", async () => {
+  const { store, users } = fixtures();
+  const group = await store.createCustomGroup({ name: "expired invite" }, users.owner);
+  const invite = await store.createInvite({
+    groupId: group.id,
+    inviterId: users.owner.id,
+    inviteeId: users.invitee.id,
+    expiresAt: new Date(Date.now() - 60_000).toISOString()
+  });
+
+  await assert.rejects(
+    () => store.acceptInvite({ inviteId: invite.id, inviteeId: users.invitee.id }),
+    /失效|过期/
+  );
+  assert.equal(store.data.members.some((item) => item.groupId === group.id && item.userId === users.invitee.id && item.active), false);
 });
 
 test("members from another ordinary group cannot invite or read members", async () => {
@@ -208,12 +409,13 @@ test("invite tokens persist only SHA-256 digests and safe metadata", async () =>
   const rawToken = "qr-token-that-must-never-be-stored";
   const token = await store.createInviteToken({ groupId: group.id, creatorId: users.owner.id, token: rawToken, maxUses: 1 });
 
-  assert.equal(token.token, undefined);
+  assert.match(token.token, /^[A-Za-z0-9_-]{32,}$/);
+  assert.notEqual(token.token, rawToken);
   assert.equal(token.tokenDigest, undefined);
   assert.equal(store.data.inviteTokens.length, 1);
   assert.equal(store.data.inviteTokens[0].token, undefined);
-  assert.equal(store.data.inviteTokens[0].tokenDigest, crypto.createHash("sha256").update(rawToken).digest("hex"));
-  assert.equal(inviteTokenDigest(rawToken), store.data.inviteTokens[0].tokenDigest);
+  assert.equal(store.data.inviteTokens[0].tokenDigest, crypto.createHash("sha256").update(token.token).digest("hex"));
+  assert.equal(inviteTokenDigest(token.token), store.data.inviteTokens[0].tokenDigest);
   assert.doesNotMatch(JSON.stringify(store.data), new RegExp(rawToken));
 });
 
@@ -225,6 +427,7 @@ test("schema provides durable idempotent group member request invite and token c
   assert.match(schema, /CREATE TABLE IF NOT EXISTS chat_members[\s\S]*UNIQUE KEY uq_chat_member \(group_id, user_id\)/);
   assert.match(schema, /CREATE TABLE IF NOT EXISTS chat_join_requests[\s\S]*pending_key VARCHAR\(160\)[\s\S]*UNIQUE KEY uq_chat_join_pending \(pending_key\)/);
   assert.match(schema, /CREATE TABLE IF NOT EXISTS chat_invites[\s\S]*pending_key VARCHAR\(160\)[\s\S]*UNIQUE KEY uq_chat_invite_pending \(pending_key\)/);
+  assert.match(schema, /ALTER TABLE chat_invites[\s\S]*ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP NULL/);
   assert.match(schema, /CREATE TABLE IF NOT EXISTS chat_invite_tokens[\s\S]*token_digest CHAR\(64\)[\s\S]*UNIQUE KEY uq_chat_invite_token_digest \(token_digest\)/);
   assert.doesNotMatch(schema, /raw_token|token_plaintext/);
 });
@@ -271,6 +474,145 @@ test("MySQL custom group creation retries a concurrent public-number collision",
   const group = await store.createCustomGroup({ name: "并发建群" }, { id: "owner" });
   assert.equal(group.publicNo, "2234567891");
   assert.deepEqual(attempts, numbers);
+});
+
+test("MySQL accepts either a user id or a user object for the same group creation path", async () => {
+  const attempts = [];
+  const connection = {
+    async beginTransaction() {},
+    async commit() {},
+    async rollback() {},
+    release() {},
+    async execute(sql, params = []) {
+      if (/SELECT id FROM chat_groups WHERE public_no/.test(sql)) return [[]];
+      if (/INSERT INTO chat_groups/.test(sql)) {
+        attempts.push(params[3]);
+        return [{ affectedRows: 1 }];
+      }
+      if (/INSERT INTO chat_members/.test(sql)) return [{ affectedRows: 1 }];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  const pool = {
+    async execute(sql, params = []) {
+      if (/FROM students WHERE id/.test(sql)) return [[{ id: params[0], name: "Owner", role: "student", status: "active" }]];
+      throw new Error(`Unexpected pool SQL: ${sql}`);
+    },
+    async getConnection() { return connection; }
+  };
+  const store = createMysqlChatStore(pool, { groupNumberGenerator: () => "2234567890" });
+
+  const fromId = await store.createCustomGroup({ name: "id caller" }, "owner");
+  const fromObject = await store.createCustomGroup({ name: "object caller" }, { id: "owner" });
+  assert.equal(fromId.ownerId, "owner");
+  assert.equal(fromObject.ownerId, "owner");
+  assert.deepEqual(attempts, ["owner", "owner"]);
+});
+
+test("MySQL rejects disabled groups even when a stale frozen flag is also present", async () => {
+  const { pool } = createMysqlHarness({
+    groups: [{ id: "group-a", type: "custom", public_no: "1234567890", name: "Disabled", status: "disabled", frozen: 1 }]
+  });
+  const store = createMysqlChatStore(pool);
+
+  await assert.rejects(() => store.getGroupForUser("group-a", "owner"), /群聊不可用/);
+});
+
+test("MySQL invite replay and expired invites do not reactivate members and rollback cleanly", async () => {
+  const accepted = createMysqlHarness({
+    members: [
+      { id: "owner-member", group_id: "group-a", user_id: "owner", role: "owner", active: 1, joined_via: "created" },
+      { id: "invitee-member", group_id: "group-a", user_id: "invitee", role: "member", active: 0, joined_via: "left" }
+    ],
+    invites: [{ id: "accepted-invite", group_id: "group-a", inviter_id: "owner", invitee_id: "invitee", status: "accepted", pending_key: null, expires_at: new Date(Date.now() + 60_000).toISOString() }]
+  });
+  const acceptedStore = createMysqlChatStore(accepted.pool);
+  const replay = await acceptedStore.acceptInvite({ inviteId: "accepted-invite", inviteeId: "invitee" });
+  assert.equal(replay.active, false);
+  assert.equal(accepted.state.members.find((row) => row.id === "invitee-member").active, 0);
+  assert.equal(accepted.events.some((event) => event.type === "sql" && /INSERT INTO chat_members/.test(event.sql)), false);
+
+  const expired = createMysqlHarness({
+    invites: [{ id: "expired-invite", group_id: "group-a", inviter_id: "owner", invitee_id: "invitee", status: "pending", pending_key: "group-a:invitee", expires_at: new Date(Date.now() - 60_000).toISOString() }]
+  });
+  const expiredStore = createMysqlChatStore(expired.pool);
+  await assert.rejects(() => expiredStore.acceptInvite({ inviteId: "expired-invite", inviteeId: "invitee" }), /过期/);
+  assert.equal(expired.state.members.some((row) => row.user_id === "invitee"), false);
+  assert.equal(expired.events.some((event) => event.type === "rollback"), true);
+});
+
+test("MySQL join requests validate QR proof inside a transaction and roll back invalid requests", async () => {
+  const harness = createMysqlHarness();
+  const store = createMysqlChatStore(harness.pool);
+
+  await assert.rejects(
+    () => store.createJoinRequest({ groupId: "group-a", applicantId: "outsider", source: "qr", token: "not-issued" }),
+    /二维码凭证无效/
+  );
+  assert.equal(harness.state.requests.length, 0);
+  assert.equal(harness.events.some((event) => event.type === "rollback"), true);
+  const sql = harness.events.filter((event) => event.type === "sql").map((event) => event.sql).join("\n");
+  assert.match(sql, /chat_groups WHERE id = \? FOR UPDATE/);
+  assert.match(sql, /chat_join_requests WHERE pending_key = \? FOR UPDATE/);
+  assert.match(sql, /chat_invite_tokens WHERE token_digest = \? FOR UPDATE/);
+});
+
+test("MySQL accepts only a group-bound QR token or matching group number and consumes one QR use", async () => {
+  const rawToken = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const qrHarness = createMysqlHarness({
+    tokens: [{ id: "token-a", group_id: "group-a", creator_id: "owner", token_digest: inviteTokenDigest(rawToken), expires_at: new Date(Date.now() + 60_000).toISOString(), max_uses: 1, use_count: 0, revoked: 0 }]
+  });
+  const qrStore = createMysqlChatStore(qrHarness.pool);
+  const request = await qrStore.createJoinRequest({ groupId: "group-a", applicantId: "outsider", source: "qr", token: rawToken });
+  assert.equal(request.status, "pending");
+  assert.equal(qrHarness.state.requests.length, 1);
+  assert.equal(qrHarness.state.tokens[0].use_count, 1);
+
+  const numberHarness = createMysqlHarness();
+  const numberStore = createMysqlChatStore(numberHarness.pool);
+  await assert.rejects(
+    () => numberStore.createJoinRequest({ groupId: "group-a", applicantId: "outsider", source: "group_number", groupNumber: "9999999999" }),
+    /群号与目标群不一致/
+  );
+  assert.equal(numberHarness.state.requests.length, 0);
+  assert.equal(numberHarness.events.some((event) => event.type === "rollback"), true);
+});
+
+test("MySQL rejects a generated token digest collision across groups", async () => {
+  const harness = createMysqlHarness({
+    groups: [
+      { id: "group-a", type: "custom", public_no: "1234567890", name: "A", status: "active", frozen: 0 },
+      { id: "group-b", type: "custom", public_no: "1234567891", name: "B", status: "active", frozen: 0 }
+    ],
+    members: [
+      { id: "owner-a", group_id: "group-a", user_id: "owner", role: "owner", active: 1, joined_via: "created" },
+      { id: "owner-b", group_id: "group-b", user_id: "owner", role: "owner", active: 1, joined_via: "created" }
+    ]
+  });
+  const store = createMysqlChatStore(harness.pool, { inviteTokenGenerator: () => "ffffffffffffffffffffffffffffffff" });
+
+  await store.createInviteToken({ groupId: "group-a", creatorId: "owner" });
+  await assert.rejects(() => store.createInviteToken({ groupId: "group-b", creatorId: "owner" }), /二维码令牌已存在/);
+  assert.equal(harness.state.tokens.length, 1);
+});
+
+test("MySQL generates a one-time QR token without persisting caller supplied token text", async () => {
+  const harness = createMysqlHarness();
+  const generated = "dddddddddddddddddddddddddddddddd";
+  const store = createMysqlChatStore(harness.pool, { inviteTokenGenerator: () => generated });
+
+  const token = await store.createInviteToken({
+    groupId: "group-a",
+    creatorId: "owner",
+    token: "caller-controlled-secret",
+    maxUses: 2
+  });
+
+  assert.equal(token.token, generated);
+  assert.equal(token.tokenDigest, undefined);
+  assert.equal(harness.state.tokens[0].token_digest, inviteTokenDigest(generated));
+  assert.doesNotMatch(JSON.stringify(harness.state), /caller-controlled-secret/);
+  assert.equal(harness.events.filter((event) => event.type === "sql" && /chat_invite_tokens WHERE token_digest/.test(event.sql))[0].sql.includes("FOR UPDATE"), true);
 });
 
 test("MySQL store sanitizes connection and SQL failures", async () => {

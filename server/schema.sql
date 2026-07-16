@@ -133,6 +133,10 @@ CREATE TABLE IF NOT EXISTS chat_invites (
   KEY idx_chat_invite_invitee_status (invitee_id, status, created_at)
 );
 
+ALTER TABLE chat_invites
+  ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP NULL,
+  ADD INDEX IF NOT EXISTS idx_chat_invite_expiry (expires_at, status);
+
 CREATE TABLE IF NOT EXISTS chat_invite_tokens (
   id VARCHAR(64) PRIMARY KEY,
   group_id VARCHAR(64) NOT NULL,
