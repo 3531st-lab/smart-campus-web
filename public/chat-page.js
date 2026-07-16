@@ -99,6 +99,9 @@
           let keepBottom = true;
           let selectedSticker = null;
           let stickerData = null;
+          let historyObserver = null;
+          let loadingOlder = false;
+          let preserveHistoryPosition = false;
 
           const client = global.createChatClient({
             api,
@@ -295,12 +298,28 @@
           function renderMessages(messages) {
             if (!activeGroup) return;
             const wasNearBottom = messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight < 72;
+            const beforeHeight = messagesNode.scrollHeight;
+            const beforeTop = messagesNode.scrollTop;
             const rendered = boundedMessages(messages);
             messagesNode.innerHTML = messages.length
-              ? `${messages.length > rendered.length ? '<p class="chat-message-window-notice" role="status">为保持群聊流畅，已折叠较早消息。</p>' : ""}${rendered.map((message) => messageMarkup(message, user?.id, escapeHtml)).join("")}`
+              ? `${client.hasOlderMessages ? '<div class="chat-history-sentinel" id="chatHistorySentinel" aria-live="polite">向上滚动加载更早消息</div>' : ""}${messages.length > rendered.length ? '<p class="chat-message-window-notice" role="status">为保持群聊流畅，已折叠较早消息。</p>' : ""}${rendered.map((message) => messageMarkup(message, user?.id, escapeHtml)).join("")}`
               : `<div class="chat-empty-stage"><span>${iconSvg("news")}</span><h2>还没有消息</h2><p>和同学打个招呼，开始第一段对话吧。</p></div>`;
-            if (keepBottom || wasNearBottom) messagesNode.scrollTop = messagesNode.scrollHeight;
+            if (preserveHistoryPosition) {
+              messagesNode.scrollTop = messagesNode.scrollHeight - beforeHeight + beforeTop;
+              preserveHistoryPosition = false;
+            } else if (keepBottom || wasNearBottom) messagesNode.scrollTop = messagesNode.scrollHeight;
             keepBottom = false;
+            historyObserver?.disconnect();
+            const sentinel = messagesNode.querySelector("#chatHistorySentinel");
+            if (sentinel && global.IntersectionObserver) {
+              historyObserver = new global.IntersectionObserver((entries) => {
+                if (!entries.some((entry) => entry.isIntersecting) || loadingOlder) return;
+                loadingOlder = true;
+                preserveHistoryPosition = true;
+                client.loadOlder().catch((error) => toast(error.message || "加载历史消息失败")).finally(() => { loadingOlder = false; });
+              }, { root: messagesNode, rootMargin: "120px 0px 0px" });
+              historyObserver.observe(sentinel);
+            }
           }
 
           async function loadStickers() {
@@ -475,7 +494,10 @@
             }
           })();
 
-          global.__campusChatCleanup = () => client.destroy();
+          global.__campusChatCleanup = () => {
+            historyObserver?.disconnect();
+            client.destroy();
+          };
         }
       };
     },

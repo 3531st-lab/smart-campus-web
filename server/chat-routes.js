@@ -291,6 +291,7 @@ async function handleChatRoute(context) {
         groupId: messageGroupId,
         viewerId: user.id,
         after: url.searchParams.get("after") || 0,
+        before: url.searchParams.get("before") || 0,
         limit: url.searchParams.get("limit") || 50,
         tail: url.searchParams.get("tail") === "1"
       });

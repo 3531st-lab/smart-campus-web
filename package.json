@@ -7,9 +7,10 @@
     "dev": "node server/index.js",
     "start": "node server/index.js",
     "test": "node tests/run-all.js",
-    "check": "node --check public/timetable-core-v155.js && node --check public/app.js && node --check server/index.js && node --check server/db.js && node --check server/student-store.js && node --check server/media-store.js && node --check server/chat-store.js && node --check server/chat-routes.js && node --check server/permanent-admins.js && node --check server/timetable-store.js && node --check server/reservation-store.js && node --check server/notification-store.js && node --check server/payment-store.js && node --check server/integrations.js && node --check server/campus-news.js && node --check api/index.js && node --check api/[...path].js && node --check functions/api/[[path]].js && npm test",
+    "check": "node --check public/timetable-core-v155.js && node --check public/chat-client.js && node --check public/chat-page.js && node --check public/app.js && node --check server/index.js && node --check server/db.js && node --check server/student-store.js && node --check server/media-store.js && node --check server/chat-store.js && node --check server/chat-routes.js && node --check server/permanent-admins.js && node --check server/timetable-store.js && node --check server/reservation-store.js && node --check server/notification-store.js && node --check server/payment-store.js && node --check server/integrations.js && node --check server/campus-news.js && node --check scripts/sync-class-groups.js && node --check api/index.js && node --check api/[...path].js && node --check functions/api/[[path]].js && npm test",
     "db:init": "node scripts/init-cloud-database.js",
     "db:migrate:cloud": "node scripts/migrate-local-database.js",
+    "classes:sync": "node scripts/sync-class-groups.js",
     "music:generate": "node scripts/generate-youth-music.js",
     "realtime:check": "wrangler deploy --dry-run --config realtime/wrangler.toml",
     "realtime:deploy": "wrangler deploy --config realtime/wrangler.toml"

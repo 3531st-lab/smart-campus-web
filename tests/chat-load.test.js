@@ -37,6 +37,10 @@ test("large group opens from a bounded latest-message page without offset pagina
   assert.equal(latest.nextSequence, 10_000);
   assert.equal(latest.hasMore, true);
 
+  const previous = await store.listMessages({ groupId: "load-group", viewerId: "load-user", before: 9951, limit: 50, tail: true });
+  assert.deepEqual(previous.messages.map((message) => Number(message.sequence)), Array.from({ length: 50 }, (_, index) => 9901 + index));
+  assert.equal(previous.hasMore, true);
+
   const source = fs.readFileSync(path.join(__dirname, "..", "server", "chat-store.js"), "utf8");
   assert.doesNotMatch(source, /\bOFFSET\b/i);
 });
@@ -47,5 +51,7 @@ test("chat client and page retain bounded in-memory and rendered message windows
   const page = fs.readFileSync(path.join(root, "public", "chat-page.js"), "utf8");
 
   assert.match(client, /MAX_CACHED_MESSAGES\s*=\s*220/);
+  assert.match(client, /async function loadOlder/);
   assert.match(page, /MAX_RENDERED_MESSAGES\s*=\s*160/);
+  assert.match(page, /IntersectionObserver/);
 });

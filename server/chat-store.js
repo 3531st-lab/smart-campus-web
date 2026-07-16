@@ -786,12 +786,13 @@ function createMemoryChatStore(seed = {}, options = {}) {
     return safeMessage(created, account, found.type === "class" ? classAssignment(found, account.id) : null, sticker);
   }
 
-  async function listMessages({ groupId, viewerId, after = 0, limit = 50, tail = false }) {
+  async function listMessages({ groupId, viewerId, after = 0, before = 0, limit = 50, tail = false }) {
     const { found } = await messageAccess(groupId, viewerId);
     const cursor = normalizeAfter(after);
+    const beforeCursor = normalizeAfter(before);
     const pageSize = normalizeLimit(limit);
     const matching = store.data.messages
-      .filter((item) => String(item.groupId ?? item.group_id) === String(found.id) && Number(item.sequence) > cursor)
+      .filter((item) => String(item.groupId ?? item.group_id) === String(found.id) && Number(item.sequence) > cursor && (!beforeCursor || Number(item.sequence) < beforeCursor))
       .sort((left, right) => Number(left.sequence) - Number(right.sequence));
     const page = tail ? matching.slice(-pageSize) : matching.slice(0, pageSize);
     return {
@@ -1580,8 +1581,9 @@ function createMysqlChatStore(pool, options = {}) {
     }
   });
 
-  const listMessages = mysqlPublic(async ({ groupId, viewerId, after = 0, limit = 50, tail = false }) => {
+  const listMessages = mysqlPublic(async ({ groupId, viewerId, after = 0, before = 0, limit = 50, tail = false }) => {
     const cursor = normalizeAfter(after);
+    const beforeCursor = normalizeAfter(before);
     const pageSize = normalizeLimit(limit);
     const connection = await pool.getConnection();
     try {
@@ -1596,10 +1598,10 @@ function createMysqlChatStore(pool, options = {}) {
         LEFT JOIN class_assignments ca ON ca.class_id = ? AND ca.user_id = m.sender_id AND ca.active = 1
         LEFT JOIN chat_stickers cs ON cs.id = m.sticker_id
         LEFT JOIN chat_media cm ON cm.id = cs.media_id
-        WHERE m.group_id = ? AND m.sequence > ?
+        WHERE m.group_id = ? AND m.sequence > ? AND (? = 0 OR m.sequence < ?)
         ORDER BY m.sequence ${tail ? "DESC" : "ASC"}
         LIMIT ?
-      `, [access.found.classId, access.found.id, cursor, pageSize + 1]);
+      `, [access.found.classId, access.found.id, cursor, beforeCursor, beforeCursor, pageSize + 1]);
       await connection.commit();
       const hasMore = rows.length > pageSize;
       const page = tail ? rows.slice(0, pageSize).reverse() : rows.slice(0, pageSize);

@@ -23,8 +23,9 @@
     return [...events.values()].sort((left, right) => number(left.sequence) - number(right.sequence));
   }
 
-  function boundedMessages(items = []) {
-    return items.slice(Math.max(0, items.length - MAX_CACHED_MESSAGES));
+  function boundedMessages(items = [], window = "tail") {
+    if (items.length <= MAX_CACHED_MESSAGES) return items;
+    return window === "head" ? items.slice(0, MAX_CACHED_MESSAGES) : items.slice(Math.max(0, items.length - MAX_CACHED_MESSAGES));
   }
 
   global.createChatClient = function createChatClient({ api, onEvent = () => {} }) {
@@ -38,10 +39,11 @@
     let reconnectTimer = null;
     let reconnectAttempts = 0;
     let realtimeEvents = [];
+    let hasOlderMessages = false;
 
     const emit = (type, payload = {}) => onEvent({ type, activeGroupId, messages: [...messages], lastSequence, ...payload });
 
-    function mergeMessages(incoming = []) {
+    function mergeMessages(incoming = [], window = "tail") {
       const merged = new Map(messages.map((item) => [String(item.id), item]));
       incoming.forEach((message) => {
         if (!message?.id) return;
@@ -56,7 +58,7 @@
         const current = merged.get(String(next.id));
         merged.set(String(next.id), { ...current, ...next });
       });
-      messages = boundedMessages([...merged.values()].sort((left, right) => number(left.sequence) - number(right.sequence) || String(left.createdAt).localeCompare(String(right.createdAt))));
+      messages = boundedMessages([...merged.values()].sort((left, right) => number(left.sequence) - number(right.sequence) || String(left.createdAt).localeCompare(String(right.createdAt))), window);
       lastSequence = messages.reduce((highest, message) => Math.max(highest, number(message.sequence)), lastSequence);
       return messages;
     }
@@ -66,13 +68,20 @@
       return result.groups || [];
     }
 
-    async function loadMessages({ groupId = activeGroupId, after = 0, silent = false, tail = false } = {}) {
+    async function loadMessages({ groupId = activeGroupId, after = 0, before = 0, silent = false, tail = false, history = false } = {}) {
       if (!groupId) return [];
-      const result = await api(`/api/chat/groups/${encodeURIComponent(groupId)}/messages?after=${encodeURIComponent(after)}&limit=100${tail ? "&tail=1" : ""}`);
+      const result = await api(`/api/chat/groups/${encodeURIComponent(groupId)}/messages?after=${encodeURIComponent(after)}&before=${encodeURIComponent(before)}&limit=100${tail ? "&tail=1" : ""}`);
       if (String(groupId) !== String(activeGroupId)) return [];
-      mergeMessages(result.messages || []);
+      mergeMessages(result.messages || [], history ? "head" : "tail");
+      if (tail) hasOlderMessages = Boolean(result.hasMore);
       if (!silent) emit("messages");
       return result.messages || [];
+    }
+
+    async function loadOlder() {
+      const earliest = messages.find((message) => number(message.sequence) > 0);
+      if (!activeGroupId || !hasOlderMessages || !earliest) return [];
+      return loadMessages({ before: earliest.sequence, tail: true, history: true });
     }
 
     async function selectGroup(groupId) {
@@ -81,6 +90,7 @@
       messages = [];
       lastSequence = 0;
       realtimeEvents = [];
+      hasOlderMessages = false;
       emit("group-selected");
       await loadMessages({ after: 0, tail: true });
       await markRead();
@@ -239,7 +249,7 @@
     }
 
     document.addEventListener("visibilitychange", onVisibilityChange);
-    return { loadGroups, selectGroup, loadMessages, send, retry, markRead, destroy, get activeGroupId() { return activeGroupId; }, get messages() { return [...messages]; } };
+    return { loadGroups, selectGroup, loadMessages, loadOlder, send, retry, markRead, destroy, get activeGroupId() { return activeGroupId; }, get hasOlderMessages() { return hasOlderMessages; }, get messages() { return [...messages]; } };
   };
   global.CampusChatRealtime = { mergeEvents, boundedMessages };
 })(window);
