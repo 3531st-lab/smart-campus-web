@@ -137,6 +137,7 @@ const moduleGroups = [
       { id: "library", label: "图书馆服务", icon: "library", desc: "座位、研讨室与楼层图" },
       { id: "canteen", label: "食堂点餐", icon: "bowl", desc: "点餐、支付与配送点" },
       { id: "events", label: "校园活动", icon: "gift", desc: "活动报名与社团安排" },
+      { id: "chat", label: "群聊", icon: "message", desc: "班级群与校园兴趣群" },
       { id: "news", label: "校园资讯", icon: "news", desc: "官网、学院与社团动态" }
     ]
   },
@@ -196,6 +197,7 @@ function iconSvg(name) {
     library: `<path d="M4 19V5M8 19V5M12 19V5M16 19V5M20 19V5M3 19h18" />`,
     bowl: `<path d="M4 12h16a8 8 0 0 1-16 0Z" /><path d="M7 12c0-2 2-2 2-4M12 12c0-2 2-2 2-4M17 12c0-2 2-2 2-4" />`,
     gift: `<path d="M20 12v8H4v-8M3 8h18v4H3zM12 8v12M8 8a2 2 0 1 1 4 0M16 8a2 2 0 1 0-4 0" />`,
+    message: `<path d="M20 15a4 4 0 0 1-4 4H8l-4 3v-7a4 4 0 0 1-2-3.5V8a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" /><path d="M7 10h.01M12 10h.01M17 10h.01" />`,
     sparkles: `<path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7zM5 15l.8 2.2L8 18l-2.2.8L5 21l-.8-2.2L2 18l2.2-.8zM19 14l.7 1.8 1.8.7-1.8.7L19 19l-.7-1.8-1.8-.7 1.8-.7z" />`,
     news: `<path d="M5 4h11a3 3 0 0 1 3 3v13H7a2 2 0 0 1-2-2z" /><path d="M8 8h7M8 12h7M8 16h4" />`,
     toolbox: `<path d="M9 6V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1M4 8h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 12h16M12 12v3" />`,
@@ -3051,6 +3053,10 @@ function bindMotionEffects() {
 
 async function renderShell() {
   stopLoginParticles();
+  if (window.__campusChatCleanup) {
+    window.__campusChatCleanup();
+    window.__campusChatCleanup = null;
+  }
   const currentSidebar = document.querySelector(".sidebar");
   if (currentSidebar) state.sidebarScrollTop = currentSidebar.scrollTop;
   const renderVersion = ++renderShellVersion;
@@ -4260,6 +4266,22 @@ function bindQualityScoreTool() {
 }
 
 const routes = {
+  async chat() {
+    if (!window.CampusChatPage?.render || !window.createChatClient) {
+      throw new Error("群聊资源加载失败，请刷新页面后重试");
+    }
+    return window.CampusChatPage.render({
+      api,
+      token: state.token,
+      user: state.user,
+      setRoute,
+      toast,
+      iconSvg,
+      escapeHtml,
+      theme: document.documentElement.dataset.theme || "day"
+    });
+  },
+
   async dashboard() {
     const data = await api("/api/dashboard");
     const timetable = await getUnifiedTimetable(data.timetable);

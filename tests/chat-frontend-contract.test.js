@@ -1,0 +1,52 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const test = require("node:test");
+
+const root = path.resolve(__dirname, "..");
+const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+
+test("chat assets are loaded before the application shell", () => {
+  const html = read("public/index.html");
+  const clientIndex = html.indexOf("/chat-client.js");
+  const pageIndex = html.indexOf("/chat-page.js");
+  const appIndex = html.indexOf("/app.js");
+
+  assert.ok(html.includes("/assets/chat.css"));
+  assert.ok(clientIndex >= 0);
+  assert.ok(pageIndex > clientIndex);
+  assert.ok(appIndex > pageIndex);
+});
+
+test("campus-life navigation and route delegate to the chat page", () => {
+  const app = read("public/app.js");
+  assert.match(app, /id:\s*["']chat["']/);
+  assert.match(app, /async chat\(\)\s*\{/);
+  assert.match(app, /CampusChatPage\.render/);
+});
+
+test("chat page keeps group list, messages, and details as independent regions", () => {
+  const page = read("public/chat-page.js");
+  assert.match(page, /chat-group-list/);
+  assert.match(page, /chat-message-stage/);
+  assert.match(page, /chat-detail-panel/);
+  assert.match(page, /data-chat-send/);
+  assert.match(page, /client\.selectGroup/);
+});
+
+test("chat client supports resilient optimistic delivery and visibility-aware polling", () => {
+  const client = read("public/chat-client.js");
+  assert.match(client, /clientRequestId/);
+  assert.match(client, /optimistic/);
+  assert.match(client, /document\.visibilityState/);
+  assert.match(client, /5000/);
+  assert.match(client, /30000/);
+  assert.match(client, /mergeMessages/);
+  assert.match(client, /async function markRead/);
+});
+
+test("mobile chat keeps a single active pane instead of forcing a horizontal layout", () => {
+  const css = read("public/assets/chat.css");
+  assert.match(css, /@media\s*\(max-width:\s*760px\)/);
+  assert.match(css, /data-mobile-pane/);
+});
