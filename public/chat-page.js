@@ -53,7 +53,7 @@
         content: `
           <section class="chat-page" data-mobile-pane="groups" aria-label="校园群聊">
             <aside class="chat-group-list dash-card">
-              <header class="chat-list-head"><div><span class="chat-title-icon">${iconSvg("news")}</span><h2>群聊</h2></div><button type="button" class="chat-create-placeholder" title="普通群创建将在下一步开放" disabled>＋</button></header>
+              <header class="chat-list-head"><div><span class="chat-title-icon">${iconSvg("news")}</span><h2>群聊</h2></div><div class="chat-list-actions"><button type="button" class="chat-create-placeholder" data-chat-join title="通过群号申请加入">${iconSvg("search")}</button><button type="button" class="chat-create-placeholder" data-chat-create title="创建普通群">＋</button></div></header>
               <label class="chat-group-search"><span>${iconSvg("search")}</span><input id="chatGroupSearch" type="search" placeholder="搜索我的群聊" /></label>
               <div class="chat-group-scroll" id="chatGroupItems" aria-live="polite"><div class="chat-loading">正在加载群聊…</div></div>
             </aside>
@@ -69,6 +69,7 @@
               <header><button class="chat-mobile-back" type="button" data-chat-pane="messages" aria-label="返回消息">‹</button><h2>群信息</h2></header>
               <div class="chat-detail-empty"><span>${iconSvg("user")}</span><p>选择群聊后查看群信息</p></div>
             </aside>
+            <div class="chat-modal-root" id="chatModalRoot" hidden></div>
           </section>`,
         afterRender() {
           global.__campusChatCleanup?.();
@@ -81,6 +82,9 @@
           const composer = document.querySelector("#chatComposer");
           const input = document.querySelector("#chatMessageInput");
           const sendButton = composer.querySelector("[data-chat-send]");
+          const createButton = page.querySelector("[data-chat-create]");
+          const joinButton = page.querySelector("[data-chat-join]");
+          const modalRoot = document.querySelector("#chatModalRoot");
           let groups = [];
           let activeGroup = null;
           let keepBottom = true;
@@ -91,6 +95,143 @@
               if (event.type === "messages" || event.type === "group-selected") renderMessages(event.messages || client.messages);
             }
           });
+
+          function closeModal() {
+            modalRoot.hidden = true;
+            modalRoot.innerHTML = "";
+          }
+
+          function openModal(content, label) {
+            modalRoot.innerHTML = `<div class="chat-modal-backdrop" data-chat-modal-close></div><section class="chat-modal" role="dialog" aria-modal="true" aria-label="${safe(label, escapeHtml)}">${content}</section>`;
+            modalRoot.hidden = false;
+            modalRoot.querySelector("input, textarea, button")?.focus();
+          }
+
+          async function refreshGroups(preferredId = activeGroup?.id) {
+            groups = await client.loadGroups();
+            renderGroups();
+            if (preferredId && groups.some((group) => String(group.id) === String(preferredId))) {
+              await selectGroup(preferredId);
+            }
+          }
+
+          function openCreateGroup() {
+            openModal(`
+              <header class="chat-modal-head"><div><h2>创建普通群</h2><p>创建后生成群号；群成员通过申请加入。</p></div><button type="button" data-chat-modal-close aria-label="关闭">×</button></header>
+              <form class="chat-modal-form" id="chatCreateGroupForm">
+                <label>群名称<input name="name" maxlength="40" required placeholder="例如：校园摄影交流" /></label>
+                <label>群简介<textarea name="description" maxlength="180" rows="3" placeholder="可填写群聊主题和规则"></textarea></label>
+                <div class="chat-modal-actions"><button type="button" data-chat-modal-close>取消</button><button class="primary" type="submit">创建群聊</button></div>
+              </form>`, "创建普通群");
+            modalRoot.querySelector("#chatCreateGroupForm").addEventListener("submit", async (event) => {
+              event.preventDefault();
+              const form = new FormData(event.currentTarget);
+              const submit = event.currentTarget.querySelector("[type=submit]");
+              submit.disabled = true;
+              try {
+                const result = await api("/api/chat/groups", { method: "POST", body: JSON.stringify({ name: form.get("name"), description: form.get("description") }) });
+                closeModal();
+                await refreshGroups(result.group.id);
+                toast(`已创建“${result.group.name}”，群号 ${result.group.publicNo}`);
+              } catch (error) {
+                toast(error.message || "创建群聊失败");
+                submit.disabled = false;
+              }
+            });
+          }
+
+          function openJoinGroup() {
+            openModal(`
+              <header class="chat-modal-head"><div><h2>通过群号加入</h2><p>提交申请后，需要群主或群管理员审核。</p></div><button type="button" data-chat-modal-close aria-label="关闭">×</button></header>
+              <form class="chat-modal-form" id="chatJoinGroupForm">
+                <label>群号<input name="groupNo" inputmode="numeric" pattern="[0-9]{10,}" maxlength="20" required placeholder="输入 10 位以上群号" /></label>
+                <div class="chat-search-result" id="chatGroupSearchResult" aria-live="polite"></div>
+                <div class="chat-modal-actions"><button type="button" data-chat-modal-close>取消</button><button class="primary" type="submit">查找群聊</button></div>
+              </form>`, "通过群号加入");
+            const form = modalRoot.querySelector("#chatJoinGroupForm");
+            const resultNode = modalRoot.querySelector("#chatGroupSearchResult");
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              const groupNo = new FormData(form).get("groupNo");
+              const submit = form.querySelector("[type=submit]");
+              submit.disabled = true;
+              try {
+                const result = await api(`/api/chat/search?groupNo=${encodeURIComponent(groupNo)}`);
+                resultNode.innerHTML = `<div><strong>${safe(result.group.name, escapeHtml)}</strong><small>${result.group.memberCount} 位成员</small></div><button type="button" class="primary" data-chat-apply-group="${safe(result.group.id, escapeHtml)}" data-chat-group-no="${safe(groupNo, escapeHtml)}">提交申请</button>`;
+              } catch (error) {
+                resultNode.innerHTML = `<p class="chat-inline-error">${safe(error.message || "未找到群聊", escapeHtml)}</p>`;
+              } finally {
+                submit.disabled = false;
+              }
+            });
+          }
+
+          async function openQrInvite() {
+            if (!activeGroup) return;
+            try {
+              const result = await api(`/api/chat/groups/${encodeURIComponent(activeGroup.id)}/invite-token`, { method: "POST", body: JSON.stringify({ maxUses: 1 }) });
+              const qrSrc = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(result.qrSvg)}`;
+              openModal(`
+                <header class="chat-modal-head"><div><h2>群二维码</h2><p>扫码后提交申请，二维码仅可使用一次。</p></div><button type="button" data-chat-modal-close aria-label="关闭">×</button></header>
+                <div class="chat-qr-content"><img src="${qrSrc}" alt="${safe(activeGroup.name, escapeHtml)} 群二维码" /><p>每次生成新二维码会自动作废上一张。</p><label>邀请链接<input id="chatInviteUrl" value="${safe(result.inviteUrl, escapeHtml)}" readonly /></label></div>
+                <div class="chat-modal-actions"><button type="button" data-chat-modal-close>完成</button><button type="button" class="primary" data-chat-copy-invite>复制链接</button></div>`, "群二维码");
+            } catch (error) {
+              toast(error.message || "二维码生成失败");
+            }
+          }
+
+          async function openMembers() {
+            if (!activeGroup) return;
+            try {
+              const result = await api(`/api/chat/groups/${encodeURIComponent(activeGroup.id)}/members`);
+              const members = Array.isArray(result.members) ? result.members : [];
+              const roleLabel = { owner: "群主", admin: "群管理员", member: "成员" };
+              const dutyLabel = { monitor: "班长", league_secretary: "团支书", class_admin: "班级管理员", head_teacher: "班主任" };
+              openModal(`
+                <header class="chat-modal-head"><div><h2>群成员</h2><p>共 ${members.length} 位成员，仅展示群聊所需的公开身份。</p></div><button type="button" data-chat-modal-close aria-label="关闭">×</button></header>
+                <div class="chat-member-list">${members.map((member) => `
+                  <div class="chat-member-row">
+                    <span class="chat-member-avatar" style="--member-color:${safe(member.avatarColor || "#3478f6", escapeHtml)}">${avatar(member.name, escapeHtml)}</span>
+                    <div><strong>${safe(member.name || "校园用户", escapeHtml)}</strong><small>${safe(dutyLabel[member.classDuty] || roleLabel[member.role] || "成员", escapeHtml)}</small></div>
+                  </div>`).join("") || '<p class="chat-modal-empty">暂无群成员</p>'}</div>
+                <div class="chat-modal-actions"><button type="button" class="primary" data-chat-modal-close>完成</button></div>`, "群成员");
+            } catch (error) {
+              toast(error.message || "群成员加载失败");
+            }
+          }
+
+          async function openReviewRequests() {
+            if (!activeGroup) return;
+            try {
+              const result = await api(`/api/chat/groups/${encodeURIComponent(activeGroup.id)}/join-requests`);
+              const requests = Array.isArray(result.requests) ? result.requests : [];
+              openModal(`
+                <header class="chat-modal-head"><div><h2>入群审核</h2><p>核对申请人后再决定是否加入群聊。</p></div><button type="button" data-chat-modal-close aria-label="关闭">×</button></header>
+                <div class="chat-review-list">${requests.map((request) => `
+                  <div class="chat-review-row" data-chat-review-row="${safe(request.id, escapeHtml)}">
+                    <span class="chat-member-avatar" style="--member-color:${safe(request.applicant?.avatarColor || "#3478f6", escapeHtml)}">${avatar(request.applicant?.name, escapeHtml)}</span>
+                    <div class="chat-review-copy"><strong>${safe(request.applicant?.name || "校园用户", escapeHtml)}</strong><small>${request.source === "qr" ? "通过二维码申请" : "通过群号申请"}</small></div>
+                    <div class="chat-review-actions"><button type="button" data-chat-review-id="${safe(request.id, escapeHtml)}" data-chat-review-decision="rejected">拒绝</button><button type="button" class="primary" data-chat-review-id="${safe(request.id, escapeHtml)}" data-chat-review-decision="approved">同意</button></div>
+                  </div>`).join("") || '<p class="chat-modal-empty">暂无待审核申请</p>'}</div>
+                <div class="chat-modal-actions"><button type="button" data-chat-modal-close>关闭</button></div>`, "入群审核");
+            } catch (error) {
+              toast(error.message || "入群申请加载失败");
+            }
+          }
+
+          async function applyInviteFromUrl() {
+            const pageUrl = new URL(global.location.href);
+            const token = pageUrl.searchParams.get("chatInvite");
+            if (!token) return;
+            try {
+              await api("/api/chat/join-requests", { method: "POST", body: JSON.stringify({ source: "qr", token }) });
+              pageUrl.searchParams.delete("chatInvite");
+              global.history.replaceState(null, "", `${pageUrl.pathname}${pageUrl.search}${pageUrl.hash}`);
+              toast("入群申请已提交，等待群管理员审核");
+            } catch (error) {
+              toast(error.message || "二维码入群申请失败");
+            }
+          }
 
           function renderGroups() {
             const query = search.value.trim().toLocaleLowerCase();
@@ -110,7 +251,7 @@
                 <h3>${safe(activeGroup.name, escapeHtml)}</h3>
                 <p>${safe(activeGroup.description || (activeGroup.type === "class" ? "学校、学院与班级成员自动加入。" : "自主创建的校园兴趣群。"), escapeHtml)}</p>
                 <dl><div><dt>群类型</dt><dd>${activeGroup.type === "class" ? "班级群" : "普通群"}</dd></div>${activeGroup.publicNo ? `<div><dt>群号</dt><dd>${safe(activeGroup.publicNo, escapeHtml)}</dd></div>` : ""}<div><dt>群状态</dt><dd>${activeGroup.frozen ? "已冻结" : "正常"}</dd></div></dl>
-                ${activeGroup.frozen ? '<div class="chat-frozen-note">该群暂时冻结，消息保留但不能发送。</div>' : '<button type="button" class="chat-detail-action" data-chat-pane="details">查看群成员与设置</button>'}
+                ${activeGroup.frozen ? '<div class="chat-frozen-note">该群暂时冻结，消息保留但不能发送。</div>' : `<div class="chat-detail-actions"><button type="button" class="chat-detail-action" data-chat-members>查看群成员</button>${activeGroup.type === "custom" && String(activeGroup.ownerId) === String(user?.id) ? '<button type="button" class="chat-detail-action" data-chat-review>入群审核</button><button type="button" class="chat-detail-action" data-chat-qr>生成入群二维码</button>' : ""}</div>`}
               </div>`;
           }
 
@@ -148,8 +289,57 @@
             const button = event.target.closest("[data-chat-group-id]");
             if (button) selectGroup(button.dataset.chatGroupId);
           });
+          createButton.addEventListener("click", openCreateGroup);
+          joinButton.addEventListener("click", openJoinGroup);
           search.addEventListener("input", renderGroups);
           page.addEventListener("click", (event) => {
+            if (event.target.closest("[data-chat-modal-close]")) {
+              closeModal();
+              return;
+            }
+            const applyGroup = event.target.closest("[data-chat-apply-group]");
+            if (applyGroup) {
+              api("/api/chat/join-requests", {
+                method: "POST",
+                body: JSON.stringify({ groupId: applyGroup.dataset.chatApplyGroup, groupNumber: applyGroup.dataset.chatGroupNo, source: "group_number" })
+              }).then(() => {
+                closeModal();
+                toast("入群申请已提交，等待群管理员审核");
+              }).catch((error) => toast(error.message || "提交申请失败"));
+              return;
+            }
+            if (event.target.closest("[data-chat-qr]")) {
+              openQrInvite();
+              return;
+            }
+            if (event.target.closest("[data-chat-members]")) {
+              openMembers();
+              return;
+            }
+            if (event.target.closest("[data-chat-review]")) {
+              openReviewRequests();
+              return;
+            }
+            const reviewButton = event.target.closest("[data-chat-review-id]");
+            if (reviewButton) {
+              reviewButton.disabled = true;
+              api(`/api/chat/join-requests/${encodeURIComponent(reviewButton.dataset.chatReviewId)}`, {
+                method: "PUT",
+                body: JSON.stringify({ decision: reviewButton.dataset.chatReviewDecision })
+              }).then(async () => {
+                toast(reviewButton.dataset.chatReviewDecision === "approved" ? "已同意入群申请" : "已拒绝入群申请");
+                await openReviewRequests();
+              }).catch((error) => {
+                reviewButton.disabled = false;
+                toast(error.message || "审核操作失败");
+              });
+              return;
+            }
+            if (event.target.closest("[data-chat-copy-invite]")) {
+              const value = modalRoot.querySelector("#chatInviteUrl")?.value || "";
+              navigator.clipboard?.writeText(value).then(() => toast("邀请链接已复制")).catch(() => toast("复制失败，请手动复制链接"));
+              return;
+            }
             const pane = event.target.closest("[data-chat-pane]")?.dataset.chatPane;
             if (pane) page.dataset.mobilePane = pane;
             const retry = event.target.closest("[data-chat-retry]");
@@ -176,6 +366,7 @@
 
           (async () => {
             try {
+              await applyInviteFromUrl();
               groups = await client.loadGroups();
               renderGroups();
               if (groups[0]) await selectGroup(groups[0].id);

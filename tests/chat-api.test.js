@@ -104,3 +104,65 @@ test("chat write freezes with 423 and read cursors stay user-scoped", async () =
   assert.deepEqual(cursor.payload.cursor, { groupId: "class-group-1", userId: users.peer.id, sequence: 88 });
   assert.equal(store.data.readCursors.length, 1);
 });
+
+test("ordinary groups expose limited search, reviewed joins, and renewable QR applications", async () => {
+  const { store, users } = fixtures();
+  const created = await callRoute(store, "POST /api/chat/groups", users.owner, {
+    name: "校园摄影交流",
+    description: "作品交流与活动约拍"
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.payload.group.type, "custom");
+  assert.match(created.payload.group.publicNo, /^\d{10,}$/);
+
+  const initialMembers = await callRoute(store, `GET /api/chat/groups/${created.payload.group.id}/members`, users.owner);
+  assert.equal(initialMembers.status, 200);
+  assert.equal(initialMembers.payload.members.length, 1);
+  assert.equal(initialMembers.payload.members[0].name, users.owner.name);
+  assert.equal(/phone|password|studentNo/i.test(JSON.stringify(initialMembers.payload)), false);
+
+  const search = await callRoute(store, `GET /api/chat/search?groupNo=${created.payload.group.publicNo}`, users.outsider);
+  assert.equal(search.status, 200);
+  assert.deepEqual(Object.keys(search.payload.group).sort(), ["avatar", "id", "memberCount", "name", "type"]);
+  assert.equal("publicNo" in search.payload.group, false);
+
+  const numberJoin = await callRoute(store, "POST /api/chat/join-requests", users.outsider, {
+    groupId: created.payload.group.id,
+    source: "group_number",
+    groupNumber: created.payload.group.publicNo
+  });
+  assert.equal(numberJoin.status, 201);
+  const pending = await callRoute(store, `GET /api/chat/groups/${created.payload.group.id}/join-requests`, users.owner);
+  assert.equal(pending.status, 200);
+  assert.equal(pending.payload.requests.length, 1);
+  assert.equal(pending.payload.requests[0].applicant.id, users.outsider.id);
+  assert.equal(/phone|password|studentNo/i.test(JSON.stringify(pending.payload)), false);
+  const hiddenFromOutsider = await callRoute(store, `GET /api/chat/groups/${created.payload.group.id}/join-requests`, users.peer);
+  assert.equal(hiddenFromOutsider.status, 403);
+  const approved = await callRoute(store, `PUT /api/chat/join-requests/${numberJoin.payload.request.id}`, users.owner, { decision: "approved" });
+  assert.equal(approved.status, 200);
+  assert.equal(approved.payload.request.status, "approved");
+
+  const firstToken = await callRoute(store, `POST /api/chat/groups/${created.payload.group.id}/invite-token`, users.owner, {});
+  assert.equal(firstToken.status, 201);
+  assert.match(firstToken.payload.qrSvg, /<svg/);
+  assert.match(firstToken.payload.inviteUrl, /chatInvite=/);
+  const refreshedToken = await callRoute(store, `POST /api/chat/groups/${created.payload.group.id}/invite-token`, users.owner, {});
+  assert.equal(refreshedToken.status, 201);
+  assert.notEqual(firstToken.payload.tokenId, refreshedToken.payload.tokenId);
+
+  const staleQr = await callRoute(store, "POST /api/chat/join-requests", users.peer, {
+    groupId: created.payload.group.id,
+    source: "qr",
+    token: firstToken.payload.token
+  });
+  assert.equal(staleQr.status, 400);
+
+  const qrJoin = await callRoute(store, "POST /api/chat/join-requests", users.peer, {
+    source: "qr",
+    token: refreshedToken.payload.token
+  });
+  assert.equal(qrJoin.status, 201);
+  const qrApproved = await callRoute(store, `PUT /api/chat/join-requests/${qrJoin.payload.request.id}`, users.owner, { decision: "approved" });
+  assert.equal(qrApproved.status, 200);
+});

@@ -1,8 +1,27 @@
 const defaultStore = require("./chat-store");
+const QRCode = require("qrcode");
 
 function routeGroupId(pathname, suffix) {
   const match = pathname.match(new RegExp(`^/api/chat/groups/([^/]+)${suffix}$`));
   return match ? decodeURIComponent(match[1]) : "";
+}
+
+function routeJoinRequestId(pathname) {
+  const match = pathname.match(/^\/api\/chat\/join-requests\/([^/]+)$/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function routeInviteToken(pathname) {
+  const match = pathname.match(/^\/api\/chat\/groups\/([^/]+)\/invite-token(?:\/([^/]+))?$/);
+  if (!match) return null;
+  return {
+    groupId: decodeURIComponent(match[1]),
+    tokenId: match[2] ? decodeURIComponent(match[2]) : ""
+  };
+}
+
+function inviteUrl(url, token) {
+  return `${url.origin}/?chatInvite=${encodeURIComponent(token)}#chat`;
 }
 
 function chatError(error) {
@@ -15,13 +34,106 @@ async function handleChatRoute(context) {
   const { route, url, res, requireUser, parseBody, sendJson, sendError } = context;
   const store = context.store || defaultStore;
   if (!route.includes(" /api/chat")) return false;
+  const routeName = `${String(route).split(" ")[0]} ${url.pathname}`;
 
   const user = await requireUser(context.req, res);
   if (!user) return true;
 
   try {
-    if (route === "GET /api/chat/groups") {
+    if (routeName === "GET /api/chat/groups") {
       sendJson(res, 200, { groups: await store.listUserGroups(user.id) });
+      return true;
+    }
+
+    if (routeName === "POST /api/chat/groups") {
+      const body = await parseBody(context.req);
+      const group = await store.createCustomGroup({
+        name: body.name,
+        description: body.description
+      }, user);
+      sendJson(res, 201, { group });
+      return true;
+    }
+
+    if (routeName === "GET /api/chat/search") {
+      const group = await store.searchGroupByNumber(url.searchParams.get("groupNo"), user.id);
+      sendJson(res, 200, { group });
+      return true;
+    }
+
+    if (routeName === "POST /api/chat/join-requests") {
+      const body = await parseBody(context.req);
+      const request = await store.createJoinRequest({
+        groupId: body.groupId,
+        applicantId: user.id,
+        source: body.source,
+        groupNumber: body.groupNumber,
+        token: body.token
+      });
+      sendJson(res, 201, { request });
+      return true;
+    }
+
+    const joinRequestId = routeJoinRequestId(url.pathname);
+    if (route.startsWith("PUT /api/chat/join-requests/") && joinRequestId) {
+      const body = await parseBody(context.req);
+      const request = await store.reviewJoinRequest({
+        requestId: joinRequestId,
+        decision: body.decision,
+        reviewer: user
+      });
+      sendJson(res, 200, { request });
+      return true;
+    }
+
+    const inviteTokenPath = routeInviteToken(url.pathname);
+    if (route.startsWith("POST /api/chat/groups/") && inviteTokenPath && !inviteTokenPath.tokenId) {
+      const body = await parseBody(context.req);
+      const token = await store.createInviteToken({
+        groupId: inviteTokenPath.groupId,
+        creatorId: user.id,
+        maxUses: body.maxUses || 1,
+        expiresAt: body.expiresAt || null
+      });
+      const urlValue = inviteUrl(url, token.token);
+      const qrSvg = await QRCode.toString(urlValue, {
+        type: "svg",
+        errorCorrectionLevel: "M",
+        margin: 2,
+        width: 320
+      });
+      sendJson(res, 201, {
+        tokenId: token.id,
+        token: token.token,
+        expiresAt: token.expiresAt,
+        maxUses: token.maxUses,
+        inviteUrl: urlValue,
+        qrSvg
+      });
+      return true;
+    }
+
+    if (route.startsWith("DELETE /api/chat/groups/") && inviteTokenPath?.tokenId) {
+      const token = await store.revokeInviteToken({
+        groupId: inviteTokenPath.groupId,
+        tokenId: inviteTokenPath.tokenId,
+        reviewerId: user.id
+      });
+      sendJson(res, 200, { token });
+      return true;
+    }
+
+    const membersGroupId = routeGroupId(url.pathname, "/members");
+    if (route.startsWith("GET /api/chat/groups/") && membersGroupId) {
+      const members = await store.listMembers(membersGroupId, user);
+      sendJson(res, 200, { members });
+      return true;
+    }
+
+    const requestGroupId = routeGroupId(url.pathname, "/join-requests");
+    if (route.startsWith("GET /api/chat/groups/") && requestGroupId) {
+      const requests = await store.listJoinRequests(requestGroupId, user);
+      sendJson(res, 200, { requests });
       return true;
     }
 

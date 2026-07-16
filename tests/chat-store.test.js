@@ -126,6 +126,17 @@ function createMysqlHarness(initial = {}) {
       token.use_count += 1;
       return [{ affectedRows: 1 }];
     }
+    if (/UPDATE chat_invite_tokens SET revoked = 1 WHERE group_id/.test(sql)) {
+      state.tokens
+        .filter((row) => String(row.group_id) === String(params[0]) && !row.revoked)
+        .forEach((row) => { row.revoked = 1; });
+      return [{ affectedRows: 1 }];
+    }
+    if (/UPDATE chat_invite_tokens SET revoked = 1 WHERE id/.test(sql)) {
+      const token = state.tokens.find((row) => String(row.id) === String(params[0]));
+      if (token) token.revoked = 1;
+      return [{ affectedRows: 1 }];
+    }
     if (/UPDATE chat_invites SET status = 'accepted'/.test(sql)) {
       const invite = state.invites.find((row) => String(row.id) === String(params[0]));
       invite.status = "accepted";

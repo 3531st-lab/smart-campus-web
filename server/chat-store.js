@@ -109,7 +109,8 @@ function safeJoinRequest(row) {
     source: row.source,
     status: row.status,
     reviewerId: row.reviewer_id ?? row.reviewerId ?? null,
-    reviewedAt: row.reviewed_at ?? row.reviewedAt ?? null
+    reviewedAt: row.reviewed_at ?? row.reviewedAt ?? null,
+    createdAt: row.created_at ?? row.createdAt ?? null
   };
 }
 
@@ -320,6 +321,21 @@ function createMemoryChatStore(seed = {}, options = {}) {
       .sort((left, right) => Number(right.type === "class") - Number(left.type === "class") || left.name.localeCompare(right.name, "zh-CN"));
   }
 
+  async function searchGroupByNumber(groupNumber, viewerId) {
+    user(viewerId);
+    const publicNo = requiredText(groupNumber, "请输入群号");
+    const found = store.data.groups.find((item) => (
+      item.type === "custom"
+      && String(item.publicNo ?? item.public_no) === publicNo
+      && item.status !== "disabled"
+    ));
+    if (!found) throw publicError("未找到可加入的群聊", 404);
+    const memberCount = store.data.members.filter((item) => (
+      String(item.groupId ?? item.group_id) === String(found.id) && item.active !== false
+    )).length;
+    return { id: String(found.id), name: found.name, type: "custom", avatar: "", memberCount };
+  }
+
   async function getGroupForUser(groupId, accountInput) {
     const account = user(accountInput);
     const found = availableGroup(groupId);
@@ -355,7 +371,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
   function requiredGroupAdmin(groupId, reviewer, errorMessage) {
     const account = user(reviewer);
     const membership = member(groupId, account.id);
-    if (!membership || !GROUP_ADMIN_ROLES.has(membership.role)) throw publicError(errorMessage);
+    if (!membership || !GROUP_ADMIN_ROLES.has(membership.role)) throw publicError(errorMessage, 403);
     return account;
   }
 
@@ -396,7 +412,13 @@ function createMemoryChatStore(seed = {}, options = {}) {
   }
 
   async function createJoinRequest(input = {}) {
-    const { groupId, applicantId, source } = input;
+    const { applicantId, source } = input;
+    let groupId = input.groupId;
+    if (source === "qr" && !groupId) {
+      const token = requiredText(input?.token ?? input?.proof, "请提供有效二维码凭证");
+      const tokenRow = store.data.inviteTokens.find((item) => item.tokenDigest === inviteTokenDigest(token));
+      groupId = tokenRow?.groupId ?? tokenRow?.group_id;
+    }
     const found = ensureCustomWritable(groupId);
     const applicant = user(applicantId);
     if (!JOIN_SOURCES.has(source)) throw publicError("入群来源无效");
@@ -413,6 +435,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
       status: "pending",
       reviewerId: null,
       reviewedAt: null,
+      createdAt: new Date().toISOString(),
       pendingKey: `${groupId}:${applicant.id}`
     };
     store.data.joinRequests.push(request);
@@ -436,6 +459,19 @@ function createMemoryChatStore(seed = {}, options = {}) {
     request.pendingKey = null;
     if (decision === "approved") addMember(request.groupId, request.applicantId, request.source);
     return safeJoinRequest(request);
+  }
+
+  async function listJoinRequests(groupId, reviewer) {
+    const found = availableGroup(groupId);
+    if (found.type !== "custom") throw publicError("班级群成员由班级身份同步");
+    requiredGroupAdmin(found.id, reviewer, "无权查看入群申请");
+    return store.data.joinRequests
+      .filter((item) => String(item.groupId ?? item.group_id) === String(found.id) && item.status === "pending")
+      .sort((left, right) => String(left.createdAt ?? left.created_at ?? "").localeCompare(String(right.createdAt ?? right.created_at ?? "")))
+      .map((item) => ({
+        ...safeJoinRequest(item),
+        applicant: publicChatUser(store.data.users.find((entry) => String(entry.id) === String(item.applicantId ?? item.applicant_id)))
+      }));
   }
 
   async function createInvite({ groupId, inviterId, inviteeId, expiresAt = null }) {
@@ -486,6 +522,9 @@ function createMemoryChatStore(seed = {}, options = {}) {
   async function createInviteToken({ groupId, creatorId, expiresAt = null, maxUses = 1 }) {
     ensureCustomWritable(groupId);
     const creator = requiredGroupAdmin(groupId, creatorId, "无权创建群二维码");
+    store.data.inviteTokens
+      .filter((item) => String(item.groupId ?? item.group_id) === String(groupId) && !item.revoked)
+      .forEach((item) => { item.revoked = true; });
     const token = requiredText(inviteTokenGenerator(), "二维码生成失败");
     const digest = inviteTokenDigest(token);
     const existing = store.data.inviteTokens.find((item) => item.tokenDigest === digest);
@@ -502,6 +541,18 @@ function createMemoryChatStore(seed = {}, options = {}) {
     };
     store.data.inviteTokens.push(row);
     return { ...safeInviteToken(row), token };
+  }
+
+  async function revokeInviteToken({ groupId, tokenId, reviewerId }) {
+    ensureCustomWritable(groupId);
+    requiredGroupAdmin(groupId, reviewerId, "无权作废群二维码");
+    const token = store.data.inviteTokens.find((item) => (
+      String(item.id) === String(tokenId)
+      && String(item.groupId ?? item.group_id) === String(groupId)
+    ));
+    if (!token) throw publicError("二维码不存在", 404);
+    token.revoked = true;
+    return safeInviteToken(token);
   }
 
   async function messageAccess(groupId, accountInput, { writable = false } = {}) {
@@ -582,9 +633,12 @@ function createMemoryChatStore(seed = {}, options = {}) {
     listMembers,
     createJoinRequest,
     reviewJoinRequest,
+    listJoinRequests,
     createInvite,
     acceptInvite,
     createInviteToken,
+    revokeInviteToken,
+    searchGroupByNumber,
     createMessage,
     listMessages,
     updateReadCursor
@@ -693,6 +747,27 @@ function createMysqlChatStore(pool, options = {}) {
     return rows.map(safeGroup);
   });
 
+  const searchGroupByNumber = mysqlPublic(async (groupNumber, viewerId) => {
+    await activeUser(viewerId);
+    const publicNo = requiredText(groupNumber, "请输入群号");
+    const [rows] = await execute(`
+      SELECT cg.id, cg.name, cg.type, COUNT(cm.id) AS member_count
+      FROM chat_groups cg
+      LEFT JOIN chat_members cm ON cm.group_id = cg.id AND cm.active = 1
+      WHERE cg.type = 'custom' AND cg.public_no = ? AND cg.status <> 'disabled'
+      GROUP BY cg.id, cg.name, cg.type
+      LIMIT 1
+    `, [publicNo]);
+    if (!rows[0]) throw publicError("未找到可加入的群聊", 404);
+    return {
+      id: String(rows[0].id),
+      name: rows[0].name,
+      type: "custom",
+      avatar: "",
+      memberCount: Number(rows[0].member_count) || 0
+    };
+  });
+
   const getGroupForUser = mysqlPublic(async (groupId, accountInput) => {
     const account = await activeUser(accountInput);
     const found = await groupById(groupId);
@@ -752,7 +827,7 @@ function createMysqlChatStore(pool, options = {}) {
       "SELECT * FROM chat_members WHERE group_id = ? AND user_id = ? AND active = 1 AND role IN ('owner','admin') FOR UPDATE",
       [groupId, reviewerId]
     );
-    if (!rows[0]) throw publicError(message);
+    if (!rows[0]) throw publicError(message, 403);
   }
 
   async function mysqlCustomWritable(groupId, connection = pool, { forUpdate = false } = {}) {
@@ -763,8 +838,14 @@ function createMysqlChatStore(pool, options = {}) {
   }
 
   const createJoinRequest = mysqlPublic(async (input = {}) => {
-    const { groupId, applicantId, source } = input;
+    const { applicantId, source } = input;
     if (!JOIN_SOURCES.has(source)) throw publicError("入群来源无效");
+    let groupId = input.groupId;
+    if (source === "qr" && !groupId) {
+      const token = requiredText(input.token ?? input.proof, "请提供有效二维码凭证");
+      const [tokenLookup] = await execute("SELECT group_id FROM chat_invite_tokens WHERE token_digest = ?", [inviteTokenDigest(token)]);
+      groupId = tokenLookup[0]?.group_id;
+    }
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
@@ -853,6 +934,40 @@ function createMysqlChatStore(pool, options = {}) {
     }
   });
 
+  const listJoinRequests = mysqlPublic(async (groupId, reviewer) => {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const found = await groupById(groupId, connection, { forUpdate: true });
+      checkGroupState(found);
+      if (found.type !== "custom") throw publicError("班级群成员由班级身份同步");
+      const account = await activeUser(reviewer, connection);
+      await requiredMysqlAdmin(found.id, account.id, connection, "无权查看入群申请");
+      const [rows] = await connection.execute(`
+        SELECT r.*, s.name AS applicant_name, s.role AS applicant_role, s.avatar_color AS applicant_avatar_color
+        FROM chat_join_requests r
+        INNER JOIN students s ON s.id = r.applicant_id
+        WHERE r.group_id = ? AND r.status = 'pending'
+        ORDER BY r.created_at ASC, r.id ASC
+      `, [found.id]);
+      await connection.commit();
+      return rows.map((row) => ({
+        ...safeJoinRequest(row),
+        applicant: publicChatUser({
+          id: row.applicant_id,
+          name: row.applicant_name,
+          role: row.applicant_role,
+          avatar_color: row.applicant_avatar_color
+        })
+      }));
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
   const createInvite = mysqlPublic(async ({ groupId, inviterId, inviteeId, expiresAt = null }) => {
     const connection = await pool.getConnection();
     try {
@@ -930,6 +1045,10 @@ function createMysqlChatStore(pool, options = {}) {
       await mysqlCustomWritable(groupId, connection, { forUpdate: true });
       const creator = await activeUser(creatorId, connection);
       await requiredMysqlAdmin(groupId, creator.id, connection, "无权创建群二维码");
+      await connection.execute(
+        "UPDATE chat_invite_tokens SET revoked = 1 WHERE group_id = ? AND revoked = 0",
+        [groupId]
+      );
       const token = requiredText(inviteTokenGenerator(), "二维码生成失败");
       const digest = inviteTokenDigest(token);
       const [existing] = await connection.execute("SELECT * FROM chat_invite_tokens WHERE token_digest = ? FOR UPDATE", [digest]);
@@ -943,6 +1062,29 @@ function createMysqlChatStore(pool, options = {}) {
       );
       await connection.commit();
       return { ...safeInviteToken({ id, group_id: groupId, creator_id: creator.id, expires_at: resolvedExpiry, max_uses: normalizedMaxUses, use_count: 0, revoked: 0 }), token };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const revokeInviteToken = mysqlPublic(async ({ groupId, tokenId, reviewerId }) => {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await mysqlCustomWritable(groupId, connection, { forUpdate: true });
+      const reviewer = await activeUser(reviewerId, connection);
+      await requiredMysqlAdmin(groupId, reviewer.id, connection, "无权作废群二维码");
+      const [rows] = await connection.execute(
+        "SELECT * FROM chat_invite_tokens WHERE id = ? AND group_id = ? FOR UPDATE",
+        [tokenId, groupId]
+      );
+      if (!rows[0]) throw publicError("二维码不存在", 404);
+      await connection.execute("UPDATE chat_invite_tokens SET revoked = 1 WHERE id = ?", [tokenId]);
+      await connection.commit();
+      return safeInviteToken({ ...rows[0], revoked: 1 });
     } catch (error) {
       await connection.rollback();
       throw error;
@@ -1098,9 +1240,12 @@ function createMysqlChatStore(pool, options = {}) {
     listMembers,
     createJoinRequest,
     reviewJoinRequest,
+    listJoinRequests,
     createInvite,
     acceptInvite,
     createInviteToken,
+    revokeInviteToken,
+    searchGroupByNumber,
     createMessage,
     listMessages,
     updateReadCursor
@@ -1134,9 +1279,12 @@ module.exports = {
   listMembers: (...args) => selectedStore().listMembers(...args),
   createJoinRequest: (...args) => selectedStore().createJoinRequest(...args),
   reviewJoinRequest: (...args) => selectedStore().reviewJoinRequest(...args),
+  listJoinRequests: (...args) => selectedStore().listJoinRequests(...args),
   createInvite: (...args) => selectedStore().createInvite(...args),
   acceptInvite: (...args) => selectedStore().acceptInvite(...args),
   createInviteToken: (...args) => selectedStore().createInviteToken(...args),
+  revokeInviteToken: (...args) => selectedStore().revokeInviteToken(...args),
+  searchGroupByNumber: (...args) => selectedStore().searchGroupByNumber(...args),
   createMessage: (...args) => selectedStore().createMessage(...args),
   listMessages: (...args) => selectedStore().listMessages(...args),
   updateReadCursor: (...args) => selectedStore().updateReadCursor(...args)
