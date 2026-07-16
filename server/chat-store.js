@@ -20,6 +20,7 @@ const APPEAL_TRANSITIONS = Object.freeze({
   approved: new Set(),
   rejected: new Set()
 });
+const BASE_EMOJIS = Object.freeze(["😀", "😁", "😂", "😊", "😍", "🤔", "😭", "😡", "👍", "👎", "👏", "🙏", "🎉", "💪", "❤️", "🌟", "📚", "☕"]);
 
 class PublicChatError extends Error {
   constructor(message, statusCode = 400) {
@@ -184,6 +185,28 @@ function safeInviteToken(row) {
   };
 }
 
+function safeSticker(row, favorite = false) {
+  if (!row) return null;
+  return {
+    id: String(row.id ?? row.sticker_id),
+    kind: "image",
+    name: row.name ?? row.sticker_name ?? "图片表情",
+    url: row.url ?? row.public_url ?? row.sticker_public_url ?? "",
+    mimeType: row.mimeType ?? row.mime_type ?? row.sticker_mime_type ?? "image/webp",
+    favorite: Boolean(favorite ?? row.favorite)
+  };
+}
+
+function safeReport(row) {
+  return {
+    id: String(row.id),
+    targetType: row.target_type ?? row.targetType,
+    targetId: String(row.target_id ?? row.targetId),
+    status: row.status,
+    createdAt: row.created_at ?? row.createdAt ?? null
+  };
+}
+
 function publicChatUser(user, assignment = null) {
   return {
     id: String(user?.id ?? ""),
@@ -194,23 +217,43 @@ function publicChatUser(user, assignment = null) {
   };
 }
 
-function safeMessage(row, user, assignment = null) {
+function safeMessage(row, user, assignment = null, sticker = null) {
   return {
     id: String(row.id),
     groupId: String(row.group_id ?? row.groupId),
     sequence: Number(row.sequence),
     clientRequestId: row.client_request_id ?? row.clientRequestId ?? null,
     text: row.text || "",
+    sticker: sticker || (row.sticker ? safeSticker(row.sticker, row.sticker.favorite) : (row.sticker_id ? safeSticker(row, row.favorite) : null)),
     createdAt: row.created_at ?? row.createdAt ?? null,
     sender: publicChatUser(user || row, assignment || row)
   };
 }
 
-function normalizeMessageText(value) {
+function normalizeMessageText(value, stickerId = "") {
   const text = String(value || "").trim();
-  if (!text) throw publicError("消息不能为空");
+  if (!text && !String(stickerId || "").trim()) throw publicError("消息不能为空");
   if (text.length > 4000) throw publicError("消息长度不能超过 4000 个字符");
   return text;
+}
+
+function normalizeStickerId(value) {
+  const id = String(value || "").trim();
+  if (!id) return "";
+  if (!/^chat-sticker-[A-Za-z0-9-]{8,128}$/.test(id)) throw publicError("表情标识无效");
+  return id;
+}
+
+function normalizeStickerName(value) {
+  const name = requiredText(value, "请填写表情名称");
+  if (name.length > 80) throw publicError("表情名称不能超过 80 个字符");
+  return name;
+}
+
+function normalizeReportReason(value) {
+  const reason = requiredText(value, "请填写举报原因");
+  if (reason.length > 1000) throw publicError("举报原因不能超过 1000 个字符");
+  return reason;
 }
 
 function normalizeClientRequestId(value) {
@@ -253,6 +296,10 @@ function createMemoryChatStore(seed = {}, options = {}) {
       invites: seed.invites || seed.chatInvites || [],
       inviteTokens: seed.inviteTokens || seed.chatInviteTokens || [],
       messages: seed.messages || seed.chatMessages || [],
+      media: seed.media || seed.chatMedia || [],
+      stickers: seed.stickers || seed.chatStickers || [],
+      stickerFavorites: seed.stickerFavorites || seed.chatStickerFavorites || [],
+      reports: seed.reports || seed.chatReports || [],
       readCursors: seed.readCursors || seed.chatReadCursors || [],
       appeals: seed.appeals || seed.chatAppeals || [],
       auditLogs: seed.auditLogs || seed.chatAuditLogs || []
@@ -631,15 +678,91 @@ function createMemoryChatStore(seed = {}, options = {}) {
     return { found, access, account: user(accountInput) };
   }
 
+  function stickerForUser(stickerId, accountId) {
+    const id = normalizeStickerId(stickerId);
+    if (!id) return null;
+    const sticker = store.data.stickers.find((item) => String(item.id) === id && item.status === "active");
+    if (!sticker || (String(sticker.ownerId ?? sticker.owner_id) !== String(accountId) && sticker.visibility !== "public")) {
+      throw publicError("表情不存在或无权使用", 404);
+    }
+    const media = store.data.media.find((item) => String(item.id) === String(sticker.mediaId ?? sticker.media_id));
+    if (!media) throw publicError("表情资源不可用", 409);
+    const favorite = store.data.stickerFavorites.some((item) => String(item.userId ?? item.user_id) === String(accountId) && String(item.stickerId ?? item.sticker_id) === id);
+    return safeSticker({ ...media, ...sticker }, favorite);
+  }
+
+  async function createSticker({ ownerId, media, name, visibility = "private" }) {
+    const owner = user(ownerId);
+    if (!media?.id || String(media.ownerId) !== String(owner.id)) throw publicError("表情资源归属无效", 403);
+    const normalizedVisibility = String(visibility || "private").trim();
+    if (!new Set(["private", "public"]).has(normalizedVisibility)) throw publicError("表情可见范围无效");
+    if (normalizedVisibility === "public" && !PLATFORM_ROLES.has(owner.role)) throw publicError("普通用户上传的图片表情仅自己可见", 403);
+    if (store.data.stickers.some((item) => String(item.mediaId ?? item.media_id) === String(media.id))) throw publicError("该图片已创建为表情", 409);
+    store.data.media.push({ ...media });
+    const sticker = {
+      id: `chat-sticker-${crypto.randomUUID()}`,
+      mediaId: media.id,
+      ownerId: owner.id,
+      name: normalizeStickerName(name),
+      visibility: normalizedVisibility,
+      status: "active",
+      createdAt: new Date().toISOString()
+    };
+    store.data.stickers.push(sticker);
+    return safeSticker({ ...media, ...sticker });
+  }
+
+  async function listStickers(viewerId) {
+    const account = user(viewerId);
+    const favorites = new Set(store.data.stickerFavorites
+      .filter((item) => String(item.userId ?? item.user_id) === String(account.id))
+      .map((item) => String(item.stickerId ?? item.sticker_id)));
+    const unicode = BASE_EMOJIS.map((emoji) => ({ id: `unicode:${emoji.codePointAt(0).toString(16)}`, kind: "unicode", emoji, name: emoji, favorite: favorites.has(`unicode:${emoji.codePointAt(0).toString(16)}`) }));
+    const images = store.data.stickers
+      .filter((item) => item.status === "active" && (String(item.ownerId ?? item.owner_id) === String(account.id) || item.visibility === "public"))
+      .map((item) => {
+        const media = store.data.media.find((candidate) => String(candidate.id) === String(item.mediaId ?? item.media_id));
+        return media ? safeSticker({ ...media, ...item }, favorites.has(String(item.id))) : null;
+      })
+      .filter(Boolean);
+    return { unicode, stickers: images };
+  }
+
+  async function favoriteSticker({ stickerId, userId, favorite = true }) {
+    const account = user(userId);
+    const id = String(stickerId || "").trim();
+    const unicode = id.startsWith("unicode:");
+    if (unicode && !BASE_EMOJIS.some((emoji) => `unicode:${emoji.codePointAt(0).toString(16)}` === id)) throw publicError("基础表情不存在", 404);
+    const sticker = unicode ? { id, kind: "unicode", emoji: BASE_EMOJIS.find((emoji) => `unicode:${emoji.codePointAt(0).toString(16)}` === id), name: id.slice(8) } : stickerForUser(id, account.id);
+    const index = store.data.stickerFavorites.findIndex((item) => String(item.userId ?? item.user_id) === String(account.id) && String(item.stickerId ?? item.sticker_id) === id);
+    if (favorite !== false && index < 0) store.data.stickerFavorites.push({ userId: account.id, stickerId: id, createdAt: new Date().toISOString() });
+    if (favorite === false && index >= 0) store.data.stickerFavorites.splice(index, 1);
+    return { ...sticker, favorite: favorite !== false };
+  }
+
+  async function createReport({ reporterId, targetType, targetId, reason }) {
+    const reporter = user(reporterId);
+    const type = String(targetType || "").trim();
+    if (!new Set(["message", "sticker", "group"]).has(type)) throw publicError("举报对象类型无效");
+    const id = String(targetId || "").trim();
+    if (!id || id.length > 128) throw publicError("举报对象无效");
+    const report = { id: `chat-report-${crypto.randomUUID()}`, reporterId: reporter.id, targetType: type, targetId: id, reason: normalizeReportReason(reason), status: "submitted", createdAt: new Date().toISOString() };
+    store.data.reports.push(report);
+    return safeReport(report);
+  }
+
   function messageProjection(row, found) {
     const sender = store.data.users.find((item) => String(item.id) === String(row.senderId ?? row.sender_id));
     const assignment = found.type === "class" && sender ? classAssignment(found, sender.id) : null;
-    return safeMessage(row, sender, assignment);
+    const sticker = row.stickerId || row.sticker_id ? stickerForUser(row.stickerId ?? row.sticker_id, row.senderId ?? row.sender_id) : null;
+    return safeMessage(row, sender, assignment, sticker);
   }
 
-  async function createMessage({ groupId, senderId, clientRequestId, text }) {
+  async function createMessage({ groupId, senderId, clientRequestId, text, stickerId }) {
     const { found, account } = await messageAccess(groupId, senderId, { writable: true });
     const requestId = normalizeClientRequestId(clientRequestId);
+    const normalizedStickerId = normalizeStickerId(stickerId);
+    const sticker = normalizedStickerId ? stickerForUser(normalizedStickerId, account.id) : null;
     const existing = store.data.messages.find((item) => (
       String(item.groupId ?? item.group_id) === String(found.id)
       && String(item.senderId ?? item.sender_id) === String(account.id)
@@ -655,11 +778,12 @@ function createMemoryChatStore(seed = {}, options = {}) {
       sequence,
       senderId: account.id,
       clientRequestId: requestId,
-      text: normalizeMessageText(text),
+      text: normalizeMessageText(text, normalizedStickerId),
+      stickerId: normalizedStickerId || null,
       createdAt: new Date().toISOString()
     };
     store.data.messages.push(created);
-    return messageProjection(created, found);
+    return safeMessage(created, account, found.type === "class" ? classAssignment(found, account.id) : null, sticker);
   }
 
   async function listMessages({ groupId, viewerId, after = 0, limit = 50 }) {
@@ -793,6 +917,10 @@ function createMemoryChatStore(seed = {}, options = {}) {
     createInviteToken,
     revokeInviteToken,
     searchGroupByNumber,
+    createSticker,
+    listStickers,
+    favoriteSticker,
+    createReport,
     createMessage,
     listMessages,
     updateReadCursor,
@@ -1291,6 +1419,105 @@ function createMysqlChatStore(pool, options = {}) {
     return { found, account, governance: false, membership, assignment: null };
   }
 
+  async function mysqlStickerForUser(stickerId, accountId, connection, { forMessage = false } = {}) {
+    const id = normalizeStickerId(stickerId);
+    if (!id) return null;
+    const [rows] = await connection.execute(`
+      SELECT s.*, m.public_url AS sticker_public_url, m.mime_type AS sticker_mime_type
+      FROM chat_stickers s
+      INNER JOIN chat_media m ON m.id = s.media_id
+      WHERE s.id = ? AND s.status = 'active'
+        AND (${forMessage ? "s.owner_id = ? OR s.visibility = 'public'" : "s.owner_id = ? OR s.visibility = 'public'"})
+      FOR UPDATE
+    `, [id, accountId]);
+    if (!rows[0]) throw publicError("表情不存在或无权使用", 404);
+    return safeSticker(rows[0]);
+  }
+
+  const createSticker = mysqlPublic(async ({ ownerId, media, name, visibility = "private" }) => {
+    const account = await activeUser(ownerId);
+    if (!media?.id || String(media.ownerId) !== String(account.id)) throw publicError("表情资源归属无效", 403);
+    const normalizedVisibility = String(visibility || "private").trim();
+    if (!new Set(["private", "public"]).has(normalizedVisibility)) throw publicError("表情可见范围无效");
+    if (normalizedVisibility === "public" && !PLATFORM_ROLES.has(account.role)) throw publicError("普通用户上传的图片表情仅自己可见", 403);
+    const normalizedName = normalizeStickerName(name);
+    const id = `chat-sticker-${crypto.randomUUID()}`;
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.execute(`
+        INSERT INTO chat_media (id, owner_id, object_key, public_url, mime_type, byte_size, sha256, source_type, source_url, source_author, source_license)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [media.id, account.id, media.key, media.url, media.mimeType, media.size, media.digest, media.source.type, media.source.sourceUrl || null, media.source.author || null, media.source.license || null]);
+      await connection.execute(
+        "INSERT INTO chat_stickers (id, media_id, owner_id, name, visibility) VALUES (?, ?, ?, ?, ?)",
+        [id, media.id, account.id, normalizedName, normalizedVisibility]
+      );
+      await connection.commit();
+      return safeSticker({ id, sticker_public_url: media.url, sticker_mime_type: media.mimeType, name: normalizedName });
+    } catch (error) {
+      await connection.rollback();
+      if (error?.code === "ER_DUP_ENTRY") throw publicError("该图片已创建为表情", 409);
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const listStickers = mysqlPublic(async (viewerId) => {
+    const account = await activeUser(viewerId);
+    const [rows] = await execute(`
+      SELECT s.*, m.public_url AS sticker_public_url, m.mime_type AS sticker_mime_type,
+        CASE WHEN f.user_id IS NULL THEN 0 ELSE 1 END AS favorite
+      FROM chat_stickers s
+      INNER JOIN chat_media m ON m.id = s.media_id
+      LEFT JOIN chat_sticker_favorites f ON f.sticker_id = s.id AND f.user_id = ?
+      WHERE s.status = 'active' AND (s.owner_id = ? OR s.visibility = 'public')
+      ORDER BY f.user_id IS NOT NULL DESC, s.created_at DESC
+      LIMIT 120
+    `, [account.id, account.id]);
+    const [favoriteRows] = await execute("SELECT sticker_id FROM chat_sticker_favorites WHERE user_id = ? AND sticker_id LIKE 'unicode:%'", [account.id]);
+    const favoriteUnicode = new Set(favoriteRows.map((row) => row.sticker_id));
+    return {
+      unicode: BASE_EMOJIS.map((emoji) => ({ id: `unicode:${emoji.codePointAt(0).toString(16)}`, kind: "unicode", emoji, name: emoji, favorite: favoriteUnicode.has(`unicode:${emoji.codePointAt(0).toString(16)}`) })),
+      stickers: rows.map((row) => safeSticker(row, Boolean(row.favorite)))
+    };
+  });
+
+  const favoriteSticker = mysqlPublic(async ({ stickerId, userId, favorite = true }) => {
+    const account = await activeUser(userId);
+    const id = String(stickerId || "").trim();
+    const unicode = id.startsWith("unicode:");
+    if (unicode && !BASE_EMOJIS.some((emoji) => `unicode:${emoji.codePointAt(0).toString(16)}` === id)) throw publicError("基础表情不存在", 404);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const sticker = unicode ? { id, kind: "unicode", emoji: BASE_EMOJIS.find((emoji) => `unicode:${emoji.codePointAt(0).toString(16)}` === id), name: id.slice(8) } : await mysqlStickerForUser(id, account.id, connection);
+      if (favorite === false) {
+        await connection.execute("DELETE FROM chat_sticker_favorites WHERE user_id = ? AND sticker_id = ?", [account.id, id]);
+      } else {
+        await connection.execute("INSERT IGNORE INTO chat_sticker_favorites (user_id, sticker_id) VALUES (?, ?)", [account.id, id]);
+      }
+      await connection.commit();
+      return { ...sticker, favorite: favorite !== false };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const createReport = mysqlPublic(async ({ reporterId, targetType, targetId, reason }) => {
+    const reporter = await activeUser(reporterId);
+    const type = String(targetType || "").trim();
+    const id = String(targetId || "").trim();
+    if (!new Set(["message", "sticker", "group"]).has(type) || !id || id.length > 128) throw publicError("举报对象无效");
+    const report = { id: `chat-report-${crypto.randomUUID()}`, reporterId: reporter.id, targetType: type, targetId: id, reason: normalizeReportReason(reason), status: "submitted", createdAt: new Date().toISOString() };
+    await execute("INSERT INTO chat_reports (id, reporter_id, target_type, target_id, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [report.id, report.reporterId, report.targetType, report.targetId, report.reason, report.status, report.createdAt]);
+    return safeReport(report);
+  });
+
   function mysqlMessageProjection(row) {
     const sender = {
       id: row.sender_id,
@@ -1301,20 +1528,25 @@ function createMysqlChatStore(pool, options = {}) {
     return safeMessage(row, sender, { class_duty: row.class_duty });
   }
 
-  const createMessage = mysqlPublic(async ({ groupId, senderId, clientRequestId, text }) => {
+  const createMessage = mysqlPublic(async ({ groupId, senderId, clientRequestId, text, stickerId }) => {
     const requestId = normalizeClientRequestId(clientRequestId);
-    const normalizedText = normalizeMessageText(text);
+    const normalizedStickerId = normalizeStickerId(stickerId);
+    const normalizedText = normalizeMessageText(text, normalizedStickerId);
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
       // All message writes serialize on the group row before member and message rows.
       const access = await mysqlMessageAccess(groupId, senderId, connection, { writable: true });
+      const sticker = normalizedStickerId ? await mysqlStickerForUser(normalizedStickerId, access.account.id, connection) : null;
       const [existingRows] = await connection.execute(`
         SELECT m.*, s.id AS sender_id, s.name AS sender_name, s.role AS sender_role,
-          s.avatar_color AS sender_avatar_color, ca.duty AS class_duty
+          s.avatar_color AS sender_avatar_color, ca.duty AS class_duty,
+          cs.name AS sticker_name, cm.public_url AS sticker_public_url, cm.mime_type AS sticker_mime_type
         FROM chat_messages m
         INNER JOIN students s ON s.id = m.sender_id
         LEFT JOIN class_assignments ca ON ca.class_id = ? AND ca.user_id = m.sender_id AND ca.active = 1
+        LEFT JOIN chat_stickers cs ON cs.id = m.sticker_id
+        LEFT JOIN chat_media cm ON cm.id = cs.media_id
         WHERE m.group_id = ? AND m.sender_id = ? AND m.client_request_id = ?
         FOR UPDATE
       `, [access.found.classId, access.found.id, access.account.id, requestId]);
@@ -1335,11 +1567,11 @@ function createMysqlChatStore(pool, options = {}) {
       const id = `chat-message-${crypto.randomUUID()}`;
       const createdAt = new Date().toISOString();
       await connection.execute(
-        "INSERT INTO chat_messages (id, group_id, sequence, sender_id, client_request_id, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [id, access.found.id, sequence, access.account.id, requestId, normalizedText, createdAt]
+        "INSERT INTO chat_messages (id, group_id, sequence, sender_id, client_request_id, text, sticker_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, access.found.id, sequence, access.account.id, requestId, normalizedText, normalizedStickerId || null, createdAt]
       );
       await connection.commit();
-      return safeMessage({ id, group_id: access.found.id, sequence, client_request_id: requestId, text: normalizedText, created_at: createdAt }, access.account, access.assignment);
+      return safeMessage({ id, group_id: access.found.id, sequence, client_request_id: requestId, text: normalizedText, sticker_id: normalizedStickerId || null, created_at: createdAt }, access.account, access.assignment, sticker);
     } catch (error) {
       await connection.rollback();
       throw error;
@@ -1357,10 +1589,13 @@ function createMysqlChatStore(pool, options = {}) {
       const access = await mysqlMessageAccess(groupId, viewerId, connection);
       const [rows] = await connection.execute(`
         SELECT m.*, s.id AS sender_id, s.name AS sender_name, s.role AS sender_role,
-          s.avatar_color AS sender_avatar_color, ca.duty AS class_duty
+          s.avatar_color AS sender_avatar_color, ca.duty AS class_duty,
+          cs.name AS sticker_name, cm.public_url AS sticker_public_url, cm.mime_type AS sticker_mime_type
         FROM chat_messages m
         INNER JOIN students s ON s.id = m.sender_id
         LEFT JOIN class_assignments ca ON ca.class_id = ? AND ca.user_id = m.sender_id AND ca.active = 1
+        LEFT JOIN chat_stickers cs ON cs.id = m.sticker_id
+        LEFT JOIN chat_media cm ON cm.id = cs.media_id
         WHERE m.group_id = ? AND m.sequence > ?
         ORDER BY m.sequence ASC
         LIMIT ?
@@ -1524,6 +1759,10 @@ function createMysqlChatStore(pool, options = {}) {
     createInviteToken,
     revokeInviteToken,
     searchGroupByNumber,
+    createSticker,
+    listStickers,
+    favoriteSticker,
+    createReport,
     createMessage,
     listMessages,
     updateReadCursor,
@@ -1545,6 +1784,10 @@ const memoryStore = createMemoryChatStore({
   chatInvites: data.chatInvites,
   chatInviteTokens: data.chatInviteTokens,
   chatMessages: data.chatMessages,
+  chatMedia: data.chatMedia,
+  chatStickers: data.chatStickers,
+  chatStickerFavorites: data.chatStickerFavorites,
+  chatReports: data.chatReports,
   chatReadCursors: data.chatReadCursors,
   chatAppeals: data.chatAppeals,
   chatAuditLogs: data.chatAuditLogs
@@ -1570,6 +1813,10 @@ module.exports = {
   createInviteToken: (...args) => selectedStore().createInviteToken(...args),
   revokeInviteToken: (...args) => selectedStore().revokeInviteToken(...args),
   searchGroupByNumber: (...args) => selectedStore().searchGroupByNumber(...args),
+  createSticker: (...args) => selectedStore().createSticker(...args),
+  listStickers: (...args) => selectedStore().listStickers(...args),
+  favoriteSticker: (...args) => selectedStore().favoriteSticker(...args),
+  createReport: (...args) => selectedStore().createReport(...args),
   createMessage: (...args) => selectedStore().createMessage(...args),
   listMessages: (...args) => selectedStore().listMessages(...args),
   updateReadCursor: (...args) => selectedStore().updateReadCursor(...args),

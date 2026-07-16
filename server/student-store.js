@@ -143,7 +143,7 @@ async function initialize() {
       name VARCHAR(120) NOT NULL,
       owner_id VARCHAR(64) NULL,
       class_id VARCHAR(64) NULL,
-      status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+      status ENUM('active','frozen','closed','disabled') NOT NULL DEFAULT 'active',
       frozen TINYINT(1) NOT NULL DEFAULT 0,
       next_message_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
       description VARCHAR(500) NOT NULL DEFAULT '',
@@ -172,6 +172,7 @@ async function initialize() {
       if (!["ER_DUP_FIELDNAME", "ER_DUP_KEYNAME"].includes(error.code)) throw error;
     }
   }
+  await db.query("ALTER TABLE chat_groups MODIFY COLUMN status ENUM('active','frozen','closed','disabled') NOT NULL DEFAULT 'active'");
   await db.query(`
     CREATE TABLE IF NOT EXISTS chat_members (
       id VARCHAR(64) PRIMARY KEY,
@@ -254,11 +255,76 @@ async function initialize() {
       sender_id VARCHAR(64) NOT NULL,
       client_request_id VARCHAR(128) NOT NULL,
       text TEXT NOT NULL,
+      sticker_id VARCHAR(64) NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uq_chat_message_sequence (group_id, sequence),
       UNIQUE KEY uq_chat_message_request (group_id, sender_id, client_request_id),
       KEY idx_chat_message_group_sequence (group_id, sequence),
       KEY idx_chat_message_sender_created (sender_id, created_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  for (const statement of [
+    "ALTER TABLE chat_messages ADD COLUMN sticker_id VARCHAR(64) NULL",
+    "ALTER TABLE chat_messages ADD INDEX idx_chat_message_sticker (sticker_id)"
+  ]) {
+    try {
+      await db.query(statement);
+    } catch (error) {
+      if (!['ER_DUP_FIELDNAME', 'ER_DUP_KEYNAME'].includes(error.code)) throw error;
+    }
+  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS chat_media (
+      id VARCHAR(64) PRIMARY KEY,
+      owner_id VARCHAR(64) NOT NULL,
+      object_key VARCHAR(512) NOT NULL,
+      public_url VARCHAR(1024) NOT NULL,
+      mime_type VARCHAR(80) NOT NULL,
+      byte_size INT UNSIGNED NOT NULL,
+      sha256 CHAR(64) NOT NULL,
+      source_type ENUM('upload','network') NOT NULL DEFAULT 'upload',
+      source_url VARCHAR(2048) NULL,
+      source_author VARCHAR(160) NULL,
+      source_license VARCHAR(160) NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_chat_media_sha256_owner (sha256, owner_id),
+      KEY idx_chat_media_owner_created (owner_id, created_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS chat_stickers (
+      id VARCHAR(64) PRIMARY KEY,
+      media_id VARCHAR(64) NOT NULL,
+      owner_id VARCHAR(64) NOT NULL,
+      name VARCHAR(80) NOT NULL,
+      visibility ENUM('private','public') NOT NULL DEFAULT 'private',
+      status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_chat_sticker_media (media_id),
+      KEY idx_chat_sticker_owner_status (owner_id, status, created_at),
+      KEY idx_chat_sticker_visibility_status (visibility, status, created_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS chat_sticker_favorites (
+      user_id VARCHAR(64) NOT NULL,
+      sticker_id VARCHAR(64) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, sticker_id),
+      KEY idx_chat_sticker_favorite_sticker (sticker_id, created_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS chat_reports (
+      id VARCHAR(64) PRIMARY KEY,
+      reporter_id VARCHAR(64) NOT NULL,
+      target_type ENUM('message','sticker','group') NOT NULL,
+      target_id VARCHAR(64) NOT NULL,
+      reason VARCHAR(1000) NOT NULL,
+      status ENUM('submitted','reviewing','resolved','rejected') NOT NULL DEFAULT 'submitted',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_chat_report_status_created (status, created_at),
+      KEY idx_chat_report_target (target_type, target_id, created_at)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   await db.query(`
@@ -269,6 +335,36 @@ async function initialize() {
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (group_id, user_id),
       KEY idx_chat_read_cursor_user (user_id, updated_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS chat_appeals (
+      id VARCHAR(64) PRIMARY KEY,
+      group_id VARCHAR(64) NOT NULL,
+      appellant_id VARCHAR(64) NOT NULL,
+      reason VARCHAR(1000) NOT NULL,
+      status ENUM('submitted','reviewing','approved','rejected') NOT NULL DEFAULT 'submitted',
+      reviewer_id VARCHAR(64) NULL,
+      reviewed_at TIMESTAMP NULL,
+      active_key VARCHAR(160) NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_chat_appeal_active (active_key),
+      KEY idx_chat_appeal_group_status (group_id, status, created_at),
+      KEY idx_chat_appeal_appellant (appellant_id, created_at)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS chat_audit_logs (
+      id VARCHAR(64) PRIMARY KEY,
+      operator_id VARCHAR(64) NOT NULL,
+      action VARCHAR(64) NOT NULL,
+      target_type VARCHAR(32) NOT NULL,
+      target_id VARCHAR(64) NOT NULL,
+      metadata_json JSON NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_chat_audit_target (target_type, target_id, created_at),
+      KEY idx_chat_audit_operator (operator_id, created_at)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   await db.query(`

@@ -1,5 +1,27 @@
 const defaultStore = require("./chat-store");
+const defaultMediaStore = require("./media-store");
 const QRCode = require("qrcode");
+
+function stickerFavoriteId(pathname) {
+  const match = pathname.match(/^\/api\/chat\/stickers\/([^/]+)\/favorite$/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function parseImageDataUrl(value) {
+  const match = String(value || "").match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) {
+    const error = new Error("图片数据格式无效");
+    error.statusCode = 400;
+    throw error;
+  }
+  const bytes = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (!bytes.length) {
+    const error = new Error("图片数据为空");
+    error.statusCode = 400;
+    throw error;
+  }
+  return { mimeType: match[1].toLowerCase(), bytes };
+}
 
 function routeGroupId(pathname, suffix) {
   const match = pathname.match(new RegExp(`^/api/chat/groups/([^/]+)${suffix}$`));
@@ -43,6 +65,7 @@ function chatError(error) {
 async function handleChatRoute(context) {
   const { route, url, res, requireUser, parseBody, sendJson, sendError } = context;
   const store = context.store || defaultStore;
+  const mediaStore = context.mediaStore || defaultMediaStore;
   if (!route.includes(" /api/chat") && !route.includes(" /api/admin/chat")) return false;
   const routeName = `${String(route).split(" ")[0]} ${url.pathname}`;
 
@@ -83,6 +106,40 @@ async function handleChatRoute(context) {
 
     if (routeName === "GET /api/chat/groups") {
       sendJson(res, 200, { groups: await store.listUserGroups(user.id) });
+      return true;
+    }
+
+    if (routeName === "GET /api/chat/stickers") {
+      sendJson(res, 200, await store.listStickers(user.id));
+      return true;
+    }
+
+    if (routeName === "POST /api/chat/stickers") {
+      const body = await parseBody(context.req);
+      const image = parseImageDataUrl(body.dataUrl);
+      const media = await mediaStore.saveImage({ ownerId: user.id, bytes: image.bytes, mimeType: image.mimeType, source: body.source || { type: "upload" } });
+      const sticker = await store.createSticker({ ownerId: user.id, media, name: body.name, visibility: body.visibility || "private" });
+      sendJson(res, 201, { sticker });
+      return true;
+    }
+
+    const favoriteId = stickerFavoriteId(url.pathname);
+    if (route.startsWith("POST /api/chat/stickers/") && favoriteId) {
+      const body = await parseBody(context.req);
+      const sticker = await store.favoriteSticker({ stickerId: favoriteId, userId: user.id, favorite: body.favorite !== false });
+      sendJson(res, 200, { sticker });
+      return true;
+    }
+
+    if (routeName === "GET /api/chat/sticker-sources/search") {
+      sendJson(res, 200, { items: mediaStore.searchSources(url.searchParams.get("q") || "") });
+      return true;
+    }
+
+    if (routeName === "POST /api/chat/reports") {
+      const body = await parseBody(context.req);
+      const report = await store.createReport({ reporterId: user.id, targetType: body.targetType, targetId: body.targetId, reason: body.reason });
+      sendJson(res, 201, { report });
       return true;
     }
 
@@ -197,7 +254,8 @@ async function handleChatRoute(context) {
         groupId: messageGroupId,
         senderId: user.id,
         clientRequestId: body.clientRequestId,
-        text: body.text
+        text: body.text,
+        stickerId: body.stickerId
       });
       sendJson(res, 201, { message });
       return true;

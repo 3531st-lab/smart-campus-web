@@ -1,8 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const sharp = require("sharp");
 
 const { createMemoryChatStore } = require("../server/chat-store");
 const { handleChatRoute } = require("../server/chat-routes");
+const { createMediaStore } = require("../server/media-store");
 
 function fixtures() {
   const users = {
@@ -30,13 +36,14 @@ function fixtures() {
   return { store, users };
 }
 
-async function callRoute(store, route, user, body = {}) {
+async function callRoute(store, route, user, body = {}, extras = {}) {
   const url = new URL(`http://campus.test${route.replace(/^\w+\s+/, "")}`);
   const response = {};
   const handled = await handleChatRoute({
     route,
     url,
     store,
+    ...extras,
     requireUser: async () => {
       if (!user) {
         Object.assign(response, { status: 401, payload: { error: "请先登录" } });
@@ -51,6 +58,11 @@ async function callRoute(store, route, user, body = {}) {
   });
   assert.equal(handled, true);
   return response;
+}
+
+async function pngDataUrl() {
+  const bytes = await sharp({ create: { width: 2, height: 2, channels: 4, background: { r: 24, g: 138, b: 163, alpha: 1 } } }).png().toBuffer();
+  return { bytes, value: `data:image/png;base64,${bytes.toString("base64")}` };
 }
 
 test("chat API requires login and returns only safe group projections", async () => {
@@ -219,4 +231,50 @@ test("platform administrators govern frozen groups without joining them and revi
   assert.equal(audit.status, 200);
   assert.ok(audit.payload.logs.some((log) => log.action === "group_frozen"));
   assert.ok(audit.payload.logs.some((log) => log.action === "appeal_approved_and_group_restored"));
+});
+
+test("图片表情会校验图片内容、授权来源与收藏归属，消息不暴露外站热链", async (context) => {
+  const { store, users } = fixtures();
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "campus-chat-stickers-"));
+  context.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const mediaStore = createMediaStore({ rootDir });
+  const image = await pngDataUrl();
+
+  const spoofed = await callRoute(store, "POST /api/chat/stickers", users.owner, { dataUrl: image.value.replace("image/png", "image/jpeg"), name: "伪装图片" }, { mediaStore });
+  assert.equal(spoofed.status, 400);
+  const unlicensed = await callRoute(store, "POST /api/chat/stickers", users.owner, { dataUrl: image.value, name: "来源不全", source: { type: "network", sourceUrl: "https://example.test/sticker" } }, { mediaStore });
+  assert.equal(unlicensed.status, 400);
+
+  const uploaded = await callRoute(store, "POST /api/chat/stickers", users.owner, { dataUrl: image.value, name: "学习加油" }, { mediaStore });
+  assert.equal(uploaded.status, 201);
+  assert.match(uploaded.payload.sticker.url, /^\/uploads\/chat-stickers\//);
+  assert.equal(/example\.test|sourceUrl|license/i.test(JSON.stringify(uploaded.payload.sticker)), false);
+
+  const inaccessibleFavorite = await callRoute(store, `POST /api/chat/stickers/${uploaded.payload.sticker.id}/favorite`, users.peer, {}, { mediaStore });
+  assert.equal(inaccessibleFavorite.status, 404);
+  const favorite = await callRoute(store, `POST /api/chat/stickers/${uploaded.payload.sticker.id}/favorite`, users.owner, {}, { mediaStore });
+  assert.equal(favorite.status, 200);
+  assert.equal(favorite.payload.sticker.favorite, true);
+  const list = await callRoute(store, "GET /api/chat/stickers", users.owner, {}, { mediaStore });
+  assert.equal(list.status, 200);
+  assert.ok(list.payload.unicode.length >= 12);
+  assert.equal(list.payload.stickers[0].favorite, true);
+
+  const sent = await callRoute(store, "POST /api/chat/groups/class-group-1/messages", users.owner, { clientRequestId: "sticker-message-001", text: "", stickerId: uploaded.payload.sticker.id }, { mediaStore });
+  assert.equal(sent.status, 201);
+  assert.equal(sent.payload.message.sticker.id, uploaded.payload.sticker.id);
+  assert.equal(/example\.test|sourceUrl|license/i.test(JSON.stringify(sent.payload.message)), false);
+  const history = await callRoute(store, "GET /api/chat/groups/class-group-1/messages?after=0", users.peer, {}, { mediaStore });
+  assert.equal(history.status, 200);
+  assert.equal(history.payload.messages[0].sticker.url, uploaded.payload.sticker.url);
+
+  const report = await callRoute(store, "POST /api/chat/reports", users.peer, { targetType: "sticker", targetId: uploaded.payload.sticker.id, reason: "用于测试审核流程" }, { mediaStore });
+  assert.equal(report.status, 201);
+  const sources = await callRoute(store, "GET /api/chat/sticker-sources/search?q=学习", users.owner, {}, { mediaStore });
+  assert.equal(sources.status, 200);
+  assert.deepEqual(sources.payload.items, []);
+
+  const digest = crypto.createHash("sha256").update(image.bytes).digest("hex");
+  const blockedStore = createMediaStore({ rootDir, blockedDigests: new Set([digest]) });
+  await assert.rejects(() => blockedStore.saveImage({ ownerId: users.owner.id, bytes: image.bytes, mimeType: "image/png", source: { type: "upload" } }), /安全策略/);
 });

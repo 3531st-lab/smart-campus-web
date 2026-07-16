@@ -7,7 +7,7 @@
     "dev": "node server/index.js",
     "start": "node server/index.js",
     "test": "node tests/run-all.js",
-    "check": "node --check public/timetable-core-v155.js && node --check public/app.js && node --check server/index.js && node --check server/db.js && node --check server/student-store.js && node --check server/chat-store.js && node --check server/chat-routes.js && node --check server/permanent-admins.js && node --check server/timetable-store.js && node --check server/reservation-store.js && node --check server/notification-store.js && node --check server/payment-store.js && node --check server/integrations.js && node --check server/campus-news.js && node --check api/index.js && node --check api/[...path].js && node --check functions/api/[[path]].js && npm test",
+    "check": "node --check public/timetable-core-v155.js && node --check public/app.js && node --check server/index.js && node --check server/db.js && node --check server/student-store.js && node --check server/media-store.js && node --check server/chat-store.js && node --check server/chat-routes.js && node --check server/permanent-admins.js && node --check server/timetable-store.js && node --check server/reservation-store.js && node --check server/notification-store.js && node --check server/payment-store.js && node --check server/integrations.js && node --check server/campus-news.js && node --check api/index.js && node --check api/[...path].js && node --check functions/api/[[path]].js && npm test",
     "db:init": "node scripts/init-cloud-database.js",
     "db:migrate:cloud": "node scripts/migrate-local-database.js",
     "music:generate": "node scripts/generate-youth-music.js"
@@ -16,8 +16,10 @@
     "node": "22.x"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1088.0",
     "mysql2": "^3.22.5",
     "qrcode": "1.5.4",
+    "sharp": "^0.35.3",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }

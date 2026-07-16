@@ -38,7 +38,7 @@
         ${mine ? "" : `<span class="chat-message-avatar" style="--avatar-color:${safe(message.sender?.avatarColor || "#3f6dff", escapeHtml)}">${avatar(message.sender?.name, escapeHtml)}</span>`}
         <div class="chat-message-bubble-wrap">
           ${mine ? "" : `<div class="chat-message-sender">${safe(message.sender?.name || "同学", escapeHtml)}${message.sender?.classDuty && message.sender.classDuty !== "member" ? `<small>${safe(message.sender.classDuty, escapeHtml)}</small>` : ""}</div>`}
-          <div class="chat-message-bubble">${safe(message.text, escapeHtml).replace(/\n/g, "<br />")}</div>
+          <div class="chat-message-bubble">${message.sticker?.kind === "image" && message.sticker.url ? `<img class="chat-message-sticker" src="${safe(message.sticker.url, escapeHtml)}" alt="${safe(message.sticker.name || "图片表情", escapeHtml)}" loading="lazy" />` : (message.sticker?.kind === "image" ? '<span class="chat-sticker-pending">图片表情发送中</span>' : "")}${safe(message.text, escapeHtml).replace(/\n/g, "<br />")}</div>
           <div class="chat-message-meta"><time>${timeLabel(message.createdAt)}</time>${state}</div>
         </div>
       </article>`;
@@ -62,7 +62,9 @@
               <div class="chat-message-scroll" id="chatMessages" aria-live="polite"><div class="chat-empty-stage"><span>${iconSvg("news")}</span><h2>欢迎来到校园群聊</h2><p>班级群会自动出现，选择左侧群聊即可开始交流。</p></div></div>
               <form class="chat-composer" id="chatComposer">
                 <textarea id="chatMessageInput" rows="2" maxlength="4000" placeholder="选择群聊后即可发送消息" disabled></textarea>
-                <div class="chat-composer-foot"><span id="chatComposerHint">支持 Enter 发送，Shift + Enter 换行</span><button data-chat-send type="submit" disabled>发送</button></div>
+                <div class="chat-sticker-panel" id="chatStickerPanel" hidden></div>
+                <input id="chatStickerUpload" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+                <div class="chat-composer-foot"><div class="chat-composer-tools"><button type="button" data-chat-sticker-toggle title="表情">☺</button><button type="button" data-chat-sticker-upload title="上传图片表情">＋</button><span id="chatComposerHint">支持 Enter 发送，Shift + Enter 换行</span></div><button data-chat-send type="submit" disabled>发送</button></div>
               </form>
             </main>
             <aside class="chat-detail-panel dash-card" id="chatDetails">
@@ -82,12 +84,16 @@
           const composer = document.querySelector("#chatComposer");
           const input = document.querySelector("#chatMessageInput");
           const sendButton = composer.querySelector("[data-chat-send]");
+          const stickerPanel = document.querySelector("#chatStickerPanel");
+          const stickerUpload = document.querySelector("#chatStickerUpload");
           const createButton = page.querySelector("[data-chat-create]");
           const joinButton = page.querySelector("[data-chat-join]");
           const modalRoot = document.querySelector("#chatModalRoot");
           let groups = [];
           let activeGroup = null;
           let keepBottom = true;
+          let selectedSticker = null;
+          let stickerData = null;
 
           const client = global.createChatClient({
             api,
@@ -291,6 +297,28 @@
             keepBottom = false;
           }
 
+          async function loadStickers() {
+            if (stickerData) return stickerData;
+            stickerData = await api("/api/chat/stickers");
+            return stickerData;
+          }
+
+          function renderStickers() {
+            const unicode = (stickerData?.unicode || []).map((item) => `<button type="button" class="chat-sticker-button unicode" data-chat-unicode="${safe(item.emoji, escapeHtml)}" title="${safe(item.name, escapeHtml)}">${safe(item.emoji, escapeHtml)}</button>`).join("");
+            const images = (stickerData?.stickers || []).map((item) => `<button type="button" class="chat-sticker-button image ${String(selectedSticker?.id) === String(item.id) ? "selected" : ""}" data-chat-sticker-id="${safe(item.id, escapeHtml)}" title="${safe(item.name, escapeHtml)}"><img src="${safe(item.url, escapeHtml)}" alt="${safe(item.name, escapeHtml)}" loading="lazy" /></button>`).join("");
+            stickerPanel.innerHTML = `<div class="chat-sticker-panel-head"><strong>基础表情</strong><button type="button" data-chat-sticker-close>关闭</button></div><div class="chat-sticker-grid">${unicode || '<span>暂无基础表情</span>'}</div><div class="chat-sticker-panel-head"><strong>我的图片表情</strong><button type="button" data-chat-sticker-upload>上传</button></div><div class="chat-sticker-grid images">${images || '<span class="chat-sticker-empty">上传的图片表情仅你自己可见</span>'}</div>`;
+          }
+
+          async function toggleStickerPanel() {
+            if (stickerPanel.hidden) {
+              try {
+                await loadStickers();
+                renderStickers();
+                stickerPanel.hidden = false;
+              } catch (error) { toast(error.message || "表情加载失败"); }
+            } else stickerPanel.hidden = true;
+          }
+
           async function selectGroup(groupId) {
             const selected = groups.find((group) => String(group.id) === String(groupId));
             if (!selected) return;
@@ -385,13 +413,49 @@
               composer.requestSubmit();
             }
           });
+          composer.addEventListener("click", async (event) => {
+            const toggle = event.target.closest("[data-chat-sticker-toggle]");
+            if (toggle) { event.preventDefault(); await toggleStickerPanel(); return; }
+            const upload = event.target.closest("[data-chat-sticker-upload]");
+            if (upload) { event.preventDefault(); stickerUpload.click(); return; }
+            if (event.target.closest("[data-chat-sticker-close]")) { stickerPanel.hidden = true; return; }
+            const unicode = event.target.closest("[data-chat-unicode]");
+            if (unicode) { input.value += unicode.dataset.chatUnicode || ""; input.focus(); return; }
+            const image = event.target.closest("[data-chat-sticker-id]");
+            if (image) {
+              selectedSticker = (stickerData?.stickers || []).find((item) => String(item.id) === String(image.dataset.chatStickerId)) || null;
+              renderStickers();
+              input.focus();
+            }
+          });
+          stickerUpload.addEventListener("change", async () => {
+            const file = stickerUpload.files?.[0];
+            stickerUpload.value = "";
+            if (!file) return;
+            if (file.size > 4 * 1024 * 1024) { toast("图片不能超过 4MB"); return; }
+            const reader = new FileReader();
+            reader.onload = async () => {
+              try {
+                const result = await api("/api/chat/stickers", { method: "POST", body: JSON.stringify({ dataUrl: reader.result, name: file.name.replace(/\.[^.]+$/, "") || "我的表情" }) });
+                stickerData = null;
+                await loadStickers();
+                selectedSticker = result.sticker;
+                renderStickers();
+                toast("图片表情已保存，仅你自己可见");
+              } catch (error) { toast(error.message || "图片表情上传失败"); }
+            };
+            reader.readAsDataURL(file);
+          });
           composer.addEventListener("submit", (event) => {
             event.preventDefault();
             const text = input.value.trim();
-            if (!text || !activeGroup) return;
+            if ((!text && !selectedSticker) || !activeGroup) return;
             input.value = "";
             keepBottom = true;
-            client.send(text).catch((error) => toast(error.message || "消息发送失败，可点击重新发送"));
+            const sticker = selectedSticker;
+            selectedSticker = null;
+            stickerPanel.hidden = true;
+            client.send(text, null, sticker?.id || "").catch((error) => toast(error.message || "消息发送失败，可点击重新发送"));
           });
 
           (async () => {

@@ -409,7 +409,7 @@ test("canonical schema defines class groups assignment operators and durable syn
   const studentSource = fs.readFileSync(path.join(__dirname, "..", "server", "student-store.js"), "utf8");
 
   for (const source of [schema, studentSource]) {
-    assert.match(source, /CREATE TABLE IF NOT EXISTS chat_groups[\s\S]*id VARCHAR\(64\) PRIMARY KEY[\s\S]*type VARCHAR\(32\) NOT NULL[\s\S]*name VARCHAR\(120\) NOT NULL[\s\S]*class_id VARCHAR\(64\) NULL[\s\S]*status ENUM\('active','disabled'\) NOT NULL DEFAULT 'active'[\s\S]*UNIQUE KEY uq_chat_group_class \(class_id\)/);
+    assert.match(source, /CREATE TABLE IF NOT EXISTS chat_groups[\s\S]*id VARCHAR\(64\) PRIMARY KEY[\s\S]*type VARCHAR\(32\) NOT NULL[\s\S]*name VARCHAR\(120\) NOT NULL[\s\S]*class_id VARCHAR\(64\) NULL[\s\S]*status ENUM\('active','frozen','closed','disabled'\) NOT NULL DEFAULT 'active'[\s\S]*UNIQUE KEY uq_chat_group_class \(class_id\)/);
     assert.match(source, /CREATE TABLE IF NOT EXISTS class_assignments[\s\S]*assigned_by VARCHAR\(64\) NULL/);
     assert.match(source, /CREATE TABLE IF NOT EXISTS class_sync_errors[\s\S]*user_id VARCHAR\(64\) NOT NULL[\s\S]*student_no VARCHAR\(64\) NOT NULL DEFAULT ''[\s\S]*public_message VARCHAR\(160\) NOT NULL[\s\S]*diagnostic JSON NULL[\s\S]*recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP/);
   }

@@ -110,15 +110,17 @@
       }
     }
 
-    async function send(text, retryOf = null) {
+    async function send(text, retryOf = null, stickerId = "") {
       const content = String(text || "").trim();
-      if (!activeGroupId || !content) return null;
+      const resolvedStickerId = retryOf?.sticker?.id || String(stickerId || "").trim();
+      if (!activeGroupId || (!content && !resolvedStickerId)) return null;
       const clientRequestId = retryOf?.clientRequestId || requestId();
       const optimistic = retryOf || {
         id: `optimistic:${clientRequestId}`,
         groupId: activeGroupId,
         clientRequestId,
         text: content,
+        sticker: resolvedStickerId ? { id: resolvedStickerId, kind: "image", name: "图片表情", url: "" } : null,
         createdAt: new Date().toISOString(),
         sequence: lastSequence + 0.1,
         optimistic: true,
@@ -131,7 +133,7 @@
       try {
         const result = await api(`/api/chat/groups/${encodeURIComponent(activeGroupId)}/messages`, {
           method: "POST",
-          body: JSON.stringify({ clientRequestId, text: content })
+          body: JSON.stringify({ clientRequestId, text: content, stickerId: resolvedStickerId || undefined })
         });
         mergeMessages([result.message]);
         emit("messages");
@@ -147,7 +149,7 @@
     }
 
     function retry(message) {
-      return send(message?.text, message);
+      return send(message?.text, message, message?.sticker?.id || "");
     }
 
     function destroy() {
