@@ -89,6 +89,9 @@ function safeGroup(row) {
     id: String(row.id),
     type: row.type,
     classId: row.class_id ?? row.classId ?? null,
+    school: row.class_school ?? row.school ?? null,
+    college: row.class_college ?? row.college ?? null,
+    className: row.class_name ?? row.className ?? null,
     publicNo: row.public_no ?? row.publicNo ?? null,
     name: row.name,
     ownerId: row.owner_id ?? row.ownerId ?? null,
@@ -418,7 +421,17 @@ function createMemoryChatStore(seed = {}, options = {}) {
         (item.type === "class" && classIds.has(String(item.classId ?? item.class_id)))
         || (item.type !== "class" && memberGroupIds.has(String(item.id)))
       ))
-      .map(safeGroup)
+      .map((group) => {
+        const campusClass = group.type === "class"
+          ? store.data.classes.find((item) => String(item.id) === String(group.classId ?? group.class_id))
+          : null;
+        return safeGroup({
+          ...group,
+          class_school: campusClass?.school,
+          class_college: campusClass?.college,
+          class_name: campusClass?.className ?? campusClass?.class_name
+        });
+      })
       .sort((left, right) => Number(right.type === "class") - Number(left.type === "class") || left.name.localeCompare(right.name, "zh-CN"));
   }
 
@@ -1073,8 +1086,9 @@ function createMysqlChatStore(pool, options = {}) {
   const listUserGroups = mysqlPublic(async (userId) => {
     const account = await activeUser(userId);
     const [rows] = await execute(`
-      SELECT DISTINCT cg.*
+      SELECT DISTINCT cg.*, cc.school AS class_school, cc.college AS class_college, cc.class_name AS class_name
       FROM chat_groups cg
+      LEFT JOIN campus_classes cc ON cc.id = cg.class_id AND cc.status = 'active'
       LEFT JOIN chat_members cm ON cm.group_id = cg.id AND cm.user_id = ? AND cm.active = 1
       LEFT JOIN class_assignments ca ON ca.class_id = cg.class_id AND ca.user_id = ? AND ca.active = 1
       WHERE cg.status <> 'disabled'

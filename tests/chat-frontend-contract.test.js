@@ -36,6 +36,8 @@ test("chat page keeps group list, messages, and details as independent regions",
   assert.match(page, /client\.selectGroup/);
   assert.match(page, /data-chat-appeal/);
   assert.match(page, /chat-admin-page/);
+  assert.match(page, /data-chat-college-toggle/);
+  assert.match(page, /collapsedColleges/);
 });
 
 test("chat client supports resilient optimistic delivery and visibility-aware polling", () => {
@@ -55,6 +57,14 @@ test("mobile chat keeps a single active pane instead of forcing a horizontal lay
   const css = read("public/assets/chat.css");
   assert.match(css, /@media\s*\(max-width:\s*760px\)/);
   assert.match(css, /data-mobile-pane/);
+});
+
+test("desktop chat keeps a viewport-sized workspace with an independently scrolling college directory", () => {
+  const css = read("public/assets/chat.css");
+  assert.match(css, /height:\s*clamp\([^;]+100dvh/);
+  assert.match(css, /\.chat-group-scroll\s*\{[^}]*flex:\s*1 1 0/s);
+  assert.match(css, /\.chat-group-scroll,\s*\.chat-message-scroll\s*\{[^}]*overflow:\s*auto/s);
+  assert.match(css, /\.chat-college-group\.collapsed \.chat-group-items\s*\{\s*display:\s*none/);
 });
 
 test("chat view caps render work and keeps dialog focusable", () => {

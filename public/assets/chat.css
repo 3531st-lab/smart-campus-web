@@ -1,5 +1,6 @@
 .chat-page {
-  min-height: min(720px, calc(100vh - 112px));
+  height: clamp(520px, calc(100dvh - 108px), 760px);
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(210px, 0.78fr) minmax(360px, 1.6fr) minmax(210px, 0.78fr);
   gap: 12px;
@@ -105,9 +106,18 @@
 .chat-group-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); }
 .chat-group-scroll,
 .chat-message-scroll { min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: rgba(75, 187, 205, 0.58) transparent; }
-.chat-group-scroll { padding: 0 8px 12px; }
+.chat-group-scroll { flex: 1 1 0; padding: 0 8px 12px; overscroll-behavior: contain; }
 .chat-group-section { margin-top: 8px; }
 .chat-group-section-title { display: flex; justify-content: space-between; padding: 8px 8px 5px; color: var(--muted); font-size: 12px; font-weight: 800; }
+.chat-college-group { margin: 3px 0; }
+.chat-college-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 34px; padding: 6px 8px; border: 0; border-radius: 7px; background: rgba(53, 102, 183, 0.12); color: var(--text); text-align: left; }
+.chat-college-toggle:hover { background: rgba(48, 139, 194, 0.22); }
+.chat-college-toggle > span { display: flex; align-items: center; min-width: 0; gap: 6px; overflow: hidden; font-size: 12px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.chat-college-toggle i { display: inline-block; color: var(--cyan); font-style: normal; font-size: 17px; line-height: 1; transform: rotate(90deg); transition: transform 160ms ease; }
+.chat-college-toggle small { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+.chat-college-group.collapsed .chat-college-toggle i { transform: rotate(0deg); }
+.chat-college-group.collapsed .chat-group-items { display: none; }
+.chat-college-group .chat-group-items { margin-top: 3px; }
 .chat-group-items { display: grid; gap: 3px; }
 .chat-group-item { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 9px; align-items: center; width: 100%; min-height: 58px; padding: 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); text-align: left; }
 .chat-group-item:hover,
@@ -192,6 +202,8 @@ html[data-theme="day"] .chat-sticker-panel { background: rgba(255, 255, 255, 0.8
 html[data-theme="day"] .chat-message.mine .chat-message-bubble { color: #fff; }
 html[data-theme="day"] .chat-group-item:hover,
 html[data-theme="day"] .chat-group-item.active { background: linear-gradient(135deg, rgba(99, 196, 199, 0.24), rgba(87, 137, 255, 0.16)); }
+html[data-theme="day"] .chat-college-toggle { background: rgba(226, 245, 246, 0.8); }
+html[data-theme="day"] .chat-college-toggle:hover { background: rgba(196, 233, 236, 0.92); }
 
 .chat-modal-root { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 20px; }
 .chat-modal-root[hidden] { display: none; }
@@ -279,7 +291,7 @@ html[data-theme="day"] .chat-admin-card,
 html[data-theme="day"] .chat-admin-row { background: rgba(255, 255, 255, 0.74); }
 
 @media (max-width: 760px) {
-  .chat-page { min-height: calc(100vh - 94px); display: block; }
+  .chat-page { height: calc(100dvh - 94px); min-height: 0; display: block; }
   .chat-group-list,
   .chat-message-stage,
   .chat-detail-panel { height: calc(100vh - 94px); }

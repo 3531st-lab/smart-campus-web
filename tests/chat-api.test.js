@@ -20,7 +20,10 @@ function fixtures() {
   };
   const store = createMemoryChatStore({
     users: Object.values(users),
-    classes: [{ id: "class-1" }, { id: "class-2" }],
+    classes: [
+      { id: "class-1", school: "泰州学院", college: "经济与管理学院", className: "24数字经济", status: "active" },
+      { id: "class-2", school: "泰州学院", college: "计算机科学与技术学院", className: "24计算机", status: "active" }
+    ],
     assignments: [
       { classId: "class-1", userId: users.owner.id, duty: "monitor", active: true },
       { classId: "class-1", userId: users.peer.id, duty: "member", active: true },
@@ -74,6 +77,7 @@ test("chat API requires login and returns only safe group projections", async ()
   assert.equal(listed.status, 200);
   assert.ok(listed.payload.groups.some((group) => group.id === "class-group-1"));
   assert.ok(listed.payload.groups.some((group) => group.id === "frozen-group"));
+  assert.equal(listed.payload.groups.find((group) => group.id === "class-group-1").college, "经济与管理学院");
   assert.equal(/phone|password|studentNo/i.test(JSON.stringify(listed.payload)), false);
 });
 

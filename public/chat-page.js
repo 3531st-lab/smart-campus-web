@@ -16,23 +16,42 @@
     return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   }
 
-  function groupMarkup(groups, activeGroupId, escapeHtml) {
+  function groupMarkup(groups, activeGroupId, escapeHtml, collapsedColleges = new Set()) {
     const classes = groups.filter((group) => group.type === "class");
     const ordinary = groups.filter((group) => group.type !== "class");
-    const section = (title, items, kind) => `
-      <section class="chat-group-section">
-        <div class="chat-group-section-title"><span>${title}</span><small>${items.length}</small></div>
-        <div class="chat-group-items">
-          ${items.map((group) => `
-            <button type="button" class="chat-group-item ${String(group.id) === String(activeGroupId) ? "active" : ""}" data-chat-group-id="${safe(group.id, escapeHtml)}">
-              <span class="chat-group-avatar ${kind}">${avatar(group.name, escapeHtml)}</span>
-              <span class="chat-group-copy"><strong>${safe(group.name, escapeHtml)}</strong><small>${group.frozen ? "群聊已冻结，暂不能发言" : safe(group.description || (group.type === "class" ? "同班同学的专属交流空间" : "校园兴趣群"), escapeHtml)}</small></span>
-              ${group.frozen ? '<span class="chat-group-state">冻结</span>' : ""}
+    const itemsMarkup = (items, kind) => items.map((group) => `
+      <button type="button" class="chat-group-item ${String(group.id) === String(activeGroupId) ? "active" : ""}" data-chat-group-id="${safe(group.id, escapeHtml)}">
+        <span class="chat-group-avatar ${kind}">${avatar(group.name, escapeHtml)}</span>
+        <span class="chat-group-copy"><strong>${safe(group.name, escapeHtml)}</strong><small>${group.frozen ? "群聊已冻结，暂不能发言" : safe(group.description || (group.type === "class" ? "同班同学的专属交流空间" : "校园兴趣群"), escapeHtml)}</small></span>
+        ${group.frozen ? '<span class="chat-group-state">冻结</span>' : ""}
+      </button>
+    `).join("");
+    const groupedClasses = new Map();
+    classes.forEach((group) => {
+      const college = String(group.college || "其他学院").trim() || "其他学院";
+      groupedClasses.set(college, [...(groupedClasses.get(college) || []), group]);
+    });
+    const classSections = [...groupedClasses.entries()]
+      .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
+      .map(([college, items]) => {
+        const collapsed = collapsedColleges.has(college);
+        return `
+          <section class="chat-college-group ${collapsed ? "collapsed" : ""}">
+            <button type="button" class="chat-college-toggle" data-chat-college-toggle="${safe(college, escapeHtml)}" aria-expanded="${collapsed ? "false" : "true"}">
+              <span><i aria-hidden="true">›</i>${safe(college, escapeHtml)}</span><small>${items.length}</small>
             </button>
-          `).join("") || '<p class="chat-empty-groups">暂无群聊</p>'}
-        </div>
+            <div class="chat-group-items">${itemsMarkup(items, "class")}</div>
+          </section>`;
+      }).join("");
+    return `
+      <section class="chat-group-section chat-class-directory">
+        <div class="chat-group-section-title"><span>班级群</span><small>${classes.length}</small></div>
+        ${classSections || '<p class="chat-empty-groups">暂无群聊</p>'}
+      </section>
+      <section class="chat-group-section">
+        <div class="chat-group-section-title"><span>我的群聊</span><small>${ordinary.length}</small></div>
+        <div class="chat-group-items">${itemsMarkup(ordinary, "ordinary") || '<p class="chat-empty-groups">暂无群聊</p>'}</div>
       </section>`;
-    return `${section("班级群", classes, "class")}${section("我的群聊", ordinary, "ordinary")}`;
   }
 
   function messageMarkup(message, currentUserId, escapeHtml) {
@@ -96,6 +115,7 @@
           const modalRoot = document.querySelector("#chatModalRoot");
           let groups = [];
           let activeGroup = null;
+          const collapsedColleges = new Set();
           let keepBottom = true;
           let selectedSticker = null;
           let stickerData = null;
@@ -276,7 +296,7 @@
           function renderGroups() {
             const query = search.value.trim().toLocaleLowerCase();
             const visible = !query ? groups : groups.filter((group) => `${group.name} ${group.description || ""}`.toLocaleLowerCase().includes(query));
-            list.innerHTML = groupMarkup(visible, activeGroup?.id, escapeHtml);
+            list.innerHTML = groupMarkup(visible, activeGroup?.id, escapeHtml, collapsedColleges);
           }
 
           function renderDetails() {
@@ -377,6 +397,14 @@
           }
 
           list.addEventListener("click", (event) => {
+            const collegeToggle = event.target.closest("[data-chat-college-toggle]");
+            if (collegeToggle) {
+              const college = collegeToggle.dataset.chatCollegeToggle;
+              if (collapsedColleges.has(college)) collapsedColleges.delete(college);
+              else collapsedColleges.add(college);
+              renderGroups();
+              return;
+            }
             const button = event.target.closest("[data-chat-group-id]");
             if (button) selectGroup(button.dataset.chatGroupId);
           });

@@ -207,6 +207,7 @@ test("mandatory class membership derives from active assignments without platfor
 
   const groups = await store.listUserGroups(users["student-a"].id);
   assert.deepEqual(groups.map((group) => group.id), ["class-group-a"]);
+  assert.equal(groups[0].college, "经管学院");
 
   const members = await store.listMembers("class-group-a", users["student-a"]);
   assert.deepEqual(members.map((member) => member.userId), ["student-a", "teacher-a"]);
