@@ -1803,9 +1803,11 @@ function createMysqlChatStore(pool, options = {}) {
   const listAuditLogs = mysqlPublic(async (actor, { groupId = "", limit = 100 } = {}) => {
     await requiredMysqlPlatformAdmin(actor);
     const pageSize = normalizeLimit(limit, 100);
+    // TiDB rejects LIMIT placeholders through the prepared-statement protocol.
+    // pageSize is already constrained to an integer in the range 1-100.
     const [rows] = groupId
-      ? await execute("SELECT * FROM chat_audit_logs WHERE target_id = ? OR JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.groupId')) = ? ORDER BY created_at DESC, id DESC LIMIT ?", [String(groupId), String(groupId), pageSize])
-      : await execute("SELECT * FROM chat_audit_logs ORDER BY created_at DESC, id DESC LIMIT ?", [pageSize]);
+      ? await execute(`SELECT * FROM chat_audit_logs WHERE target_id = ? OR JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.groupId')) = ? ORDER BY created_at DESC, id DESC LIMIT ${pageSize}`, [String(groupId), String(groupId)])
+      : await execute(`SELECT * FROM chat_audit_logs ORDER BY created_at DESC, id DESC LIMIT ${pageSize}`);
     return rows.map(safeAuditLog);
   });
 

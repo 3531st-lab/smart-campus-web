@@ -737,3 +737,32 @@ test("MySQL store repairs a missing chat schema once and retries the request", a
   assert.equal(recoveryCount, 1);
   assert.equal(groupQueryCount, 2);
 });
+
+test("MySQL governance audit uses a TiDB-compatible literal LIMIT", async () => {
+  const calls = [];
+  const pool = {
+    async execute(sql, params = []) {
+      calls.push({ sql, params });
+      if (/FROM students WHERE id/.test(sql)) {
+        return [[{
+          id: "platform-admin",
+          name: "平台管理员",
+          role: "admin",
+          status: "active",
+          school: "泰州学院",
+          college: "经管学院",
+          class_name: "24数字经济"
+        }]];
+      }
+      if (/FROM chat_audit_logs/.test(sql)) return [[]];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  const store = createMysqlChatStore(pool);
+
+  assert.deepEqual(await store.listAuditLogs({ id: "platform-admin" }, { limit: 100 }), []);
+  const auditQuery = calls.find((call) => /FROM chat_audit_logs/.test(call.sql));
+  assert.match(auditQuery.sql, /LIMIT 100$/);
+  assert.doesNotMatch(auditQuery.sql, /LIMIT \?/);
+  assert.deepEqual(auditQuery.params, []);
+});

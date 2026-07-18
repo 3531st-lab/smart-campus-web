@@ -585,15 +585,26 @@
             logsNode.innerHTML = logs.map((log) => `<div><strong>${safe(log.action, escapeHtml)}</strong><span>${safe(log.targetType, escapeHtml)} · ${safe(log.targetId, escapeHtml)} · ${safe(log.createdAt || "", escapeHtml)}</span></div>`).join("") || '<p class="chat-admin-empty">暂无治理记录。</p>';
           };
           const load = async () => {
-            try {
-              const [payload, audit] = await Promise.all([api("/api/admin/chat/groups"), api("/api/admin/chat/audit-logs?limit=100")]);
+            const [governanceResult, auditResult] = await Promise.allSettled([
+              api("/api/admin/chat/groups"),
+              api("/api/admin/chat/audit-logs?limit=100")
+            ]);
+            if (governanceResult.status === "fulfilled") {
+              const payload = governanceResult.value;
               renderGroups(Array.isArray(payload.groups) ? payload.groups : []);
               renderAppeals(Array.isArray(payload.appeals) ? payload.appeals : []);
-              renderLogs(Array.isArray(audit.logs) ? audit.logs : []);
-            } catch (error) {
-              const message = safe(error.message || "群聊治理数据加载失败", escapeHtml);
+            } else {
+              const message = safe(governanceResult.reason?.message || "群聊治理数据加载失败", escapeHtml);
               groupsNode.innerHTML = `<p class="chat-admin-empty">${message}</p>`;
               appealsNode.innerHTML = `<p class="chat-admin-empty">${message}</p>`;
+              groupCount.textContent = "加载失败";
+              appealCount.textContent = "加载失败";
+            }
+            if (auditResult.status === "fulfilled") {
+              renderLogs(Array.isArray(auditResult.value.logs) ? auditResult.value.logs : []);
+            } else {
+              const message = safe(auditResult.reason?.message || "治理审计加载失败", escapeHtml);
+              logsNode.innerHTML = `<p class="chat-admin-empty">${message}</p>`;
             }
           };
           page.addEventListener("click", async (event) => {

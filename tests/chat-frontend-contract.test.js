@@ -75,6 +75,16 @@ test("chat view caps render work and keeps dialog focusable", () => {
   assert.match(css, /chat-message-window-notice/);
 });
 
+test("chat governance isolates audit failures and keeps long management lists scrollable", () => {
+  const page = read("public/chat-page.js");
+  const css = read("public/assets/chat.css");
+  assert.match(page, /Promise\.allSettled/);
+  assert.match(page, /governanceResult\.status === "fulfilled"/);
+  assert.match(page, /auditResult\.status === "fulfilled"/);
+  assert.match(css, /\.chat-admin-list\s*\{[^}]*max-height:\s*460px[^}]*overflow:\s*auto/s);
+  assert.match(css, /\.chat-admin-log\s*\{[^}]*max-height:\s*360px[^}]*overflow:\s*auto/s);
+});
+
 test("chat sticker panel can be explicitly hidden and dismissed through common controls", () => {
   const html = read("public/index.html");
   const page = read("public/chat-page.js");

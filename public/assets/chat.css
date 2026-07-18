@@ -265,7 +265,7 @@ html[data-theme="day"] .chat-college-toggle:hover { background: rgba(196, 233, 2
 .chat-admin-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 11px; border-bottom: 1px solid var(--line); }
 .chat-admin-card h2 { margin: 0; color: var(--text); font-size: 16px; }
 .chat-admin-card > header span { color: var(--muted); font-size: 12px; }
-.chat-admin-list { display: grid; gap: 8px; margin-top: 12px; }
+.chat-admin-list { display: grid; align-content: start; gap: 8px; max-height: 460px; margin-top: 12px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(75, 187, 205, 0.58) transparent; }
 .chat-admin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: rgba(41, 99, 182, 0.12); }
 .chat-admin-row > div:first-child { display: grid; min-width: 0; gap: 3px; }
 .chat-admin-row strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
@@ -274,7 +274,7 @@ html[data-theme="day"] .chat-college-toggle:hover { background: rgba(196, 233, 2
 .chat-admin-actions button { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: rgba(55, 106, 185, 0.22); color: var(--text); font-weight: 700; }
 .chat-admin-actions .danger { border-color: rgba(242, 129, 129, 0.48); color: #ffb0b0; }
 .chat-admin-closed { color: var(--muted); font-size: 12px; }
-.chat-admin-log { display: grid; gap: 0; margin-top: 8px; }
+.chat-admin-log { display: grid; align-content: start; gap: 0; max-height: 360px; margin-top: 8px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(75, 187, 205, 0.58) transparent; }
 .chat-admin-log > div { display: grid; gap: 3px; padding: 10px 2px; border-bottom: 1px solid var(--line); }
 .chat-admin-log strong { color: var(--text); font-size: 13px; }
 .chat-admin-log span { color: var(--muted); font-size: 12px; }
