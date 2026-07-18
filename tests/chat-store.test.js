@@ -697,3 +697,42 @@ test("MySQL store sanitizes connection and SQL failures", async () => {
     console.error = originalError;
   }
 });
+
+test("MySQL store repairs a missing chat schema once and retries the request", async () => {
+  let groupQueryCount = 0;
+  let recoveryCount = 0;
+  const pool = {
+    async execute(sql) {
+      if (/FROM students WHERE id/.test(sql)) {
+        return [[{
+          id: "student-a",
+          name: "Student A",
+          role: "student",
+          status: "active",
+          school: "Test University",
+          college: "Test College",
+          class_name: "Class 1"
+        }]];
+      }
+      if (/FROM chat_groups cg/.test(sql)) {
+        groupQueryCount += 1;
+        if (groupQueryCount === 1) {
+          const error = new Error("Table 'smart_campus.chat_groups' doesn't exist");
+          error.code = "ER_NO_SUCH_TABLE";
+          throw error;
+        }
+        return [[]];
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  const store = createMysqlChatStore(pool, {
+    recoverMissingSchema: async () => {
+      recoveryCount += 1;
+    }
+  });
+
+  assert.deepEqual(await store.listUserGroups("student-a"), []);
+  assert.equal(recoveryCount, 1);
+  assert.equal(groupQueryCount, 2);
+});

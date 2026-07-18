@@ -28,9 +28,9 @@ function normalizeStudent(row) {
   });
 }
 
-async function initialize() {
-  if (!mysqlConfigured || initialized) return;
-  if (!autoMigrateSchema) {
+async function initialize({ forceSchema = false } = {}) {
+  if (!mysqlConfigured || (initialized && !forceSchema)) return;
+  if (!autoMigrateSchema && !forceSchema) {
     initialized = true;
     await seedPrivateStudent();
     await enforcePermanentSuperAdmins();
@@ -697,9 +697,9 @@ async function recordClassSyncError(student, error) {
   const syncError = {
     code: "class_sync_failed",
     retryable: true,
-    userId: student.id,
+    userId: student.id || "",
     message: "班级同步失败，可稍后重试",
-    detail: error.message,
+    detail: error?.message || "unknown class synchronization error",
     recordedAt: new Date().toISOString()
   };
   const recording = {
@@ -734,7 +734,7 @@ async function recordClassSyncError(student, error) {
   try {
     if (mysqlConfigured) await getPool().execute(
       "INSERT INTO admin_audit_logs (action, target_student_no, detail) VALUES (?, ?, ?)",
-      ["class_sync_failed", student.studentNo, JSON.stringify(syncError)]
+      ["class_sync_failed", student.studentNo || "", JSON.stringify(syncError)]
     );
     if (mysqlConfigured) recording.auditRecorded = true;
   } catch (auditError) {

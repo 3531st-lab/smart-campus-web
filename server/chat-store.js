@@ -947,12 +947,41 @@ function createMemoryChatStore(seed = {}, options = {}) {
   };
 }
 
-function mysqlPublic(operation) {
+const RECOVERABLE_CHAT_SCHEMA_CODES = new Set(["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"]);
+let chatSchemaRecoveryPromise = null;
+
+function isRecoverableChatSchemaError(error) {
+  if (!RECOVERABLE_CHAT_SCHEMA_CODES.has(String(error?.code || ""))) return false;
+  return /\b(chat_[a-z0-9_]*|campus_classes|class_assignments|class_sync_errors)\b/i
+    .test(String(error?.message || ""));
+}
+
+async function recoverMissingChatSchema() {
+  if (!chatSchemaRecoveryPromise) {
+    chatSchemaRecoveryPromise = Promise.resolve()
+      .then(() => require("./student-store").initialize({ forceSchema: true }))
+      .finally(() => {
+        chatSchemaRecoveryPromise = null;
+      });
+  }
+  return chatSchemaRecoveryPromise;
+}
+
+function wrapMysqlPublic(operation, recoverMissingSchema) {
   return async (...args) => {
     try {
       return await operation(...args);
     } catch (error) {
       if (error instanceof PublicChatError) throw error;
+      if (isRecoverableChatSchemaError(error) && typeof recoverMissingSchema === "function") {
+        try {
+          await recoverMissingSchema(error);
+          return await operation(...args);
+        } catch (retryError) {
+          if (retryError instanceof PublicChatError) throw retryError;
+          error = retryError;
+        }
+      }
       console.error("chat storage operation failed", { error: error?.message });
       throw new Error("群聊服务暂不可用");
     }
@@ -963,6 +992,8 @@ function createMysqlChatStore(pool, options = {}) {
   if (!pool) throw new Error("MySQL pool is required");
   const groupNumberGenerator = options.groupNumberGenerator || defaultGroupNumber;
   const inviteTokenGenerator = options.inviteTokenGenerator || defaultInviteToken;
+  const recoverMissingSchema = options.recoverMissingSchema || recoverMissingChatSchema;
+  const mysqlPublic = (operation) => wrapMysqlPublic(operation, recoverMissingSchema);
 
   async function execute(sql, params = []) {
     return pool.execute(sql, params);
