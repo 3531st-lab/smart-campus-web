@@ -241,9 +241,9 @@ test("sync summaries do not expose internal database errors", async () => {
   assert.doesNotMatch(source, /summary\.errors\.push\(\{ userId: user\.id, message: error\.message/);
 });
 
-test("platform admins lose assignments while active teachers retain explicit teacher assignments", async () => {
+test("student administrators retain identity-derived class assignments while teachers keep explicit assignments", async () => {
   const fixture = fixtures();
-  const platformAdmin = { id: "platform-admin", role: "admin", status: "active" };
+  const platformAdmin = { ...fixture.student, id: "platform-admin", name: "学生管理员", role: "admin" };
   const store = createMemoryClassStore({ users: [fixture.student, fixture.teacher, platformAdmin] });
   const initial = await store.ensureStudentClassAssignment(fixture.student);
   const teacherAssignment = await store.assignTeacher({
@@ -252,20 +252,23 @@ test("platform admins lose assignments while active teachers retain explicit tea
     duty: "subject_teacher",
     operatorId: "admin-1001"
   });
-  store.data.assignments.push({
-    id: "admin-assignment",
-    classId: initial.class.id,
-    userId: platformAdmin.id,
-    duty: "member",
-    source: "admin_assignment",
-    active: true
-  });
-
   await store.ensureStudentClassAssignment(fixture.teacher);
-  await store.ensureStudentClassAssignment(platformAdmin);
+  const adminResult = await store.ensureStudentClassAssignment(platformAdmin);
 
   assert.equal(store.data.assignments.find((item) => item.id === teacherAssignment.id).active, true);
-  assert.equal(store.data.assignments.find((item) => item.id === "admin-assignment").active, false);
+  assert.equal(adminResult.activeAssignments.length, 1);
+  assert.equal(adminResult.activeAssignments[0].classId, initial.class.id);
+  assert.equal(adminResult.activeAssignments[0].source, "student_identity");
+});
+
+test("student administrators without complete class identity are not assigned to a class", async () => {
+  const platformAdmin = { id: "platform-admin", role: "admin", status: "active", school: "泰州学院" };
+  const store = createMemoryClassStore({ users: [platformAdmin] });
+
+  const result = await store.ensureStudentClassAssignment(platformAdmin);
+
+  assert.equal(result.incomplete, true);
+  assert.equal(store.data.assignments.length, 0);
 });
 
 test("assignTeacher requires an active teacher and teacher duty", async () => {
@@ -574,7 +577,7 @@ test("MySQL syncAllClasses dry-run reports would-change counts without opening t
   const fakeDb = {
     async execute(sql, params = []) {
       queries.push({ sql, params });
-      if (/FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
+      if (/FROM students WHERE role IN \('student', 'admin', 'super_admin'\)/.test(sql)) return [rows.users];
       if (/FROM campus_classes WHERE class_key IN/.test(sql)) return [params.map((key) => rows.classes.get(key)).filter(Boolean)];
       if (/FROM chat_groups WHERE type = 'class' AND class_id IN/.test(sql)) return [params.map((id) => rows.groups.get(id)).filter(Boolean)];
       if (/FROM class_assignments/.test(sql)) return [[...rows.assignments.values()].flat()];
@@ -688,7 +691,7 @@ test("MySQL dry-run counts class group id repair when group exists but class lin
   };
   const fakeDb = {
     async execute(sql, params = []) {
-      if (/FROM students WHERE role = 'student'/.test(sql)) return [rows.users];
+      if (/FROM students WHERE role IN \('student', 'admin', 'super_admin'\)/.test(sql)) return [rows.users];
       if (/FROM campus_classes WHERE class_key IN/.test(sql)) return [[rows.classRow]];
       if (/FROM chat_groups WHERE type = 'class' AND class_id IN/.test(sql)) return [[rows.groupRow]];
       if (/FROM class_assignments/.test(sql)) return [[rows.assignmentRow]];

@@ -193,6 +193,13 @@ test("platform administrators govern frozen groups without joining them and revi
     text: "冻结前的消息"
   });
   assert.equal(sent.status, 201);
+  const adminSent = await callRoute(store, `POST /api/chat/groups/${groupId}/messages`, users.admin, {
+    clientRequestId: "governance-admin-message-001",
+    text: "平台管理员通知"
+  });
+  assert.equal(adminSent.status, 201);
+  assert.equal(adminSent.payload.message.sender.publicIdentity, "admin");
+  assert.equal(store.data.members.some((member) => member.userId === users.admin.id), false);
 
   const managed = await callRoute(store, "GET /api/admin/chat/groups", users.admin);
   assert.equal(managed.status, 200);

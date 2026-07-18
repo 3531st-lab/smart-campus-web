@@ -6,6 +6,11 @@ const { CLASS_DUTIES, classKey } = require("./class-domain");
 const AUTO_ASSIGNMENT_SOURCE = "student_identity";
 const TEACHER_ASSIGNMENT_SOURCE = "teacher_assignment";
 const TEACHER_DUTIES = new Set(["head_teacher", "subject_teacher", "class_admin"]);
+const STUDENT_IDENTITY_ROLES = new Set(["student", "admin", "super_admin"]);
+
+function hasStudentIdentity(user) {
+  return STUDENT_IDENTITY_ROLES.has(user?.role);
+}
 
 function classValues(user) {
   return {
@@ -147,14 +152,14 @@ function createMemoryClassStore(seed = {}) {
 
   async function ensureStudentClassAssignment(user) {
     const values = classValues(user);
-    if (user.status !== "active" || ["admin", "super_admin", "guest"].includes(user.role)) {
+    if (user.status !== "active" || user.role === "guest") {
       return inactiveResult(deactivateAssignments(user.id));
     }
     if (user.role === "teacher") {
       const changed = deactivateAssignments(user.id, (assignment) => assignment.source !== TEACHER_ASSIGNMENT_SOURCE);
       return { changed, activeAssignments: activeMemoryAssignments(store, user.id) };
     }
-    if (user.role !== "student") return inactiveResult(deactivateAssignments(user.id));
+    if (!hasStudentIdentity(user)) return inactiveResult(deactivateAssignments(user.id));
     if (![values.school, values.college, values.className].every(Boolean)) return incompleteResult();
 
     const { campusClass, created: classCreated } = ensureClass(values);
@@ -256,7 +261,7 @@ function createMemoryClassStore(seed = {}) {
     }
     const summary = { checked: 0, changed: 0, incomplete: 0, errors: [], dryRun: Boolean(dryRun) };
     for (const user of store.data.users) {
-      if (user.role !== "student") continue;
+      if (!hasStudentIdentity(user)) continue;
       summary.checked += 1;
       try {
         const result = await ensureStudentClassAssignment(user);
@@ -291,7 +296,7 @@ async function syncStudentMysql(user) {
     await connection.beginTransaction();
     const [studentRows] = await connection.execute("SELECT id, role, status FROM students WHERE id = ? FOR UPDATE", [user.id]);
     if (!studentRows[0]) throw new Error("学生账号不存在");
-    if (user.status !== "active" || ["admin", "super_admin", "guest"].includes(user.role)) {
+    if (user.status !== "active" || user.role === "guest") {
       const [result] = await connection.execute(
         "UPDATE class_assignments SET active = 0 WHERE user_id = ? AND active = 1",
         [user.id]
@@ -308,7 +313,7 @@ async function syncStudentMysql(user) {
       await connection.commit();
       return { changed: result.affectedRows > 0, activeAssignments };
     }
-    if (user.role !== "student") {
+    if (!hasStudentIdentity(user)) {
       const [result] = await connection.execute(
         "UPDATE class_assignments SET active = 0 WHERE user_id = ? AND active = 1",
         [user.id]
@@ -486,7 +491,7 @@ async function removeTeacherAssignment(input) {
 
 async function previewMysqlStudentSync(user) {
   const values = classValues(user);
-  if (user.status !== "active" || user.role !== "student") {
+  if (user.status !== "active" || !hasStudentIdentity(user)) {
     const [activeRows] = await getPool().execute(
       "SELECT * FROM class_assignments WHERE user_id = ? AND active = 1",
       [user.id]
@@ -569,7 +574,7 @@ async function syncAllClassesMysql({ dryRun = false } = {}) {
   const connection = dryRun ? getPool() : await getPool().getConnection();
   try {
     const [studentRows] = await connection.execute(
-      "SELECT id, school, college, class_name, status FROM students WHERE role = 'student'"
+      "SELECT id, school, college, class_name, role, status FROM students WHERE role IN ('student', 'admin', 'super_admin')"
     );
     const source = collectClassSyncStudents(studentRows);
     const keys = [...source.classes.keys()];
@@ -589,7 +594,7 @@ async function syncAllClassesMysql({ dryRun = false } = {}) {
       SELECT ca.user_id, ca.class_id
       FROM class_assignments ca
       INNER JOIN students s ON s.id = ca.user_id
-      WHERE ca.active = 1 AND s.role = 'student' AND s.status = 'active'
+      WHERE ca.active = 1 AND s.role IN ('student', 'admin', 'super_admin') AND s.status = 'active'
     `);
     assignments.forEach((assignment) => {
       const userId = String(assignment.user_id);
@@ -660,13 +665,13 @@ async function syncAllClassesMysql({ dryRun = false } = {}) {
       INNER JOIN students s ON s.id = ca.user_id
       INNER JOIN campus_classes cc ON cc.school = s.school AND cc.college = s.college AND cc.class_name = s.class_name
       SET ca.active = 0
-      WHERE ca.active = 1 AND s.role = 'student' AND s.status = 'active'
+      WHERE ca.active = 1 AND s.role IN ('student', 'admin', 'super_admin') AND s.status = 'active'
         AND s.school <> '' AND s.college <> '' AND s.class_name <> '' AND ca.class_id <> cc.id
     `);
     await connection.execute(`
       UPDATE class_assignments ca INNER JOIN students s ON s.id = ca.user_id
       SET ca.active = 0
-      WHERE ca.active = 1 AND s.role = 'student'
+      WHERE ca.active = 1 AND s.role IN ('student', 'admin', 'super_admin')
         AND (s.status <> 'active' OR s.school = '' OR s.college = '' OR s.class_name = '')
     `);
     await connection.commit();

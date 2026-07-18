@@ -216,6 +216,7 @@ function publicChatUser(user, assignment = null) {
     name: user?.name || "",
     avatarColor: user?.avatarColor ?? user?.avatar_color ?? null,
     identity: user?.role === "teacher" ? "teacher" : "student",
+    publicIdentity: user?.role || null,
     classDuty: assignment?.duty ?? assignment?.class_duty ?? "member"
   };
 }
@@ -348,7 +349,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
 
   function classMember(groupItem, assignment) {
     const assignedUser = store.data.users.find((item) => String(item.id) === String(assignment.userId ?? assignment.user_id));
-    if (!assignedUser || assignedUser.status !== "active" || PLATFORM_ROLES.has(assignedUser.role) || assignedUser.role === "guest") return null;
+    if (!assignedUser || assignedUser.status !== "active" || assignedUser.role === "guest") return null;
     const duty = assignment.duty || "member";
     return safeMember({
       id: `class:${groupItem.id}:${assignedUser.id}`,
@@ -408,9 +409,20 @@ function createMemoryChatStore(seed = {}, options = {}) {
       .filter((item) => String(item.userId ?? item.user_id) === String(userId) && item.active !== false)
       .map((item) => String(item.classId ?? item.class_id)));
     if (PLATFORM_ROLES.has(account.role)) {
-      store.data.classes
-        .filter((campusClass) => campusClass.status !== "disabled")
-        .forEach((campusClass) => classIds.add(String(campusClass.id)));
+      return store.data.groups
+        .filter((item) => item.status !== "disabled")
+        .map((group) => {
+          const campusClass = group.type === "class"
+            ? store.data.classes.find((item) => String(item.id) === String(group.classId ?? group.class_id))
+            : null;
+          return safeGroup({
+            ...group,
+            class_school: campusClass?.school,
+            class_college: campusClass?.college,
+            class_name: campusClass?.className ?? campusClass?.class_name
+          });
+        })
+        .sort((left, right) => Number(right.type === "class") - Number(left.type === "class") || left.name.localeCompare(right.name, "zh-CN"));
     }
     const memberGroupIds = new Set(store.data.members
       .filter((item) => String(item.userId ?? item.user_id) === String(userId) && item.active !== false)
@@ -454,15 +466,16 @@ function createMemoryChatStore(seed = {}, options = {}) {
     const account = user(accountInput);
     const found = availableGroup(groupId);
     if (found.type === "class") {
-      if (PLATFORM_ROLES.has(account.role)) return groupAccessShape(found, null, true);
       const assignment = classAssignment(found, account.id);
       const derived = assignment ? classMember(found, assignment) : null;
-      if (!derived) throw publicError("无权访问该群聊", 403);
-      return groupAccessShape(found, derived, false);
+      if (derived) return groupAccessShape(found, derived, PLATFORM_ROLES.has(account.role));
+      if (PLATFORM_ROLES.has(account.role)) return groupAccessShape(found, null, true);
+      throw publicError("无权访问该群聊", 403);
     }
     const membership = customMembership(found.id, account.id);
-    if (!membership) throw publicError("无权访问该群聊", 403);
-    return groupAccessShape(found, membership, false);
+    if (membership) return groupAccessShape(found, membership, PLATFORM_ROLES.has(account.role));
+    if (PLATFORM_ROLES.has(account.role)) return groupAccessShape(found, null, true);
+    throw publicError("无权访问该群聊", 403);
   }
 
   async function listMembers(groupId, requester) {
@@ -692,7 +705,6 @@ function createMemoryChatStore(seed = {}, options = {}) {
   async function messageAccess(groupId, accountInput, { writable = false } = {}) {
     const found = availableGroup(groupId, { writable });
     const access = await getGroupForUser(groupId, accountInput);
-    if (writable && access.governance) throw publicError("平台管理员不能以隐身治理身份发送群消息", 403);
     return { found, access, account: user(accountInput) };
   }
 
@@ -1092,13 +1104,11 @@ function createMysqlChatStore(pool, options = {}) {
       LEFT JOIN chat_members cm ON cm.group_id = cg.id AND cm.user_id = ? AND cm.active = 1
       LEFT JOIN class_assignments ca ON ca.class_id = cg.class_id AND ca.user_id = ? AND ca.active = 1
       WHERE cg.status <> 'disabled'
-        AND ((cg.type = 'class' AND (
-            (ca.user_id IS NOT NULL AND ? NOT IN ('admin','super_admin'))
-            OR ? IN ('admin','super_admin')
-          ))
+        AND (? IN ('admin','super_admin')
+          OR (cg.type = 'class' AND ca.user_id IS NOT NULL)
           OR (cg.type <> 'class' AND cm.user_id IS NOT NULL))
       ORDER BY CASE WHEN cg.type = 'class' THEN 0 ELSE 1 END, cg.name, cg.id
-    `, [account.id, account.id, account.role, account.role]);
+    `, [account.id, account.id, account.role]);
     return rows.map(safeGroup);
   });
 
@@ -1128,28 +1138,31 @@ function createMysqlChatStore(pool, options = {}) {
     const found = await groupById(groupId);
     checkGroupState(found);
     if (found.type === "class") {
-      if (PLATFORM_ROLES.has(account.role)) return groupAccessShape(found, null, true);
       const [rows] = await execute(`
         SELECT ca.*, s.name, s.role AS user_role, s.status
         FROM class_assignments ca
         INNER JOIN students s ON s.id = ca.user_id
         WHERE ca.class_id = ? AND ca.user_id = ? AND ca.active = 1
-          AND s.status = 'active' AND s.role NOT IN ('admin','super_admin')
+          AND s.status = 'active' AND s.role <> 'guest'
       `, [found.classId, account.id]);
-      if (!rows[0]) throw publicError("无权访问该群聊", 403);
-      return groupAccessShape(found, {
-        id: `class:${found.id}:${account.id}`,
-        groupId: found.id,
-        userId: account.id,
-        role: CLASS_ADMIN_DUTIES.has(rows[0].duty) ? "admin" : "member",
-        classDuty: rows[0].duty,
-        joinedVia: "class_assignment",
-        active: true
-      });
+      if (rows[0]) {
+        return groupAccessShape(found, {
+          id: `class:${found.id}:${account.id}`,
+          groupId: found.id,
+          userId: account.id,
+          role: CLASS_ADMIN_DUTIES.has(rows[0].duty) ? "admin" : "member",
+          classDuty: rows[0].duty,
+          joinedVia: "class_assignment",
+          active: true
+        }, PLATFORM_ROLES.has(account.role));
+      }
+      if (PLATFORM_ROLES.has(account.role)) return groupAccessShape(found, null, true);
+      throw publicError("无权访问该群聊", 403);
     }
     const membership = await mysqlMember(found.id, account.id);
-    if (!membership) throw publicError("无权访问该群聊", 403);
-    return groupAccessShape(found, membership);
+    if (membership) return groupAccessShape(found, membership, PLATFORM_ROLES.has(account.role));
+    if (PLATFORM_ROLES.has(account.role)) return groupAccessShape(found, null, true);
+    throw publicError("无权访问该群聊", 403);
   });
 
   const listMembers = mysqlPublic(async (groupId, requester) => {
@@ -1162,7 +1175,7 @@ function createMysqlChatStore(pool, options = {}) {
         FROM class_assignments ca
         INNER JOIN students s ON s.id = ca.user_id
         WHERE ca.class_id = ? AND ca.active = 1 AND s.status = 'active'
-          AND s.role NOT IN ('admin','super_admin','guest')
+          AND s.role <> 'guest'
         ORDER BY CASE WHEN ca.duty IN ('monitor','league_secretary','class_admin','head_teacher') THEN 0 ELSE 1 END, s.name, s.id
       `, [access.classId]);
       return rows.map((row) => safeMember({ ...row, group_id: groupId }));
@@ -1453,24 +1466,22 @@ function createMysqlChatStore(pool, options = {}) {
     const found = await groupById(groupId, connection, { forUpdate: true });
     checkGroupState(found, writable);
     if (found.type === "class") {
-      if (PLATFORM_ROLES.has(account.role)) {
-        if (writable) throw publicError("平台管理员不能以隐身治理身份发送群消息", 403);
-        return { found, account, governance: true, assignment: null };
-      }
       const [rows] = await connection.execute(`
         SELECT ca.duty
         FROM class_assignments ca
         INNER JOIN students s ON s.id = ca.user_id
         WHERE ca.class_id = ? AND ca.user_id = ? AND ca.active = 1
-          AND s.status = 'active' AND s.role NOT IN ('admin', 'super_admin', 'guest')
+          AND s.status = 'active' AND s.role <> 'guest'
         FOR UPDATE
       `, [found.classId, account.id]);
-      if (!rows[0]) throw publicError("无权访问该群聊", 403);
-      return { found, account, governance: false, assignment: rows[0] };
+      if (rows[0]) return { found, account, governance: PLATFORM_ROLES.has(account.role), assignment: rows[0] };
+      if (PLATFORM_ROLES.has(account.role)) return { found, account, governance: true, assignment: null };
+      throw publicError("无权访问该群聊", 403);
     }
     const membership = await mysqlMember(found.id, account.id, connection, { forUpdate: true });
-    if (!membership) throw publicError("无权访问该群聊", 403);
-    return { found, account, governance: false, membership, assignment: null };
+    if (membership) return { found, account, governance: PLATFORM_ROLES.has(account.role), membership, assignment: null };
+    if (PLATFORM_ROLES.has(account.role)) return { found, account, governance: true, membership: null, assignment: null };
+    throw publicError("无权访问该群聊", 403);
   }
 
   async function mysqlStickerForUser(stickerId, accountId, connection, { forMessage = false } = {}) {

@@ -34,6 +34,7 @@ function fixtures(options = {}) {
   const classAssignments = [
     { id: "ca-1", classId: "class-a", userId: "student-a", duty: "monitor", source: "student_identity", active: true },
     { id: "ca-2", classId: "class-a", userId: "teacher-a", duty: "subject_teacher", source: "teacher_assignment", active: true },
+    { id: "ca-3", classId: "class-a", userId: "platform-admin", duty: "member", source: "student_identity", active: true },
     { id: "ca-4", classId: "class-b", userId: "student-b", duty: "member", source: "student_identity", active: true }
   ];
   const chatGroups = [
@@ -202,7 +203,7 @@ function createMysqlHarness(initial = {}) {
   };
 }
 
-test("mandatory class membership derives from active assignments without platform-admin member rows", async () => {
+test("mandatory class membership includes student administrators without creating member rows", async () => {
   const { store, users } = fixtures();
 
   const groups = await store.listUserGroups(users["student-a"].id);
@@ -210,9 +211,9 @@ test("mandatory class membership derives from active assignments without platfor
   assert.equal(groups[0].college, "经管学院");
 
   const members = await store.listMembers("class-group-a", users["student-a"]);
-  assert.deepEqual(members.map((member) => member.userId), ["student-a", "teacher-a"]);
+  assert.deepEqual(members.map((member) => member.userId), ["student-a", "teacher-a", "platform-admin"]);
   assert.equal(members.find((member) => member.userId === "student-a").role, "admin");
-  assert.equal(members.some((member) => member.userId === "platform-admin"), false);
+  assert.equal(members.find((member) => member.userId === "platform-admin").publicIdentity, "admin");
   assert.equal(store.data.members.some((member) => member.userId === "platform-admin"), false);
 });
 
@@ -222,9 +223,37 @@ test("class groups deny cross-class users but allow platform governance without 
   await assert.rejects(() => store.getGroupForUser("class-group-a", users["student-b"]), /无权访问/);
   const groups = await store.listUserGroups(users["platform-admin"].id);
   assert.deepEqual(groups.map((group) => group.id), ["class-group-a", "class-group-b"]);
-  const governed = await store.getGroupForUser("class-group-a", users["platform-admin"]);
-  assert.equal(governed.governance, true);
-  assert.equal(governed.membership, null);
+  const ownClass = await store.getGroupForUser("class-group-a", users["platform-admin"]);
+  assert.equal(ownClass.governance, true);
+  assert.equal(ownClass.membership.userId, "platform-admin");
+  const otherClass = await store.getGroupForUser("class-group-b", users["platform-admin"]);
+  assert.equal(otherClass.governance, true);
+  assert.equal(otherClass.membership, null);
+});
+
+test("platform administrators can post in every active group without becoming ordinary members", async () => {
+  const { store, users } = fixtures();
+  const custom = await store.createCustomGroup({ name: "校园交流" }, users.owner);
+
+  const groups = await store.listUserGroups(users["platform-admin"].id);
+  assert.deepEqual(groups.map((group) => group.id), ["class-group-a", "class-group-b", custom.id]);
+
+  const classMessage = await store.createMessage({
+    groupId: "class-group-b",
+    senderId: users["platform-admin"].id,
+    clientRequestId: "admin-class-message",
+    text: "管理员通知"
+  });
+  const customMessage = await store.createMessage({
+    groupId: custom.id,
+    senderId: users["platform-admin"].id,
+    clientRequestId: "admin-custom-message",
+    text: "管理员答疑"
+  });
+
+  assert.equal(classMessage.sender.publicIdentity, "admin");
+  assert.equal(customMessage.sender.publicIdentity, "admin");
+  assert.equal(store.data.members.some((member) => member.userId === "platform-admin"), false);
 });
 
 test("custom group creation gives the creator owner membership and a unique decimal group number", async () => {

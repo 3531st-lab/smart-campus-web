@@ -97,3 +97,9 @@ test("chat sticker panel can be explicitly hidden and dismissed through common c
   assert.match(page, /onStickerEscape/);
   assert.match(css, /\.chat-sticker-panel\[hidden\]\s*\{\s*display:\s*none/);
 });
+
+test("class member directory labels administrators without hiding their class identity", () => {
+  const page = read("public/chat-page.js");
+  assert.match(page, /const identityLabel = \{ admin: "普通管理员", super_admin: "总管理员" \}/);
+  assert.match(page, /identityLabel\[member\.publicIdentity\]/);
+});

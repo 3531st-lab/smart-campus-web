@@ -220,13 +220,14 @@
               const result = await api(`/api/chat/groups/${encodeURIComponent(activeGroup.id)}/members`);
               const members = Array.isArray(result.members) ? result.members : [];
               const roleLabel = { owner: "群主", admin: "群管理员", member: "成员" };
+              const identityLabel = { admin: "普通管理员", super_admin: "总管理员" };
               const dutyLabel = { monitor: "班长", league_secretary: "团支书", class_admin: "班级管理员", head_teacher: "班主任" };
               openModal(`
                 <header class="chat-modal-head"><div><h2>群成员</h2><p>共 ${members.length} 位成员，仅展示群聊所需的公开身份。</p></div><button type="button" data-chat-modal-close aria-label="关闭">×</button></header>
                 <div class="chat-member-list">${members.map((member) => `
                   <div class="chat-member-row">
                     <span class="chat-member-avatar" style="--member-color:${safe(member.avatarColor || "#3478f6", escapeHtml)}">${avatar(member.name, escapeHtml)}</span>
-                    <div><strong>${safe(member.name || "校园用户", escapeHtml)}</strong><small>${safe(dutyLabel[member.classDuty] || roleLabel[member.role] || "成员", escapeHtml)}</small></div>
+                    <div><strong>${safe(member.name || "校园用户", escapeHtml)}</strong><small>${safe([dutyLabel[member.classDuty] || roleLabel[member.role] || "成员", identityLabel[member.publicIdentity]].filter(Boolean).join(" · "), escapeHtml)}</small></div>
                   </div>`).join("") || '<p class="chat-modal-empty">暂无群成员</p>'}</div>
                 <div class="chat-modal-actions"><button type="button" class="primary" data-chat-modal-close>完成</button></div>`, "群成员");
             } catch (error) {
