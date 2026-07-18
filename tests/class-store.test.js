@@ -407,6 +407,80 @@ test("runtime migration and MySQL admin assignment use the class lock order", ()
   assert.match(adminSource, /assigned_by/);
 });
 
+test("student reads remain available when startup identity maintenance fails", async () => {
+  const environmentKeys = [
+    "CAMPUS_USER_NAME",
+    "CAMPUS_USER_SCHOOL",
+    "CAMPUS_USER_COLLEGE",
+    "CAMPUS_USER_MAJOR",
+    "CAMPUS_USER_CLASS",
+    "CAMPUS_USER_STUDENT_NO",
+    "CAMPUS_USER_PHONE",
+    "CAMPUS_USER_ROLE"
+  ];
+  const previousEnvironment = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    CAMPUS_USER_NAME: "启动维护测试账号",
+    CAMPUS_USER_SCHOOL: "启动维护测试大学",
+    CAMPUS_USER_COLLEGE: "测试学院",
+    CAMPUS_USER_MAJOR: "测试专业",
+    CAMPUS_USER_CLASS: "测试班",
+    CAMPUS_USER_STUDENT_NO: "STARTUP-MAINTENANCE-001",
+    CAMPUS_USER_PHONE: "13800009999",
+    CAMPUS_USER_ROLE: "super_admin"
+  });
+
+  const listedStudent = {
+    id: "available-student",
+    name: "可查询学生",
+    school: "启动维护测试大学",
+    college: "测试学院",
+    major: "测试专业",
+    class_name: "测试班",
+    student_no: "AVAILABLE-001",
+    phone: "13800008888",
+    role: "student",
+    status: "active",
+    verified: 1
+  };
+  const fakeDb = {
+    async query(sql) {
+      if (/SELECT id, name, school, major, student_no FROM students/.test(sql)) return [[]];
+      return [{ affectedRows: 0 }];
+    },
+    async execute(sql) {
+      if (/SELECT \* FROM students WHERE school = \? AND student_no = \? LIMIT 1/.test(sql)) return [[]];
+      if (/INSERT INTO students/.test(sql)) {
+        const error = new Error("simulated startup maintenance write failure");
+        error.code = "ER_STARTUP_MAINTENANCE";
+        throw error;
+      }
+      if (/SELECT \* FROM students .*ORDER BY/.test(sql)) return [[listedStudent]];
+      return [{ affectedRows: 0 }];
+    }
+  };
+  const isolatedStore = loadStudentStoreWithFakeDb(fakeDb, {
+    async ensureStudentClassAssignment() {
+      return null;
+    },
+    async syncAllClasses() {
+      return { checked: 0, changed: 0, incomplete: 0, errors: [], dryRun: false };
+    }
+  });
+
+  try {
+    await isolatedStore.initialize();
+    const students = await isolatedStore.listStudents({ limit: 1 });
+    assert.equal(students.length, 1);
+    assert.equal(students[0].studentNo, "AVAILABLE-001");
+  } finally {
+    environmentKeys.forEach((key) => {
+      if (previousEnvironment[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnvironment[key];
+    });
+  }
+});
+
 test("forced runtime migration backfills existing identities into mandatory class groups", async () => {
   let syncCount = 0;
   const fakeDb = {

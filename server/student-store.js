@@ -6,6 +6,44 @@ const classStore = require("./class-store");
 
 let initialized = false;
 
+function reportStartupMaintenanceFailure(task, error) {
+  console.error("student startup maintenance failed", {
+    task,
+    name: String(error?.name || "Error"),
+    code: String(error?.code || "UNKNOWN")
+  });
+}
+
+async function runStartupMaintenance({ resetInitialPasswords = false, syncClasses = false } = {}) {
+  const tasks = [
+    ["seed_private_student", seedPrivateStudent],
+    ["enforce_permanent_super_admins", enforcePermanentSuperAdmins]
+  ];
+  if (resetInitialPasswords) {
+    tasks.push(["reset_initial_passwords", () => (
+      getPool().execute("UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE password_must_change = 1")
+    )]);
+  }
+  if (syncClasses) {
+    tasks.push(["sync_class_groups", async () => {
+      const classSync = await classStore.syncAllClasses({ dryRun: false });
+      console.info("class group backfill completed", {
+        checked: classSync.checked,
+        changed: classSync.changed,
+        incomplete: classSync.incomplete,
+        errorCount: classSync.errors?.length || 0
+      });
+    }]);
+  }
+  for (const [task, operation] of tasks) {
+    try {
+      await operation();
+    } catch (error) {
+      reportStartupMaintenanceFailure(task, error);
+    }
+  }
+}
+
 function normalizeStudent(row) {
   if (!row) return null;
   return permanentAdmins.enforcePermanentPrivileges({
@@ -32,8 +70,7 @@ async function initialize({ forceSchema = false } = {}) {
   if (!mysqlConfigured || (initialized && !forceSchema)) return;
   if (!autoMigrateSchema && !forceSchema) {
     initialized = true;
-    await seedPrivateStudent();
-    await enforcePermanentSuperAdmins();
+    await runStartupMaintenance();
     return;
   }
   const db = getPool();
@@ -404,21 +441,7 @@ async function initialize({ forceSchema = false } = {}) {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   initialized = true;
-  try {
-    await seedPrivateStudent();
-    await enforcePermanentSuperAdmins();
-    await db.execute("UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE password_must_change = 1");
-    const classSync = await classStore.syncAllClasses({ dryRun: false });
-    console.info("class group backfill completed", {
-      checked: classSync.checked,
-      changed: classSync.changed,
-      incomplete: classSync.incomplete,
-      errorCount: classSync.errors?.length || 0
-    });
-  } catch (error) {
-    initialized = false;
-    throw error;
-  }
+  await runStartupMaintenance({ resetInitialPasswords: true, syncClasses: true });
 }
 
 async function enforcePermanentSuperAdmins() {
