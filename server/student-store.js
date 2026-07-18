@@ -404,9 +404,15 @@ async function initialize({ forceSchema = false } = {}) {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   initialized = true;
-  await seedPrivateStudent();
-  await enforcePermanentSuperAdmins();
-  await db.execute("UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE password_must_change = 1");
+  try {
+    await seedPrivateStudent();
+    await enforcePermanentSuperAdmins();
+    await db.execute("UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE password_must_change = 1");
+    await classStore.syncAllClasses({ dryRun: false });
+  } catch (error) {
+    initialized = false;
+    throw error;
+  }
 }
 
 async function enforcePermanentSuperAdmins() {

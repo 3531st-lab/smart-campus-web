@@ -404,6 +404,32 @@ test("runtime migration and MySQL admin assignment use the class lock order", ()
   assert.match(adminSource, /assigned_by/);
 });
 
+test("forced runtime migration backfills existing identities into mandatory class groups", async () => {
+  let syncCount = 0;
+  const fakeDb = {
+    async query(sql) {
+      if (/SELECT id, name, school, major, student_no FROM students/.test(sql)) return [[]];
+      return [{ affectedRows: 0 }];
+    },
+    async execute() {
+      return [{ affectedRows: 0 }];
+    }
+  };
+  const isolatedStore = loadStudentStoreWithFakeDb(fakeDb, {
+    async ensureStudentClassAssignment() {
+      return null;
+    },
+    async syncAllClasses(options) {
+      syncCount += 1;
+      assert.deepEqual(options, { dryRun: false });
+      return { checked: 2, changed: 2, incomplete: 0, errors: [], dryRun: false };
+    }
+  });
+
+  await isolatedStore.initialize({ forceSchema: true });
+  assert.equal(syncCount, 1);
+});
+
 test("canonical schema defines class groups assignment operators and durable sync errors", () => {
   const schema = fs.readFileSync(path.join(__dirname, "..", "server", "schema.sql"), "utf8");
   const studentSource = fs.readFileSync(path.join(__dirname, "..", "server", "student-store.js"), "utf8");
