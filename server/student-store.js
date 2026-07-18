@@ -408,7 +408,13 @@ async function initialize({ forceSchema = false } = {}) {
     await seedPrivateStudent();
     await enforcePermanentSuperAdmins();
     await db.execute("UPDATE students SET password_hash = NULL, password_must_change = 0 WHERE password_must_change = 1");
-    await classStore.syncAllClasses({ dryRun: false });
+    const classSync = await classStore.syncAllClasses({ dryRun: false });
+    console.info("class group backfill completed", {
+      checked: classSync.checked,
+      changed: classSync.changed,
+      incomplete: classSync.incomplete,
+      errorCount: classSync.errors?.length || 0
+    });
   } catch (error) {
     initialized = false;
     throw error;

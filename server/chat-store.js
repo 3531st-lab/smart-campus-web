@@ -41,15 +41,6 @@ function userIdOf(userOrId) {
   return String(typeof userOrId === "object" ? userOrId?.id : userOrId || "");
 }
 
-function sameClassIdentity(account, campusClass) {
-  const accountClass = String(account?.className ?? account?.class_name ?? "").trim();
-  const className = String(campusClass?.className ?? campusClass?.class_name ?? "").trim();
-  return Boolean(accountClass)
-    && String(account?.school || "").trim() === String(campusClass?.school || "").trim()
-    && String(account?.college || "").trim() === String(campusClass?.college || "").trim()
-    && accountClass === className;
-}
-
 function defaultInviteToken() {
   return crypto.randomBytes(INVITE_TOKEN_BYTES).toString("base64url");
 }
@@ -415,7 +406,7 @@ function createMemoryChatStore(seed = {}, options = {}) {
       .map((item) => String(item.classId ?? item.class_id)));
     if (PLATFORM_ROLES.has(account.role)) {
       store.data.classes
-        .filter((campusClass) => campusClass.status !== "disabled" && sameClassIdentity(account, campusClass))
+        .filter((campusClass) => campusClass.status !== "disabled")
         .forEach((campusClass) => classIds.add(String(campusClass.id)));
     }
     const memberGroupIds = new Set(store.data.members
@@ -1089,15 +1080,11 @@ function createMysqlChatStore(pool, options = {}) {
       WHERE cg.status <> 'disabled'
         AND ((cg.type = 'class' AND (
             (ca.user_id IS NOT NULL AND ? NOT IN ('admin','super_admin'))
-            OR (? IN ('admin','super_admin') AND EXISTS (
-              SELECT 1 FROM campus_classes own_class
-              WHERE own_class.id = cg.class_id AND own_class.status = 'active'
-                AND own_class.school = ? AND own_class.college = ? AND own_class.class_name = ?
-            ))
+            OR ? IN ('admin','super_admin')
           ))
           OR (cg.type <> 'class' AND cm.user_id IS NOT NULL))
       ORDER BY CASE WHEN cg.type = 'class' THEN 0 ELSE 1 END, cg.name, cg.id
-    `, [account.id, account.id, account.role, account.role, account.school, account.college, account.class_name]);
+    `, [account.id, account.id, account.role, account.role]);
     return rows.map(safeGroup);
   });
 

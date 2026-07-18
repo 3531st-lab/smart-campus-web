@@ -220,7 +220,7 @@ test("class groups deny cross-class users but allow platform governance without 
 
   await assert.rejects(() => store.getGroupForUser("class-group-a", users["student-b"]), /无权访问/);
   const groups = await store.listUserGroups(users["platform-admin"].id);
-  assert.deepEqual(groups.map((group) => group.id), ["class-group-a"]);
+  assert.deepEqual(groups.map((group) => group.id), ["class-group-a", "class-group-b"]);
   const governed = await store.getGroupForUser("class-group-a", users["platform-admin"]);
   assert.equal(governed.governance, true);
   assert.equal(governed.membership, null);
