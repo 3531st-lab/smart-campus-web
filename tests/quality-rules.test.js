@@ -52,6 +52,10 @@ test("returns an immutable 2025 economics-management rule version", () => {
 
   assert.equal(version.id, "2025-economics-management");
   assert.deepEqual(version.zeroRules, ["SERIOUS_DISCIPLINE", "EVIDENCE_FALSIFICATION"]);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(version.modules).map(([id, module]) => [id, module.label])),
+    { moral: "德育", intellectual: "智育", physical: "体育", aesthetic: "美育", labor: "劳育" }
+  );
   assert.equal(version.modules.labor.min, -8);
   assert.equal(Object.isFrozen(version), true);
   assert.equal(Object.isFrozen(version.modules), true);
@@ -66,7 +70,7 @@ test("rounds values and warns when moral score is below sixteen", () => {
 
   const warned = calculateQualityRecord({ modules: { moral: { base: 15.99 } } });
   assert.equal(warned.moduleScores.moral, 15.99);
-  assert.deepEqual(warned.warnings, ["寰疯偛浣庝簬16鍒嗭紝闇€杩涜璇勫璇勪紭璧勬牸澶嶆牳"]);
+  assert.deepEqual(warned.warnings, ["德育低于16分，需进行评奖评优资格复核"]);
 });
 
 test("validates and normalizes quality items", () => {
@@ -93,5 +97,22 @@ test("rejects invalid quality items and scores with status-coded errors", () => 
       () => validateQualityItem(item),
       (error) => error.statusCode === 400
     );
+  }
+});
+
+test("uses the corrected UTF-8 labels and messages", () => {
+  const version = getQualityRuleVersion();
+  const expectedMessages = ["分值必须为数字", "综测模块无效", "计分类型无效"];
+
+  assert.deepEqual(
+    Object.values(version.modules).map((module) => module.label),
+    ["德育", "智育", "体育", "美育", "劳育"]
+  );
+  assert.throws(() => calculateQualityRecord({ modules: { moral: { base: "not-a-number" } } }), /分值必须为数字/);
+  assert.throws(() => validateQualityItem({ module: "unknown", type: "base" }), /综测模块无效/);
+  assert.throws(() => validateQualityItem({ module: "moral", type: "other" }), /计分类型无效/);
+
+  for (const message of expectedMessages) {
+    assert.doesNotMatch(message, /[锛鏅浣缇鍔寰]/);
   }
 });

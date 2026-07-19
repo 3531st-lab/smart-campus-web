@@ -1,9 +1,9 @@
 const MODULES = Object.freeze({
-  moral: Object.freeze({ label: "寰疯偛", max: 28, min: 0 }),
-  intellectual: Object.freeze({ label: "鏅鸿偛", max: 48, min: 0 }),
-  physical: Object.freeze({ label: "浣撹偛", max: 8, min: 0 }),
-  aesthetic: Object.freeze({ label: "缇庤偛", max: 8, min: 0 }),
-  labor: Object.freeze({ label: "鍔宠偛", max: 8, min: -8 })
+  moral: Object.freeze({ label: "德育", max: 28, min: 0 }),
+  intellectual: Object.freeze({ label: "智育", max: 48, min: 0 }),
+  physical: Object.freeze({ label: "体育", max: 8, min: 0 }),
+  aesthetic: Object.freeze({ label: "美育", max: 8, min: 0 }),
+  labor: Object.freeze({ label: "劳育", max: 8, min: -8 })
 });
 
 const RULE_VERSION = Object.freeze({
@@ -14,7 +14,7 @@ const RULE_VERSION = Object.freeze({
 
 function score(value) {
   const parsed = Number(value || 0);
-  if (!Number.isFinite(parsed)) throw Object.assign(new Error("鍒嗗€煎繀椤讳负鏁板瓧"), { statusCode: 400 });
+  if (!Number.isFinite(parsed)) throw Object.assign(new Error("分值必须为数字"), { statusCode: 400 });
   return Math.round(parsed * 100) / 100;
 }
 
@@ -33,15 +33,15 @@ function calculateQualityRecord({ modules = {}, zeroRuleCodes = [] }) {
   }
   const zeroed = zeroRuleCodes.some((code) => RULE_VERSION.zeroRules.includes(code));
   const totalScore = zeroed ? 0 : score(Object.values(moduleScores).reduce((sum, value) => sum + value, 0));
-  const warnings = moduleScores.moral < 16 ? ["寰疯偛浣庝簬16鍒嗭紝闇€杩涜璇勫璇勪紭璧勬牸澶嶆牳"] : [];
+  const warnings = moduleScores.moral < 16 ? ["德育低于16分，需进行评奖评优资格复核"] : [];
   return { moduleScores, totalScore, zeroed, warnings, calculation };
 }
 
 function validateQualityItem(item, ruleVersion = RULE_VERSION) {
   const module = String(item?.module || "");
   const type = String(item?.type || "");
-  if (!ruleVersion.modules[module]) throw Object.assign(new Error("缁兼祴妯″潡鏃犳晥"), { statusCode: 400 });
-  if (!["base", "bonus", "deduction"].includes(type)) throw Object.assign(new Error("璁″垎绫诲瀷鏃犳晥"), { statusCode: 400 });
+  if (!ruleVersion.modules[module]) throw Object.assign(new Error("综测模块无效"), { statusCode: 400 });
+  if (!["base", "bonus", "deduction"].includes(type)) throw Object.assign(new Error("计分类型无效"), { statusCode: 400 });
   return {
     module,
     type,
