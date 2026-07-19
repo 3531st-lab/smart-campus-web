@@ -1,4 +1,6 @@
 const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 const data = require("./data");
 const { mysqlConfigured, autoMigrateSchema, getPool } = require("./db");
 const { getQualityRuleVersion, calculateQualityRecord, validateQualityItem } = require("./quality-rules");
@@ -15,18 +17,14 @@ const TRANSITIONS = Object.freeze({
 const CLASS_REVIEW_DUTIES = Object.freeze(["monitor", "league_secretary", "class_admin"]);
 const CLASS_REVIEW_DUTY_SET = new Set(CLASS_REVIEW_DUTIES);
 
-const MYSQL_TABLES = [
-  "CREATE TABLE IF NOT EXISTS quality_rule_versions (id VARCHAR(80) PRIMARY KEY, rules_snapshot JSON NOT NULL, created_by VARCHAR(64) NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-  "CREATE TABLE IF NOT EXISTS quality_assessment_periods (id VARCHAR(64) PRIMARY KEY, name VARCHAR(160) NOT NULL, status VARCHAR(32) NOT NULL DEFAULT 'draft', rule_version VARCHAR(80) NOT NULL, starts_at TIMESTAMP NULL, ends_at TIMESTAMP NULL, published_at TIMESTAMP NULL, publication_working_days INT UNSIGNED NULL, publication_ends_at TIMESTAMP NULL, archived_at TIMESTAMP NULL, notice TEXT NOT NULL, created_by VARCHAR(64) NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, KEY idx_quality_period_status_time (status, starts_at, ends_at))",
-  "CREATE TABLE IF NOT EXISTS quality_assessment_records (id VARCHAR(64) PRIMARY KEY, period_id VARCHAR(64) NOT NULL, student_id VARCHAR(64) NOT NULL, class_id VARCHAR(64) NOT NULL, school VARCHAR(120) NOT NULL DEFAULT '', college VARCHAR(120) NOT NULL DEFAULT '', rule_version VARCHAR(80) NOT NULL, status VARCHAR(32) NOT NULL DEFAULT 'draft', module_scores JSON NOT NULL, total_score DECIMAL(6,2) NOT NULL DEFAULT 0, calculation_snapshot JSON NOT NULL, risk_flags JSON NOT NULL, version INT UNSIGNED NOT NULL DEFAULT 1, submitted_at TIMESTAMP NULL, archived_at TIMESTAMP NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY uq_quality_record_period_student (period_id, student_id), KEY idx_quality_record_class_status (class_id, status, updated_at), KEY idx_quality_record_period_total (period_id, total_score), KEY idx_quality_record_college_status (college, status, updated_at), KEY idx_quality_record_scope_status (school, college, status, updated_at))",
-  "CREATE TABLE IF NOT EXISTS quality_assessment_items (id VARCHAR(64) PRIMARY KEY, record_id VARCHAR(64) NOT NULL, module VARCHAR(32) NOT NULL, item_type VARCHAR(32) NOT NULL, rule_code VARCHAR(80) NOT NULL, claimed_score DECIMAL(6,2) NOT NULL, evidence_required TINYINT(1) NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, KEY idx_quality_item_record (record_id, created_at))",
-  "CREATE TABLE IF NOT EXISTS quality_assessment_evidence (id VARCHAR(64) PRIMARY KEY, item_id VARCHAR(64) NOT NULL, record_id VARCHAR(64) NOT NULL, file_url VARCHAR(2048) NOT NULL, file_name VARCHAR(255) NOT NULL DEFAULT '', uploaded_by VARCHAR(64) NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY idx_quality_evidence_item (item_id, created_at), KEY idx_quality_evidence_record (record_id, created_at))",
-  "CREATE TABLE IF NOT EXISTS quality_assessment_reviews (id VARCHAR(64) PRIMARY KEY, record_id VARCHAR(64) NOT NULL, stage VARCHAR(32) NOT NULL, reviewer_id VARCHAR(64) NOT NULL, decision VARCHAR(32) NOT NULL, opinion TEXT NOT NULL, item_decisions JSON NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY idx_quality_review_record_stage (record_id, stage, created_at), KEY idx_quality_review_reviewer_time (reviewer_id, created_at))",
-  "CREATE TABLE IF NOT EXISTS quality_assessment_appeals (id VARCHAR(64) PRIMARY KEY, record_id VARCHAR(64) NOT NULL, appellant_id VARCHAR(64) NOT NULL, reason TEXT NOT NULL, evidence JSON NOT NULL, status VARCHAR(32) NOT NULL DEFAULT 'submitted', active_key VARCHAR(64) NULL, reviewer_id VARCHAR(64) NULL, opinion TEXT NULL, reviewed_at TIMESTAMP NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY uq_quality_appeal_active (record_id, active_key), KEY idx_quality_appeal_status_time (status, created_at), KEY idx_quality_appeal_reviewer_time (reviewer_id, reviewed_at))",
-  "CREATE TABLE IF NOT EXISTS quality_assessment_audits (id VARCHAR(64) PRIMARY KEY, operator_id VARCHAR(64) NOT NULL, action VARCHAR(64) NOT NULL, target_type VARCHAR(32) NOT NULL, target_id VARCHAR(64) NOT NULL, metadata JSON NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY idx_quality_audit_target_time (target_type, target_id, created_at), KEY idx_quality_audit_operator_time (operator_id, created_at), KEY idx_quality_audit_action_time (action, created_at))"
-];
-
 let initialized = false;
+
+function qualitySchemaStatements() {
+  const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
+  return schema.split(";").map((statement) => statement.trim()).filter((statement) => (
+    /^(?:CREATE TABLE IF NOT EXISTS|ALTER TABLE) quality_(?:rule_versions|assessment_)/.test(statement)
+  ));
+}
 
 async function initialize() {
   if (!mysqlConfigured || initialized) return;
@@ -35,7 +33,7 @@ async function initialize() {
     return;
   }
   const pool = getPool();
-  for (const statement of MYSQL_TABLES) await pool.query(statement);
+  for (const statement of qualitySchemaStatements()) await pool.query(statement);
   initialized = true;
 }
 

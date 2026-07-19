@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { createMemoryQualityStore, createMysqlQualityStore } = require("../server/quality-store");
 
 const users = {
@@ -352,4 +354,38 @@ test("MySQL college review scopes ordinary admins and rolls back rejected scoped
   );
   assert.equal(calls.filter((call) => call === "rollback").length, 2);
   assert.equal(calls.includes("commit"), false);
+});
+
+test("runtime initialization applies the canonical quality schema indexes", async () => {
+  const dbPath = require.resolve("../server/db");
+  const qualityStorePath = require.resolve("../server/quality-store");
+  const originalDb = require.cache[dbPath].exports;
+  const statements = [];
+  const pool = {
+    async query(sql) { statements.push(sql); },
+    async execute() { return [[]]; }
+  };
+
+  require.cache[dbPath].exports = {
+    mysqlConfigured: true,
+    autoMigrateSchema: true,
+    getPool: () => pool
+  };
+  delete require.cache[qualityStorePath];
+
+  try {
+    const runtimeStore = require("../server/quality-store");
+    await runtimeStore.listPeriods(users.operator);
+
+    const schema = fs.readFileSync(path.join(__dirname, "..", "server", "schema.sql"), "utf8");
+    const appliedSql = statements.join("\n");
+    assert.match(schema, /CREATE TABLE IF NOT EXISTS quality_rule_versions[\s\S]*KEY idx_quality_rule_created/);
+    assert.match(appliedSql, /CREATE TABLE IF NOT EXISTS quality_rule_versions[\s\S]*KEY idx_quality_rule_created/);
+    assert.match(schema, /CREATE TABLE IF NOT EXISTS quality_assessment_records[\s\S]*KEY idx_quality_record_student_updated/);
+    assert.match(appliedSql, /CREATE TABLE IF NOT EXISTS quality_assessment_records[\s\S]*KEY idx_quality_record_student_updated/);
+    assert.doesNotMatch(fs.readFileSync(qualityStorePath, "utf8"), /const MYSQL_TABLES/);
+  } finally {
+    delete require.cache[qualityStorePath];
+    require.cache[dbPath].exports = originalDb;
+  }
 });
