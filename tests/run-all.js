@@ -8,6 +8,7 @@ execFileSync(process.execPath, ["--test", path.join(__dirname, "chat-realtime.te
 execFileSync(process.execPath, ["--test", path.join(__dirname, "chat-load.test.js")], { stdio: "inherit" });
 execFileSync(process.execPath, ["--test", path.join(__dirname, "class-sync-script.test.js")], { stdio: "inherit" });
 execFileSync(process.execPath, ["--test", path.join(__dirname, "chat-frontend-contract.test.js")], { stdio: "inherit" });
+execFileSync(process.execPath, ["--test", path.join(__dirname, "quality-rules.test.js")], { stdio: "inherit" });
 
 require("./class-domain.test.js");
 require("./class-store.test.js");
