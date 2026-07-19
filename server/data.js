@@ -289,6 +289,14 @@ const chatReadCursors = [];
 const chatAppeals = [];
 const chatAuditLogs = [];
 const classSyncErrors = [];
+const qualityRuleVersions = [];
+const qualityAssessmentPeriods = [];
+const qualityAssessmentRecords = [];
+const qualityAssessmentItems = [];
+const qualityAssessmentEvidence = [];
+const qualityAssessmentReviews = [];
+const qualityAssessmentAppeals = [];
+const qualityAssessmentAudits = [];
 
 module.exports = {
   users,
@@ -313,5 +321,13 @@ module.exports = {
   chatReadCursors,
   chatAppeals,
   chatAuditLogs,
-  classSyncErrors
+  classSyncErrors,
+  qualityRuleVersions,
+  qualityAssessmentPeriods,
+  qualityAssessmentRecords,
+  qualityAssessmentItems,
+  qualityAssessmentEvidence,
+  qualityAssessmentReviews,
+  qualityAssessmentAppeals,
+  qualityAssessmentAudits
 };
