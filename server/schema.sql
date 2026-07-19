@@ -349,6 +349,9 @@ CREATE TABLE IF NOT EXISTS quality_assessment_periods (
   starts_at TIMESTAMP NULL,
   ends_at TIMESTAMP NULL,
   published_at TIMESTAMP NULL,
+  publication_working_days INT UNSIGNED NULL,
+  publication_ends_at TIMESTAMP NULL,
+  archived_at TIMESTAMP NULL,
   notice TEXT NOT NULL,
   created_by VARCHAR(64) NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -357,11 +360,17 @@ CREATE TABLE IF NOT EXISTS quality_assessment_periods (
   KEY idx_quality_period_updated (updated_at)
 );
 
+ALTER TABLE quality_assessment_periods
+  ADD COLUMN IF NOT EXISTS publication_working_days INT UNSIGNED NULL AFTER published_at,
+  ADD COLUMN IF NOT EXISTS publication_ends_at TIMESTAMP NULL AFTER publication_working_days,
+  ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP NULL AFTER publication_ends_at;
+
 CREATE TABLE IF NOT EXISTS quality_assessment_records (
   id VARCHAR(64) PRIMARY KEY,
   period_id VARCHAR(64) NOT NULL,
   student_id VARCHAR(64) NOT NULL,
   class_id VARCHAR(64) NOT NULL,
+  school VARCHAR(120) NOT NULL DEFAULT '',
   college VARCHAR(120) NOT NULL DEFAULT '',
   rule_version VARCHAR(80) NOT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'draft',
@@ -378,8 +387,13 @@ CREATE TABLE IF NOT EXISTS quality_assessment_records (
   KEY idx_quality_record_class_status (class_id, status, updated_at),
   KEY idx_quality_record_period_total (period_id, total_score),
   KEY idx_quality_record_student_updated (student_id, updated_at),
-  KEY idx_quality_record_college_status (college, status, updated_at)
+  KEY idx_quality_record_college_status (college, status, updated_at),
+  KEY idx_quality_record_scope_status (school, college, status, updated_at)
 );
+
+ALTER TABLE quality_assessment_records
+  ADD COLUMN IF NOT EXISTS school VARCHAR(120) NOT NULL DEFAULT '' AFTER class_id,
+  ADD INDEX IF NOT EXISTS idx_quality_record_scope_status (school, college, status, updated_at);
 
 CREATE TABLE IF NOT EXISTS quality_assessment_items (
   id VARCHAR(64) PRIMARY KEY,
