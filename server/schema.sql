@@ -415,11 +415,19 @@ CREATE TABLE IF NOT EXISTS quality_assessment_evidence (
   record_id VARCHAR(64) NOT NULL,
   file_url VARCHAR(2048) NOT NULL,
   file_name VARCHAR(255) NOT NULL DEFAULT '',
+  mime_type VARCHAR(120) NOT NULL DEFAULT '',
+  size_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  content_digest CHAR(64) NOT NULL DEFAULT '',
   uploaded_by VARCHAR(64) NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_quality_evidence_item (item_id, created_at),
   KEY idx_quality_evidence_record (record_id, created_at)
 );
+
+ALTER TABLE quality_assessment_evidence
+  ADD COLUMN IF NOT EXISTS mime_type VARCHAR(120) NOT NULL DEFAULT '' AFTER file_name,
+  ADD COLUMN IF NOT EXISTS size_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER mime_type,
+  ADD COLUMN IF NOT EXISTS content_digest CHAR(64) NOT NULL DEFAULT '' AFTER size_bytes;
 
 CREATE TABLE IF NOT EXISTS quality_assessment_reviews (
   id VARCHAR(64) PRIMARY KEY,

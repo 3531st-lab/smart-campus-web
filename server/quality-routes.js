@@ -1,8 +1,16 @@
 const defaultStore = require("./quality-store");
+const defaultEvidenceService = require("./quality-evidence");
 
 function routeId(pathname, prefix) {
   const match = String(pathname || "").match(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^/]+)$`));
   return match ? decodeURIComponent(match[1]) : "";
+}
+
+function evidenceUploadTarget(pathname) {
+  const match = String(pathname || "").match(/^\/api\/quality\/records\/([^/]+)\/items\/([^/]+)\/evidence$/);
+  return match
+    ? { recordId: decodeURIComponent(match[1]), itemId: decodeURIComponent(match[2]) }
+    : null;
 }
 
 function requireStudent(user) {
@@ -64,6 +72,7 @@ async function handleQualityRoute(context) {
   const user = await requireUser(req, res);
   if (!user) return true;
   const store = context.store || defaultStore;
+  const evidenceService = context.evidenceService || defaultEvidenceService;
   const routeName = `${String(route).split(" ")[0]} ${url.pathname}`;
 
   try {
@@ -99,6 +108,50 @@ async function handleQualityRoute(context) {
       requireStudent(user);
       const recordId = decodeURIComponent(url.pathname.slice("/api/quality/records/".length, -"/submit".length));
       sendJson(res, 200, { record: await store.submitRecord(recordId, user) });
+      return true;
+    }
+
+    const evidenceTarget = evidenceUploadTarget(url.pathname);
+    if (route.startsWith("POST /api/quality/records/") && evidenceTarget) {
+      requireStudent(user);
+      const body = await parseBody(req, { limitBytes: 14 * 1024 * 1024 });
+      const file = await defaultEvidenceService.bodyToBuffer(body);
+      const evidence = await evidenceService.saveEvidence({
+        recordId: evidenceTarget.recordId,
+        itemId: evidenceTarget.itemId,
+        owner: user,
+        file: { name: body.name, mimeType: file.mimeType || body.mimeType, bytes: file.bytes }
+      });
+      sendJson(res, 201, { evidence });
+      return true;
+    }
+
+    if (route.startsWith("GET /api/quality/records/") && url.pathname.endsWith("/evidence")) {
+      const recordId = decodeURIComponent(url.pathname.slice("/api/quality/records/".length, -"/evidence".length));
+      sendJson(res, 200, { evidence: await evidenceService.listEvidence(recordId, user) });
+      return true;
+    }
+
+    if (route.startsWith("GET /api/quality/evidence/")) {
+      const evidenceId = routeId(url.pathname, "/api/quality/evidence/");
+      const evidence = await evidenceService.readEvidence(evidenceId, user);
+      if (typeof context.sendEvidence === "function") {
+        context.sendEvidence(res, evidence);
+      } else {
+        sendJson(res, 200, {
+          evidence: {
+            ...defaultEvidenceService.toPublicEvidence(evidence),
+            base64: evidence.bytes.toString("base64")
+          }
+        });
+      }
+      return true;
+    }
+
+    if (route.startsWith("DELETE /api/quality/evidence/")) {
+      requireStudent(user);
+      const evidenceId = routeId(url.pathname, "/api/quality/evidence/");
+      sendJson(res, 200, { evidence: await evidenceService.deleteEvidence(evidenceId, user) });
       return true;
     }
 

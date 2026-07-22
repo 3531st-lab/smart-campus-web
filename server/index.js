@@ -282,6 +282,19 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload, null, 2));
 }
 
+function sendEvidence(res, evidence) {
+  const filename = String(evidence?.name || "evidence").replace(/[\r\n"]/g, "_");
+  const encodedName = encodeURIComponent(filename).replace(/['()]/g, escape);
+  res.writeHead(200, securityHeaders(requestContext(res), {
+    "Content-Type": String(evidence?.mimeType || "application/octet-stream"),
+    "Content-Length": String(Buffer.byteLength(evidence?.bytes || Buffer.alloc(0))),
+    "Content-Disposition": `attachment; filename="${filename}"; filename*=UTF-8''${encodedName}`,
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "private, no-store"
+  }));
+  res.end(evidence?.bytes || Buffer.alloc(0));
+}
+
 function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
@@ -1426,7 +1439,8 @@ async function handleApi(req, res) {
       requireUser,
       parseBody,
       sendJson,
-      sendError
+      sendError,
+      sendEvidence
     });
     if (handled) return;
   }

@@ -124,6 +124,23 @@ function normalizeAppeal(row) {
   };
 }
 
+function normalizeEvidence(row, includeStorageKey = false) {
+  if (!row) return null;
+  const evidence = {
+    id: String(row.id),
+    itemId: row.item_id ?? row.itemId,
+    recordId: row.record_id ?? row.recordId,
+    name: row.file_name ?? row.fileName ?? "",
+    mimeType: row.mime_type ?? row.mimeType ?? "",
+    size: Number(row.size_bytes ?? row.sizeBytes ?? 0),
+    digest: row.content_digest ?? row.contentDigest ?? "",
+    uploadedBy: row.uploaded_by ?? row.uploadedBy,
+    createdAt: row.created_at ?? row.createdAt ?? null
+  };
+  if (includeStorageKey) evidence.storageKey = row.file_url ?? row.storageKey ?? "";
+  return evidence;
+}
+
 function requireVersion(input, record) {
   if (Number(input?.version) !== Number(record.version)) {
     throw publicError("记录已被其他审核人更新，请刷新后重试", 409);
@@ -135,6 +152,7 @@ function createMemoryQualityStore(seed = {}) {
     periods: cloneValue(seed.periods || seed.qualityAssessmentPeriods || []),
     records: cloneValue(seed.records || seed.qualityAssessmentRecords || []),
     items: cloneValue(seed.items || seed.qualityAssessmentItems || []),
+    evidence: cloneValue(seed.evidence || seed.qualityAssessmentEvidence || []),
     reviews: cloneValue(seed.reviews || seed.qualityAssessmentReviews || []),
     appeals: cloneValue(seed.appeals || seed.qualityAssessmentAppeals || []),
     auditLogs: cloneValue(seed.auditLogs || seed.qualityAssessmentAudits || []),
@@ -159,6 +177,31 @@ function createMemoryQualityStore(seed = {}) {
   function recordById(recordId) {
     const record = data.records.find((entry) => String(entry.id) === String(recordId));
     if (!record) throw publicError("综测申报不存在", 404);
+    return record;
+  }
+
+  function itemById(recordId, itemId) {
+    const item = data.items.find((entry) => String(entry.id) === String(itemId) && String(entry.recordId ?? entry.record_id) === String(recordId));
+    if (!item) throw publicError("Assessment item does not belong to this record", 404);
+    return item;
+  }
+
+  function canReadEvidence(user, record) {
+    if (String(record.studentId) === String(user?.id)) return true;
+    if (classReviewAssignments(user).some((entry) => String(entry.classId ?? entry.class_id) === String(record.classId))) return true;
+    const collegeReviewer = user?.qualityRole === "college_reviewer" || user?.quality_role === "college_reviewer" || ["admin", "super_admin"].includes(user?.role);
+    if (!collegeReviewer) return false;
+    return user?.role === "super_admin" || (
+      String(user?.school || "") === String(record.school || "")
+      && String(user?.college || "") === String(record.college || "")
+    );
+  }
+
+  function requireEvidenceWriter(recordId, itemId, user) {
+    const record = recordById(recordId);
+    itemById(record.id, itemId);
+    if (String(record.studentId) !== String(user?.id)) throw publicError("Only the record owner can manage evidence", 403);
+    if (!["draft", "returned"].includes(record.status)) throw publicError("Evidence can only be changed while the record is editable", 409);
     return record;
   }
 
@@ -360,6 +403,54 @@ function createMemoryQualityStore(seed = {}) {
     return { records: scoped, total: scoped.length };
   }
 
+  async function authorizeEvidenceWrite(recordId, itemId, user) {
+    const record = requireEvidenceWriter(recordId, itemId, user);
+    const count = data.evidence.filter((entry) => String(entry.itemId ?? entry.item_id) === String(itemId)).length;
+    if (count >= 10) throw publicError("Each assessment item can keep at most ten evidence files", 409);
+    return cloneValue(record);
+  }
+
+  async function createEvidenceMetadata(input = {}, user) {
+    const record = requireEvidenceWriter(input.recordId, input.itemId, user);
+    const count = data.evidence.filter((entry) => String(entry.itemId ?? entry.item_id) === String(input.itemId)).length;
+    if (count >= 10) throw publicError("Each assessment item can keep at most ten evidence files", 409);
+    const evidence = {
+      id: String(input.id), recordId: record.id, itemId: String(input.itemId), fileName: String(input.name || ""), mimeType: String(input.mimeType || ""),
+      sizeBytes: Number(input.size || 0), contentDigest: String(input.digest || ""), storageKey: String(input.storageKey || ""), uploadedBy: String(user.id), createdAt: new Date().toISOString()
+    };
+    if (!evidence.id || !evidence.fileName || !evidence.mimeType || !evidence.storageKey) throw publicError("Evidence metadata is incomplete");
+    data.evidence.push(evidence);
+    addAuditLog(user, "evidence_uploaded", "record", record.id, { evidenceId: evidence.id, itemId: evidence.itemId });
+    return normalizeEvidence(evidence, true);
+  }
+
+  async function listEvidence(recordId, user) {
+    const record = recordById(recordId);
+    if (!canReadEvidence(user, record)) throw publicError("You do not have permission to access this evidence", 403);
+    return data.evidence
+      .filter((entry) => String(entry.recordId ?? entry.record_id) === String(record.id))
+      .sort((left, right) => String(left.createdAt ?? left.created_at ?? "").localeCompare(String(right.createdAt ?? right.created_at ?? "")))
+      .map((entry) => normalizeEvidence(entry, true));
+  }
+
+  async function getEvidenceForRead(evidenceId, user) {
+    const evidence = data.evidence.find((entry) => String(entry.id) === String(evidenceId));
+    if (!evidence) throw publicError("Evidence does not exist", 404);
+    const record = recordById(evidence.recordId ?? evidence.record_id);
+    if (!canReadEvidence(user, record)) throw publicError("You do not have permission to access this evidence", 403);
+    return normalizeEvidence(evidence, true);
+  }
+
+  async function deleteEvidence(evidenceId, user) {
+    const index = data.evidence.findIndex((entry) => String(entry.id) === String(evidenceId));
+    if (index < 0) throw publicError("Evidence does not exist", 404);
+    const evidence = data.evidence[index];
+    const record = requireEvidenceWriter(evidence.recordId ?? evidence.record_id, evidence.itemId ?? evidence.item_id, user);
+    data.evidence.splice(index, 1);
+    addAuditLog(user, "evidence_deleted", "record", record.id, { evidenceId: String(evidence.id) });
+    return normalizeEvidence(evidence, true);
+  }
+
   async function listExportRecords(filters = {}, user) {
     requireOperator(user);
     const records = data.records
@@ -520,6 +611,11 @@ function createMemoryQualityStore(seed = {}) {
     listClassQueue,
     reviewClassRecord,
     listCollegeQueue,
+    authorizeEvidenceWrite,
+    createEvidenceMetadata,
+    listEvidence,
+    getEvidenceForRead,
+    deleteEvidence,
     listExportRecords,
     reviewCollegeRecord,
     createPeriod,
@@ -768,6 +864,85 @@ function createMysqlQualityStore(pool) {
     return { records, total: records.length };
   }
 
+  async function evidenceWriteTarget(recordId, itemId, user, connection) {
+    const { record } = await findRecordWithPeriodForUpdate(recordId, connection);
+    if (String(record.studentId) !== String(user?.id)) throw publicError("Only the record owner can manage evidence", 403);
+    if (!["draft", "returned"].includes(record.status)) throw publicError("Evidence can only be changed while the record is editable", 409);
+    const [items] = await connection.execute("SELECT id FROM quality_assessment_items WHERE id = ? AND record_id = ? FOR UPDATE", [itemId, record.id]);
+    if (!items.length) throw publicError("Assessment item does not belong to this record", 404);
+    return record;
+  }
+
+  async function canReadEvidence(user, record, connection = pool) {
+    if (String(record.studentId) === String(user?.id)) return true;
+    const assignments = await listClassReviewAssignments(user, connection);
+    if (assignments.some((entry) => String(entry.class_id ?? entry.classId) === String(record.classId))) return true;
+    const collegeReviewer = user?.qualityRole === "college_reviewer" || user?.quality_role === "college_reviewer" || ["admin", "super_admin"].includes(user?.role);
+    if (!collegeReviewer) return false;
+    return user?.role === "super_admin" || (
+      String(user?.school || "") === String(record.school || "")
+      && String(user?.college || "") === String(record.college || "")
+    );
+  }
+
+  async function authorizeEvidenceWrite(recordId, itemId, user) {
+    return transaction(async (connection) => {
+      const record = await evidenceWriteTarget(recordId, itemId, user, connection);
+      const [countRows] = await connection.execute("SELECT COUNT(*) AS total FROM quality_assessment_evidence WHERE item_id = ? FOR UPDATE", [itemId]);
+      if (Number(countRows[0]?.total || 0) >= 10) throw publicError("Each assessment item can keep at most ten evidence files", 409);
+      return record;
+    });
+  }
+
+  async function createEvidenceMetadata(input = {}, user) {
+    return transaction(async (connection) => {
+      const record = await evidenceWriteTarget(input.recordId, input.itemId, user, connection);
+      const [countRows] = await connection.execute("SELECT COUNT(*) AS total FROM quality_assessment_evidence WHERE item_id = ? FOR UPDATE", [input.itemId]);
+      if (Number(countRows[0]?.total || 0) >= 10) throw publicError("Each assessment item can keep at most ten evidence files", 409);
+      const evidence = {
+        id: String(input.id), recordId: record.id, itemId: String(input.itemId), name: String(input.name || ""), mimeType: String(input.mimeType || ""),
+        size: Number(input.size || 0), digest: String(input.digest || ""), storageKey: String(input.storageKey || ""), uploadedBy: String(user.id)
+      };
+      if (!evidence.id || !evidence.name || !evidence.mimeType || !evidence.storageKey) throw publicError("Evidence metadata is incomplete");
+      await connection.execute(
+        "INSERT INTO quality_assessment_evidence (id, item_id, record_id, file_url, file_name, mime_type, size_bytes, content_digest, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [evidence.id, evidence.itemId, evidence.recordId, evidence.storageKey, evidence.name, evidence.mimeType, evidence.size, evidence.digest, evidence.uploadedBy]
+      );
+      await addAuditLog(connection, user, "evidence_uploaded", "record", record.id, { evidenceId: evidence.id, itemId: evidence.itemId });
+      return evidence;
+    });
+  }
+
+  async function listEvidence(recordId, user) {
+    const record = await findRecord(recordId);
+    if (!await canReadEvidence(user, record)) throw publicError("You do not have permission to access this evidence", 403);
+    const [rows] = await pool.execute("SELECT * FROM quality_assessment_evidence WHERE record_id = ? ORDER BY created_at ASC", [record.id]);
+    return rows.map((row) => normalizeEvidence(row, true));
+  }
+
+  async function getEvidenceForRead(evidenceId, user) {
+    const [rows] = await pool.execute("SELECT * FROM quality_assessment_evidence WHERE id = ?", [evidenceId]);
+    const evidence = rows[0];
+    if (!evidence) throw publicError("Evidence does not exist", 404);
+    const record = await findRecord(evidence.record_id);
+    if (!await canReadEvidence(user, record)) throw publicError("You do not have permission to access this evidence", 403);
+    return normalizeEvidence(evidence, true);
+  }
+
+  async function deleteEvidence(evidenceId, user) {
+    return transaction(async (connection) => {
+      const [discovered] = await connection.execute("SELECT * FROM quality_assessment_evidence WHERE id = ?", [evidenceId]);
+      if (!discovered[0]) throw publicError("Evidence does not exist", 404);
+      const record = await evidenceWriteTarget(discovered[0].record_id, discovered[0].item_id, user, connection);
+      const [rows] = await connection.execute("SELECT * FROM quality_assessment_evidence WHERE id = ? FOR UPDATE", [evidenceId]);
+      const evidence = rows[0];
+      if (!evidence) throw publicError("Evidence was changed by another request", 409);
+      await connection.execute("DELETE FROM quality_assessment_evidence WHERE id = ?", [evidenceId]);
+      await addAuditLog(connection, user, "evidence_deleted", "record", record.id, { evidenceId: String(evidenceId) });
+      return normalizeEvidence(evidence, true);
+    });
+  }
+
   async function listExportRecords(filters = {}, user) {
     requireOperator(user);
     const clauses = [];
@@ -919,7 +1094,7 @@ function createMysqlQualityStore(pool) {
     return rows.map((row) => ({ id: String(row.id), operatorId: row.operator_id, action: row.action, targetType: row.target_type, targetId: row.target_id, metadata: jsonValue(row.metadata, null), createdAt: row.created_at }));
   }
 
-  return { createPeriod, listPeriods, getOrCreateRecord, saveDraft, submitRecord, listClassQueue, reviewClassRecord, listCollegeQueue, listExportRecords, reviewCollegeRecord, publishPeriod, archivePeriod, createAppeal, reviewAppeal, listAuditLogs };
+  return { createPeriod, listPeriods, getOrCreateRecord, saveDraft, submitRecord, listClassQueue, reviewClassRecord, listCollegeQueue, listExportRecords, authorizeEvidenceWrite, createEvidenceMetadata, listEvidence, getEvidenceForRead, deleteEvidence, reviewCollegeRecord, publishPeriod, archivePeriod, createAppeal, reviewAppeal, listAuditLogs };
 }
 
 const memoryStore = createMemoryQualityStore({
@@ -929,6 +1104,7 @@ const memoryStore = createMemoryQualityStore({
   reviews: data.qualityAssessmentReviews,
   appeals: data.qualityAssessmentAppeals,
   auditLogs: data.qualityAssessmentAudits,
+  evidence: data.qualityAssessmentEvidence,
   classAssignments: data.classAssignments
 });
 
@@ -955,6 +1131,11 @@ module.exports = {
   reviewClassRecord: (...args) => callStore("reviewClassRecord", args),
   listCollegeQueue: (...args) => callStore("listCollegeQueue", args),
   listExportRecords: (...args) => callStore("listExportRecords", args),
+  authorizeEvidenceWrite: (...args) => callStore("authorizeEvidenceWrite", args),
+  createEvidenceMetadata: (...args) => callStore("createEvidenceMetadata", args),
+  listEvidence: (...args) => callStore("listEvidence", args),
+  getEvidenceForRead: (...args) => callStore("getEvidenceForRead", args),
+  deleteEvidence: (...args) => callStore("deleteEvidence", args),
   reviewCollegeRecord: (...args) => callStore("reviewCollegeRecord", args),
   publishPeriod: (...args) => callStore("publishPeriod", args),
   archivePeriod: (...args) => callStore("archivePeriod", args),
