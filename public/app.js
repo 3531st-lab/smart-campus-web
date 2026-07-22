@@ -38,6 +38,7 @@ let notificationBadgeTimer = null;
 const YOUTH_THEME_STORAGE_KEY = "smart_campus_youth_theme_v1";
 const YOUTH_MUSIC_STORAGE_KEY = "smart_campus_youth_music_v1";
 let youthAudio = null;
+let qualityAssessmentCleanup = null;
 
 const youthThemes = {
   spring: {
@@ -1665,6 +1666,13 @@ async function api(path, options = {}) {
     }
   });
   const contentType = response.headers.get("content-type") || "";
+  if (options.responseType === "blob") {
+    if (!response.ok) {
+      const payload = contentType.includes("application/json") ? await response.json() : {};
+      throw new Error(payload.error || "请求失败");
+    }
+    return response.blob();
+  }
   if (!contentType.includes("application/json")) {
     throw new Error(response.ok ? "服务返回格式异常，请稍后重试" : "服务暂不可用，请稍后重试");
   }
@@ -3055,6 +3063,10 @@ function bindMotionEffects() {
 
 async function renderShell() {
   stopLoginParticles();
+  if (qualityAssessmentCleanup && state.route !== "tools/quality-score") {
+    qualityAssessmentCleanup();
+    qualityAssessmentCleanup = null;
+  }
   if (window.__campusChatCleanup) {
     window.__campusChatCleanup();
     window.__campusChatCleanup = null;
@@ -7469,6 +7481,21 @@ const routes = {
       }
     };
   }
+};
+
+routes["tools/quality-score"] = async () => {
+  if (!window.QualityAssessmentPage?.render) {
+    throw new Error("综测核算资源加载失败，请刷新页面后重试");
+  }
+  return {
+    title: "综测核算",
+    subtitle: "德智体美劳五模块服务端核算与审核工作台",
+    content: window.QualityAssessmentPage.render({ user: state.user, route: state.route }),
+    afterRender() {
+      qualityAssessmentCleanup?.();
+      qualityAssessmentCleanup = window.QualityAssessmentPage.bind({ api, toast, navigate: setRoute, user: state.user });
+    }
+  };
 };
 
 renderShell();
