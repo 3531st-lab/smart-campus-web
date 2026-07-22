@@ -27,6 +27,7 @@ const reservationStore = require("./reservation-store");
 const notificationStore = require("./notification-store");
 const paymentStore = require("./payment-store");
 const { handleChatRoute } = require("./chat-routes");
+const { handleQualityRoute } = require("./quality-routes");
 const chatRealtime = require("./chat-realtime");
 const integrations = require("./integrations");
 const campusNewsService = require("./campus-news");
@@ -1414,6 +1415,20 @@ async function handleApi(req, res) {
     void integrations.captureAnalytics("password_login", user);
     sendJson(res, 200, { token, user: publicUser(user) });
     return;
+  }
+
+  if (url.pathname.startsWith("/api/quality") || url.pathname.startsWith("/api/admin/quality")) {
+    const handled = await handleQualityRoute({
+      req,
+      res,
+      url,
+      route,
+      requireUser,
+      parseBody,
+      sendJson,
+      sendError
+    });
+    if (handled) return;
   }
 
   if (url.pathname.startsWith("/api/admin/chat")) {

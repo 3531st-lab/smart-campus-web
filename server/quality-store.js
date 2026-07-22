@@ -360,6 +360,20 @@ function createMemoryQualityStore(seed = {}) {
     return { records: scoped, total: scoped.length };
   }
 
+  async function listExportRecords(filters = {}, user) {
+    requireOperator(user);
+    const records = data.records
+      .filter((record) => !filters.periodId || String(record.periodId) === String(filters.periodId))
+      .filter((record) => !filters.classId || String(record.classId) === String(filters.classId))
+      .filter((record) => user.role === "super_admin" || (
+        String(record.school || "") === String(user.school || "")
+        && String(record.college || "") === String(user.college || "")
+      ))
+      .sort((left, right) => String(left.classId || "").localeCompare(String(right.classId || "")) || String(left.studentId).localeCompare(String(right.studentId)))
+      .map(cloneValue);
+    return { records, total: records.length };
+  }
+
   async function reviewCollegeRecord(recordId, input = {}, reviewer) {
     const record = recordById(recordId);
     requireCollegeReviewer(reviewer, record);
@@ -506,6 +520,7 @@ function createMemoryQualityStore(seed = {}) {
     listClassQueue,
     reviewClassRecord,
     listCollegeQueue,
+    listExportRecords,
     reviewCollegeRecord,
     createPeriod,
     listPeriods,
@@ -753,6 +768,24 @@ function createMysqlQualityStore(pool) {
     return { records, total: records.length };
   }
 
+  async function listExportRecords(filters = {}, user) {
+    requireOperator(user);
+    const clauses = [];
+    const params = [];
+    if (user.role !== "super_admin") {
+      clauses.push("school = ? AND college = ?");
+      params.push(user.school || "", user.college || "");
+    }
+    if (filters.periodId) { clauses.push("period_id = ?"); params.push(filters.periodId); }
+    if (filters.classId) { clauses.push("class_id = ?"); params.push(filters.classId); }
+    const [rows] = await pool.execute(
+      `SELECT * FROM quality_assessment_records${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY class_id ASC, student_id ASC`,
+      params
+    );
+    const records = rows.map(normalizeRecord);
+    return { records, total: records.length };
+  }
+
   async function reviewCollegeRecord(recordId, input = {}, reviewer) {
     const nextStatus = input.decision === "approved" ? "pending_publication" : input.decision === "returned" ? "returned" : "";
     if (!nextStatus) throw publicError("审核决定无效");
@@ -886,7 +919,7 @@ function createMysqlQualityStore(pool) {
     return rows.map((row) => ({ id: String(row.id), operatorId: row.operator_id, action: row.action, targetType: row.target_type, targetId: row.target_id, metadata: jsonValue(row.metadata, null), createdAt: row.created_at }));
   }
 
-  return { createPeriod, listPeriods, getOrCreateRecord, saveDraft, submitRecord, listClassQueue, reviewClassRecord, listCollegeQueue, reviewCollegeRecord, publishPeriod, archivePeriod, createAppeal, reviewAppeal, listAuditLogs };
+  return { createPeriod, listPeriods, getOrCreateRecord, saveDraft, submitRecord, listClassQueue, reviewClassRecord, listCollegeQueue, listExportRecords, reviewCollegeRecord, publishPeriod, archivePeriod, createAppeal, reviewAppeal, listAuditLogs };
 }
 
 const memoryStore = createMemoryQualityStore({
@@ -921,6 +954,7 @@ module.exports = {
   listClassQueue: (...args) => callStore("listClassQueue", args),
   reviewClassRecord: (...args) => callStore("reviewClassRecord", args),
   listCollegeQueue: (...args) => callStore("listCollegeQueue", args),
+  listExportRecords: (...args) => callStore("listExportRecords", args),
   reviewCollegeRecord: (...args) => callStore("reviewCollegeRecord", args),
   publishPeriod: (...args) => callStore("publishPeriod", args),
   archivePeriod: (...args) => callStore("archivePeriod", args),
