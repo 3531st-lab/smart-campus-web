@@ -13,6 +13,8 @@ execFileSync(process.execPath, ["--test", path.join(__dirname, "quality-store.te
 execFileSync(process.execPath, ["--test", path.join(__dirname, "quality-api.test.js")], { stdio: "inherit" });
 execFileSync(process.execPath, ["--test", path.join(__dirname, "quality-evidence.test.js")], { stdio: "inherit" });
 execFileSync(process.execPath, ["--test", path.join(__dirname, "quality-frontend-contract.test.js")], { stdio: "inherit" });
+execFileSync(process.execPath, ["--test", path.join(__dirname, "quality-export.test.js")], { stdio: "inherit" });
+execFileSync(process.execPath, ["--test", path.join(__dirname, "quality-workflow.test.js")], { stdio: "inherit" });
 
 require("./class-domain.test.js");
 require("./class-store.test.js");

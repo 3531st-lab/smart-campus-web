@@ -16,6 +16,7 @@ const users = {
 function fixtures() {
   return createMemoryQualityStore({
     periods: [{ id: "quality-api-period", name: "Quality API period", status: "open", ruleVersion: "2025-economics-management" }],
+    students: [users.student, users.peer, users.monitor].map((user, index) => ({ ...user, name: `学生${index + 1}`, studentNo: `DEMO00${index + 1}`, className: "示例班" })),
     classAssignments: [{ id: "quality-api-monitor-duty", classId: "quality-api-class", userId: users.monitor.id, duty: "monitor", active: true }]
   });
 }
@@ -109,4 +110,19 @@ test("college review and global period operations are separated by role", async 
   const created = await callRoute(store, "POST /api/admin/quality/periods", users.superAdmin, { name: "Global period", status: "open" });
   assert.equal(created.status, 201);
   assert.equal(created.payload.period.name, "Global period");
+});
+
+test("administrator export creates a private workbook and leaves an audit record", async () => {
+  const store = fixtures();
+  const record = await store.getOrCreateRecord("quality-api-period", users.student);
+  await store.saveDraft(record.id, {
+    version: record.version,
+    items: [{ module: "moral", type: "base", ruleCode: "MORAL_BASE", claimedScore: 18 }]
+  }, users.student);
+  const exported = await callRoute(store, "GET /api/admin/quality/export?periodId=quality-api-period", users.admin);
+  assert.equal(exported.status, 200);
+  assert.match(exported.payload.filename, /\.xlsx$/);
+  assert.ok(exported.payload.fileBase64.length > 100);
+  const audit = await store.listAuditLogs({ action: "quality_export_generated" }, users.superAdmin);
+  assert.equal(audit[0].action, "quality_export_generated");
 });

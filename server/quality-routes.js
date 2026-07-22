@@ -1,5 +1,9 @@
+const fs = require("node:fs");
+const path = require("node:path");
 const defaultStore = require("./quality-store");
 const defaultEvidenceService = require("./quality-evidence");
+const { buildQualityWorkbook, EXPORT_MIME_TYPE } = require("./quality-export");
+const QUALITY_TEMPLATE_PATH = path.join(__dirname, "templates", "quality-assessment-blank.xlsx");
 
 function routeId(pathname, prefix) {
   const match = String(pathname || "").match(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^/]+)$`));
@@ -229,6 +233,38 @@ async function handleQualityRoute(context) {
         classId: url.searchParams.get("classId") || ""
       }, user);
       sendJson(res, 200, payload);
+      return true;
+    }
+
+    if (routeName === "GET /api/admin/quality/export") {
+      requireOperator(user);
+      const filters = {
+        periodId: url.searchParams.get("periodId") || "",
+        classId: url.searchParams.get("classId") || ""
+      };
+      const payload = await store.listExportRecords(filters, user);
+      const periods = await store.listPeriods(user);
+      const period = periods.find((entry) => String(entry.id) === String(filters.periodId)) || { name: "综合素质测评导出" };
+      const workbook = buildQualityWorkbook({ period, students: payload.students, records: payload.records });
+      await store.auditExport({ ...filters, total: payload.total }, user);
+      const safeName = String(period.name || "综合素质测评").replace(/[\\/:*?\"<>|]/g, "-");
+      sendJson(res, 200, {
+        filename: `${safeName}-综测导出.xlsx`,
+        mimeType: EXPORT_MIME_TYPE,
+        fileBase64: workbook.toString("base64"),
+        total: payload.total
+      });
+      return true;
+    }
+
+    if (routeName === "GET /api/admin/quality/template") {
+      requireOperator(user);
+      if (!fs.existsSync(QUALITY_TEMPLATE_PATH)) throw Object.assign(new Error("综测导入模板暂不可用"), { statusCode: 503 });
+      sendJson(res, 200, {
+        filename: "综合素质测评空白模板.xlsx",
+        mimeType: EXPORT_MIME_TYPE,
+        fileBase64: fs.readFileSync(QUALITY_TEMPLATE_PATH).toString("base64")
+      });
       return true;
     }
 

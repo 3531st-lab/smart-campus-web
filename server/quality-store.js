@@ -149,6 +149,7 @@ function requireVersion(input, record) {
 
 function createMemoryQualityStore(seed = {}) {
   const data = {
+    students: cloneValue(seed.students || []),
     periods: cloneValue(seed.periods || seed.qualityAssessmentPeriods || []),
     records: cloneValue(seed.records || seed.qualityAssessmentRecords || []),
     items: cloneValue(seed.items || seed.qualityAssessmentItems || []),
@@ -203,6 +204,16 @@ function createMemoryQualityStore(seed = {}) {
     if (String(record.studentId) !== String(user?.id)) throw publicError("Only the record owner can manage evidence", 403);
     if (!["draft", "returned"].includes(record.status)) throw publicError("Evidence can only be changed while the record is editable", 409);
     return record;
+  }
+
+  function requireRequiredEvidence(recordId) {
+    const requiredItemIds = data.items
+      .filter((item) => String(item.recordId ?? item.record_id) === String(recordId) && item.evidenceRequired)
+      .map((item) => String(item.id));
+    const missing = requiredItemIds.filter((itemId) => !data.evidence.some((entry) => String(entry.itemId ?? entry.item_id) === itemId));
+    if (missing.length) {
+      throw publicError("加分或扣分项目尚未上传证明材料，不能提交审核", 409);
+    }
   }
 
   function addAuditLog(operator, action, targetType, targetId, metadata = null) {
@@ -347,6 +358,7 @@ function createMemoryQualityStore(seed = {}) {
     requireOpenPeriod(period);
     if (String(record.studentId) !== String(user.id)) throw publicError("无权提交该综测申报", 403);
     if (!TRANSITIONS[record.status]?.includes("class_review")) throw publicError("当前状态不能提交", 409);
+    requireRequiredEvidence(record.id);
     transition(record, "class_review");
     record.submittedAt = new Date().toISOString();
     record.updatedAt = record.submittedAt;
@@ -462,7 +474,24 @@ function createMemoryQualityStore(seed = {}) {
       ))
       .sort((left, right) => String(left.classId || "").localeCompare(String(right.classId || "")) || String(left.studentId).localeCompare(String(right.studentId)))
       .map(cloneValue);
-    return { records, total: records.length };
+    const students = records.map((record) => {
+      const student = data.students.find((entry) => String(entry.id) === String(record.studentId)) || {};
+      return {
+        id: String(record.studentId),
+        name: String(student.name || record.studentName || "未命名学生"),
+        studentNo: String(student.studentNo || student.student_no || record.studentNo || ""),
+        className: String(student.className || student.class_name || record.className || record.classId || "未分班")
+      };
+    });
+    return { records, students, total: records.length };
+  }
+
+  async function auditExport(filters = {}, user) {
+    requireOperator(user);
+    addAuditLog(user, "quality_export_generated", "period", String(filters.periodId || "all"), {
+      classId: String(filters.classId || ""),
+      total: Number(filters.total || 0)
+    });
   }
 
   async function reviewCollegeRecord(recordId, input = {}, reviewer) {
@@ -617,6 +646,7 @@ function createMemoryQualityStore(seed = {}) {
     getEvidenceForRead,
     deleteEvidence,
     listExportRecords,
+    auditExport,
     reviewCollegeRecord,
     createPeriod,
     listPeriods,
@@ -807,6 +837,17 @@ function createMysqlQualityStore(pool) {
       requireOpenPeriod(period);
       if (String(record.studentId) !== String(user.id)) throw publicError("无权提交该综测申报", 403);
       if (!TRANSITIONS[record.status]?.includes("class_review")) throw publicError("当前状态不能提交", 409);
+      const [requiredItems] = await connection.execute(
+        "SELECT id FROM quality_assessment_items WHERE record_id = ? AND evidence_required = 1 FOR UPDATE",
+        [record.id]
+      );
+      for (const item of requiredItems) {
+        const [evidence] = await connection.execute(
+          "SELECT id FROM quality_assessment_evidence WHERE item_id = ? LIMIT 1",
+          [item.id]
+        );
+        if (!evidence.length) throw publicError("加分或扣分项目尚未上传证明材料，不能提交审核", 409);
+      }
       const submittedAt = new Date().toISOString();
       const [updated] = await connection.execute(
         "UPDATE quality_assessment_records SET status = 'class_review', submitted_at = ?, version = version + 1 WHERE id = ? AND version = ?",
@@ -948,17 +989,40 @@ function createMysqlQualityStore(pool) {
     const clauses = [];
     const params = [];
     if (user.role !== "super_admin") {
-      clauses.push("school = ? AND college = ?");
+      clauses.push("records.school = ? AND records.college = ?");
       params.push(user.school || "", user.college || "");
     }
-    if (filters.periodId) { clauses.push("period_id = ?"); params.push(filters.periodId); }
-    if (filters.classId) { clauses.push("class_id = ?"); params.push(filters.classId); }
+    if (filters.periodId) { clauses.push("records.period_id = ?"); params.push(filters.periodId); }
+    if (filters.classId) { clauses.push("records.class_id = ?"); params.push(filters.classId); }
     const [rows] = await pool.execute(
-      `SELECT * FROM quality_assessment_records${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY class_id ASC, student_id ASC`,
+      `SELECT records.*, students.name AS student_name, students.student_no, students.class_name
+       FROM quality_assessment_records records
+       LEFT JOIN students ON students.id = records.student_id
+       ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}
+       ORDER BY records.class_id ASC, records.student_id ASC`,
       params
     );
     const records = rows.map(normalizeRecord);
-    return { records, total: records.length };
+    const students = rows.map((row) => ({
+      id: String(row.student_id),
+      name: String(row.student_name || "未命名学生"),
+      studentNo: String(row.student_no || ""),
+      className: String(row.class_name || row.class_id || "未分班")
+    }));
+    return { records, students, total: records.length };
+  }
+
+  async function auditExport(filters = {}, user) {
+    requireOperator(user);
+    const connection = await pool.getConnection();
+    try {
+      await addAuditLog(connection, user, "quality_export_generated", "period", String(filters.periodId || "all"), {
+        classId: String(filters.classId || ""),
+        total: Number(filters.total || 0)
+      });
+    } finally {
+      connection.release();
+    }
   }
 
   async function reviewCollegeRecord(recordId, input = {}, reviewer) {
@@ -1094,10 +1158,11 @@ function createMysqlQualityStore(pool) {
     return rows.map((row) => ({ id: String(row.id), operatorId: row.operator_id, action: row.action, targetType: row.target_type, targetId: row.target_id, metadata: jsonValue(row.metadata, null), createdAt: row.created_at }));
   }
 
-  return { createPeriod, listPeriods, getOrCreateRecord, saveDraft, submitRecord, listClassQueue, reviewClassRecord, listCollegeQueue, listExportRecords, authorizeEvidenceWrite, createEvidenceMetadata, listEvidence, getEvidenceForRead, deleteEvidence, reviewCollegeRecord, publishPeriod, archivePeriod, createAppeal, reviewAppeal, listAuditLogs };
+  return { createPeriod, listPeriods, getOrCreateRecord, saveDraft, submitRecord, listClassQueue, reviewClassRecord, listCollegeQueue, listExportRecords, auditExport, authorizeEvidenceWrite, createEvidenceMetadata, listEvidence, getEvidenceForRead, deleteEvidence, reviewCollegeRecord, publishPeriod, archivePeriod, createAppeal, reviewAppeal, listAuditLogs };
 }
 
 const memoryStore = createMemoryQualityStore({
+  students: data.users,
   periods: data.qualityAssessmentPeriods,
   records: data.qualityAssessmentRecords,
   items: data.qualityAssessmentItems,
@@ -1131,6 +1196,7 @@ module.exports = {
   reviewClassRecord: (...args) => callStore("reviewClassRecord", args),
   listCollegeQueue: (...args) => callStore("listCollegeQueue", args),
   listExportRecords: (...args) => callStore("listExportRecords", args),
+  auditExport: (...args) => callStore("auditExport", args),
   authorizeEvidenceWrite: (...args) => callStore("authorizeEvidenceWrite", args),
   createEvidenceMetadata: (...args) => callStore("createEvidenceMetadata", args),
   listEvidence: (...args) => callStore("listEvidence", args),
