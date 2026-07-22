@@ -10,6 +10,7 @@ const users = {
 };
 users.collegeReviewer = { id: "college-reviewer-1", name: "辅导员甲", role: "teacher", qualityRole: "college_reviewer", school: "泰州学院", college: "经济与管理学院" };
 users.operator = { id: "admin-1", name: "管理员甲", role: "admin", school: "泰州学院", college: "经济与管理学院" };
+users.superAdmin = { id: "super-admin-1", name: "超级管理员甲", role: "super_admin" };
 
 test("student saves and submits a versioned record", async () => {
   const store = createMemoryQualityStore({
@@ -42,10 +43,11 @@ test("monitor and league secretary review their class but not themselves", async
   const queue = await store.listClassQueue({ periodId: "period-1" }, users.monitor);
   assert.ok(queue.records.some((record) => record.studentId === users.student.id));
   await assert.rejects(
-    store.reviewClassRecord("monitor-record", { decision: "approved", itemDecisions: [] }, users.monitor),
+    store.reviewClassRecord("monitor-record", { version: 2, decision: "approved", itemDecisions: [] }, users.monitor),
     /不能审核自己的申报/
   );
   const reviewed = await store.reviewClassRecord("student-record", {
+    version: 2,
     decision: "approved",
     opinion: "材料与申报项目一致",
     itemDecisions: []
@@ -99,6 +101,7 @@ test("college reviewer advances only their college records to publication", asyn
   const queue = await store.listCollegeQueue({ periodId: "period-1" }, users.collegeReviewer);
   assert.equal(queue.records.length, 1);
   const reviewed = await store.reviewCollegeRecord("college-record", {
+    version: 3,
     decision: "approved",
     opinion: "学院复核通过",
     itemDecisions: []
@@ -107,7 +110,6 @@ test("college reviewer advances only their college records to publication", asyn
 });
 
 test("ordinary administrators list and review only records in both their school and college", async () => {
-  const superAdmin = { id: "super-admin-1", role: "super_admin" };
   const store = createMemoryQualityStore({
     records: [
       { id: "same-scope", periodId: "period-1", studentId: "student-a", classId: "class-a", school: "泰州学院", college: "经济与管理学院", status: "college_review", version: 3 },
@@ -127,16 +129,134 @@ test("ordinary administrators list and review only records in both their school 
     (error) => error.statusCode === 403
   );
 
-  const unscoped = await store.listCollegeQueue({ periodId: "period-1" }, superAdmin);
+  const unscoped = await store.listCollegeQueue({ periodId: "period-1" }, users.superAdmin);
   assert.deepEqual(new Set(unscoped.records.map((record) => record.id)), new Set(["same-scope", "other-school", "other-college"]));
+});
+
+test("only super administrators mutate global periods and ordinary appeal reviewers stay in school and college scope", async () => {
+  const store = createMemoryQualityStore({
+    periods: [
+      { id: "period-open", name: "全局周期", status: "open", ruleVersion: "2025-economics-management" },
+      { id: "period-archivable", name: "待归档周期", status: "published", ruleVersion: "2025-economics-management", publicationEndsAt: "2026-06-04T00:00:00.000Z" },
+      { id: "period-appeals", name: "申诉周期", status: "published", ruleVersion: "2025-economics-management", publicationEndsAt: "2099-01-01T00:00:00.000Z" }
+    ],
+    records: [
+      { id: "ready-record", periodId: "period-open", studentId: "student-ready", classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "pending_publication", version: 4 },
+      { id: "archivable-record", periodId: "period-archivable", studentId: "student-archivable", classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "published", version: 5 },
+      { id: "same-scope-record", periodId: "period-appeals", studentId: "student-same", classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "published", version: 5 },
+      { id: "other-scope-record", periodId: "period-appeals", studentId: "student-other", classId: "class-2", school: "常州大学", college: "计算机学院", status: "published", version: 5 }
+    ],
+    appeals: [
+      { id: "same-scope-appeal", recordId: "same-scope-record", appellantId: "student-same", reason: "同范围申诉", evidence: [{ secret: "same" }], status: "submitted", activeKey: "same-scope-record" },
+      { id: "other-scope-appeal", recordId: "other-scope-record", appellantId: "student-other", reason: "跨范围申诉", evidence: [{ secret: "other" }], status: "submitted", activeKey: "other-scope-record" }
+    ]
+  });
+
+  await assert.rejects(
+    store.createPeriod({ id: "ordinary-period", name: "越权周期" }, users.operator),
+    (error) => error.statusCode === 403
+  );
+  await assert.rejects(
+    store.publishPeriod("period-open", { workingDays: 3 }, users.operator),
+    (error) => error.statusCode === 403
+  );
+  await assert.rejects(
+    store.archivePeriod("period-archivable", users.operator),
+    (error) => error.statusCode === 403
+  );
+
+  const created = await store.createPeriod({ id: "super-period", name: "超级管理员周期" }, users.superAdmin);
+  assert.equal(created.id, "super-period");
+  const published = await store.publishPeriod("period-open", { workingDays: 3 }, users.superAdmin);
+  assert.equal(published.status, "published");
+  const archived = await store.archivePeriod("period-archivable", users.superAdmin);
+  assert.equal(archived.status, "archived");
+
+  const reviewed = await store.reviewAppeal("same-scope-appeal", { decision: "rejected", opinion: "范围内处理" }, users.operator);
+  assert.equal(reviewed.status, "rejected");
+  await assert.rejects(
+    store.reviewAppeal("other-scope-appeal", { decision: "rejected", opinion: "越权处理" }, users.operator),
+    (error) => error.statusCode === 403
+  );
+  const crossScope = await store.reviewAppeal("other-scope-appeal", { decision: "approved", opinion: "全局处理" }, users.superAdmin);
+  assert.equal(crossScope.status, "approved");
+});
+
+test("publication rejects every incomplete workflow state", async () => {
+  for (const status of ["draft", "returned", "class_review", "college_review"]) {
+    const store = createMemoryQualityStore({
+      periods: [{ id: `period-${status}`, name: "完整性检查", status: "open", ruleVersion: "2025-economics-management" }],
+      records: [
+        { id: `ready-${status}`, periodId: `period-${status}`, studentId: `ready-${status}`, classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "pending_publication", version: 4 },
+        { id: `incomplete-${status}`, periodId: `period-${status}`, studentId: `incomplete-${status}`, classId: "class-1", school: "泰州学院", college: "经济与管理学院", status, version: 2 }
+      ]
+    });
+
+    await assert.rejects(
+      store.publishPeriod(`period-${status}`, { workingDays: 3 }, users.superAdmin),
+      (error) => error.statusCode === 409 && /未完成的申报/.test(error.message)
+    );
+    assert.equal(store.data.periods[0].status, "open");
+    assert.equal(store.data.records[0].status, "pending_publication");
+  }
+});
+
+test("class and college decisions reject missing or stale record versions", async () => {
+  const store = createMemoryQualityStore({
+    classAssignments: [{ id: "assignment-monitor", classId: "class-1", userId: users.monitor.id, duty: "monitor", active: true }],
+    records: [
+      { id: "class-versioned", periodId: "period-1", studentId: users.student.id, classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "class_review", version: 7 },
+      { id: "college-versioned", periodId: "period-1", studentId: users.student.id, classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "college_review", version: 9 }
+    ]
+  });
+
+  for (const version of [undefined, 6]) {
+    await assert.rejects(
+      store.reviewClassRecord("class-versioned", { version, decision: "approved", itemDecisions: [] }, users.monitor),
+      (error) => error.statusCode === 409 && /记录已被其他审核人更新/.test(error.message)
+    );
+  }
+  for (const version of [undefined, 8]) {
+    await assert.rejects(
+      store.reviewCollegeRecord("college-versioned", { version, decision: "approved", itemDecisions: [] }, users.collegeReviewer),
+      (error) => error.statusCode === 409 && /记录已被其他审核人更新/.test(error.message)
+    );
+  }
+  assert.equal(store.data.records.find((record) => record.id === "class-versioned").status, "class_review");
+  assert.equal(store.data.records.find((record) => record.id === "college-versioned").status, "college_review");
+  assert.equal(store.data.reviews.length, 0);
+});
+
+test("ordinary audit listing exposes only record events in its school and college", async () => {
+  const store = createMemoryQualityStore({
+    records: [
+      { id: "audit-same", periodId: "period-1", studentId: "student-a", classId: "class-a", school: "泰州学院", college: "经济与管理学院", status: "published", version: 5 },
+      { id: "audit-other-school", periodId: "period-1", studentId: "student-b", classId: "class-b", school: "常州大学", college: "经济与管理学院", status: "published", version: 5 },
+      { id: "audit-other-college", periodId: "period-1", studentId: "student-c", classId: "class-c", school: "泰州学院", college: "计算机学院", status: "published", version: 5 }
+    ],
+    auditLogs: [
+      { id: "audit-1", operatorId: "operator", action: "record_submitted", targetType: "record", targetId: "audit-same", createdAt: "2026-07-19T03:00:00.000Z" },
+      { id: "audit-2", operatorId: "operator", action: "record_submitted", targetType: "record", targetId: "audit-other-school", createdAt: "2026-07-19T02:00:00.000Z" },
+      { id: "audit-3", operatorId: "operator", action: "record_submitted", targetType: "record", targetId: "audit-other-college", createdAt: "2026-07-19T01:00:00.000Z" },
+      { id: "audit-4", operatorId: "operator", action: "period_published", targetType: "period", targetId: "period-1", createdAt: "2026-07-19T04:00:00.000Z" }
+    ]
+  });
+
+  const scoped = await store.listAuditLogs({}, users.operator);
+  assert.deepEqual(scoped.map((entry) => entry.id), ["audit-1"]);
+  const global = await store.listAuditLogs({}, users.superAdmin);
+  assert.deepEqual(global.map((entry) => entry.id), ["audit-4", "audit-1", "audit-2", "audit-3"]);
 });
 
 test("publication, appeals, stale writes, and audits preserve workflow accountability", async () => {
   const store = createMemoryQualityStore({
-    periods: [{ id: "period-1", name: "2025-2026 学年", status: "open", ruleVersion: "2025-economics-management" }],
+    periods: [
+      { id: "period-1", name: "2025-2026 学年", status: "open", ruleVersion: "2025-economics-management" },
+      { id: "period-draft", name: "草稿周期", status: "open", ruleVersion: "2025-economics-management" }
+    ],
     records: [
-      { id: "published-record", periodId: "period-1", studentId: users.student.id, classId: "class-1", college: "经济与管理学院", status: "pending_publication", version: 4 },
-      { id: "stale-record", periodId: "period-1", studentId: users.student.id, classId: "class-1", college: "经济与管理学院", status: "draft", version: 2 }
+      { id: "published-record", periodId: "period-1", studentId: users.student.id, classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "pending_publication", version: 4 },
+      { id: "stale-record", periodId: "period-draft", studentId: users.student.id, classId: "class-1", school: "泰州学院", college: "经济与管理学院", status: "draft", version: 2 }
     ]
   });
 
@@ -144,7 +264,7 @@ test("publication, appeals, stale writes, and audits preserve workflow accountab
     store.saveDraft("stale-record", { version: 1, items: [] }, users.student),
     (error) => error.statusCode === 409 && /记录已被其他审核人更新/.test(error.message)
   );
-  const period = await store.publishPeriod("period-1", { notice: "公示开始", workingDays: 3 }, users.operator);
+  const period = await store.publishPeriod("period-1", { notice: "公示开始", workingDays: 3 }, users.superAdmin);
   assert.equal(period.status, "published");
   assert.equal(store.data.records.find((record) => record.id === "published-record").status, "published");
 
@@ -167,10 +287,10 @@ test("publication enforces three working days and closes record creation and ear
   });
 
   await assert.rejects(
-    store.publishPeriod("period-lifecycle", { notice: "公示期过短", workingDays: 2 }, users.operator),
+    store.publishPeriod("period-lifecycle", { notice: "公示期过短", workingDays: 2 }, users.superAdmin),
     (error) => error.statusCode === 400 && /3个工作日/.test(error.message)
   );
-  const published = await store.publishPeriod("period-lifecycle", { notice: "公示开始", workingDays: 3 }, users.operator);
+  const published = await store.publishPeriod("period-lifecycle", { notice: "公示开始", workingDays: 3 }, users.superAdmin);
   assert.equal(published.publicationWorkingDays, 3);
   assert.ok(new Date(published.publicationEndsAt) > new Date(published.publishedAt));
 
@@ -180,7 +300,7 @@ test("publication enforces three working days and closes record creation and ear
     (error) => error.statusCode === 409 && /不在申报期/.test(error.message)
   );
   await assert.rejects(
-    store.archivePeriod("period-lifecycle", users.operator),
+    store.archivePeriod("period-lifecycle", users.superAdmin),
     (error) => error.statusCode === 409 && /公示期尚未结束/.test(error.message)
   );
 });
@@ -202,11 +322,11 @@ test("archive waits for resolved appeals after the publication window", async ()
   });
 
   await assert.rejects(
-    store.archivePeriod("period-expired", users.operator),
+    store.archivePeriod("period-expired", users.superAdmin),
     (error) => error.statusCode === 409 && /待处理申诉/.test(error.message)
   );
   await store.reviewAppeal("appeal-active", { decision: "rejected", opinion: "维持原结论" }, users.operator);
-  const archived = await store.archivePeriod("period-expired", users.operator);
+  const archived = await store.archivePeriod("period-expired", users.superAdmin);
   assert.equal(archived.status, "archived");
   assert.equal(store.data.records[0].status, "archived");
   await assert.rejects(
@@ -217,9 +337,10 @@ test("archive waits for resolved appeals after the publication window", async ()
 
 test("memory audits use the same target types and creation events as MySQL", async () => {
   const store = createMemoryQualityStore();
-  const period = await store.createPeriod({ id: "period-audit", name: "审计测试", status: "open" }, users.operator);
+  const period = await store.createPeriod({ id: "period-audit", name: "审计测试", status: "open" }, users.superAdmin);
   const record = await store.getOrCreateRecord(period.id, users.student);
-  const auditLogs = await store.listAuditLogs({}, users.operator);
+  const auditLogs = await store.listAuditLogs({}, users.superAdmin);
+  const scopedAuditLogs = await store.listAuditLogs({}, users.operator);
 
   assert.ok(auditLogs.some((entry) => (
     entry.action === "period_created" && entry.targetType === "period" && entry.targetId === period.id
@@ -227,6 +348,8 @@ test("memory audits use the same target types and creation events as MySQL", asy
   assert.ok(auditLogs.some((entry) => (
     entry.action === "record_created" && entry.targetType === "record" && entry.targetId === record.id
   )));
+  assert.equal(scopedAuditLogs.some((entry) => entry.targetType === "period"), false);
+  assert.ok(scopedAuditLogs.some((entry) => entry.targetId === record.id));
 });
 
 test("memory store snapshots isolate nested records, review items, and appeal evidence", async () => {
@@ -253,7 +376,7 @@ test("memory store snapshots isolate nested records, review items, and appeal ev
   assert.equal(freshQueue.records[0].calculationSnapshot.modules.moral.base, 18);
   assert.equal(freshQueue.records[0].riskFlags[0].code, "none");
 
-  await store.reviewClassRecord("record-snapshot", { decision: "approved", itemDecisions: reviewItems }, users.monitor);
+  await store.reviewClassRecord("record-snapshot", { version: 2, decision: "approved", itemDecisions: reviewItems }, users.monitor);
   reviewItems[0].evidence.url = "https://example.test/mutated";
   assert.equal(store.data.reviews[0].itemDecisions[0].evidence.url, "https://example.test/one");
 
@@ -266,8 +389,10 @@ test("memory store snapshots isolate nested records, review items, and appeal ev
   });
   const appeal = await appealStore.createAppeal({ recordId: "record-appeal", reason: "申请复核", evidence: appealEvidence }, users.student);
   appealEvidence[0].metadata.source = "mutated-input";
-  appeal.evidence[0].metadata.source = "mutated-output";
+  assert.equal(Object.hasOwn(appeal, "evidence"), false);
   assert.equal(appealStore.data.appeals[0].evidence[0].metadata.source, "original");
+  const reviewedAppeal = await appealStore.reviewAppeal(appeal.id, { decision: "rejected", opinion: "维持原结论" }, users.operator);
+  assert.equal(Object.hasOwn(reviewedAppeal, "evidence"), false);
 });
 
 test("MySQL draft writes lock records and use optimistic version updates", async () => {
@@ -279,14 +404,14 @@ test("MySQL draft writes lock records and use optimistic version updates", async
     release() { calls.push("release"); },
     async execute(sql, params = []) {
       calls.push({ sql, params });
-      if (/FROM quality_assessment_records WHERE id = \? FOR UPDATE/.test(sql)) {
+      if (/FROM quality_assessment_records WHERE id = \?(?: FOR UPDATE)?/.test(sql)) {
         return [[{
           id: "mysql-record", period_id: "period-1", student_id: users.student.id, class_id: "class-1",
           school: "泰州学院", college: "经济与管理学院", rule_version: "2025-economics-management", status: "draft",
           module_scores: "{}", total_score: 0, calculation_snapshot: "{}", risk_flags: "[]", version: 3
         }]];
       }
-      if (/FROM quality_assessment_periods WHERE id = \? FOR UPDATE/.test(sql)) {
+      if (/FROM quality_assessment_periods WHERE id = \?(?: FOR UPDATE)?/.test(sql)) {
         return [[{ id: "period-1", status: "open", rule_version: "2025-economics-management", notice: "" }]];
       }
       if (/DELETE FROM quality_assessment_items/.test(sql) || /INSERT INTO quality_assessment_items/.test(sql) || /INSERT INTO quality_assessment_audits/.test(sql)) return [{ affectedRows: 1 }];
@@ -304,6 +429,9 @@ test("MySQL draft writes lock records and use optimistic version updates", async
   const sql = calls.filter((call) => typeof call === "object").map((call) => call.sql).join("\n");
   assert.match(sql, /quality_assessment_records WHERE id = \? FOR UPDATE/);
   assert.match(sql, /version = version \+ 1/);
+  const statements = calls.filter((call) => typeof call === "object").map((call) => call.sql);
+  assert.ok(statements.findIndex((statement) => /quality_assessment_periods WHERE id = \? FOR UPDATE/.test(statement))
+    < statements.findIndex((statement) => /quality_assessment_records WHERE id = \? FOR UPDATE/.test(statement)));
   assert.equal(calls.includes("commit"), true);
 });
 
@@ -316,7 +444,7 @@ test("MySQL college review scopes ordinary admins and rolls back rejected scoped
     release() { calls.push("release"); },
     async execute(sql, params = []) {
       calls.push({ sql, params });
-      if (/FROM quality_assessment_records WHERE id = \? FOR UPDATE/.test(sql)) {
+      if (/FROM quality_assessment_records WHERE id = \?(?: FOR UPDATE)?/.test(sql)) {
         const id = params[0];
         return [[{
           id, period_id: "period-1", student_id: users.student.id, class_id: "class-1",
@@ -324,6 +452,9 @@ test("MySQL college review scopes ordinary admins and rolls back rejected scoped
           rule_version: "2025-economics-management", status: "college_review", module_scores: "{}",
           total_score: 0, calculation_snapshot: "{}", risk_flags: "[]", version: 3
         }]];
+      }
+      if (/FROM quality_assessment_periods WHERE id = \?(?: FOR UPDATE)?/.test(sql)) {
+        return [[{ id: "period-1", status: "open", rule_version: "2025-economics-management", notice: "" }]];
       }
       if (/UPDATE quality_assessment_records SET status/.test(sql)) return [{ affectedRows: 0 }];
       throw new Error(`Unexpected SQL: ${sql}`);
@@ -345,15 +476,94 @@ test("MySQL college review scopes ordinary admins and rolls back rejected scoped
   assert.deepEqual(queueCall.params, [users.operator.school, users.operator.college, "period-1"]);
 
   await assert.rejects(
-    store.reviewCollegeRecord("other-school", { decision: "approved", itemDecisions: [] }, users.operator),
+    store.reviewCollegeRecord("other-school", { version: 3, decision: "approved", itemDecisions: [] }, users.operator),
     (error) => error.statusCode === 403
   );
   await assert.rejects(
-    store.reviewCollegeRecord("same-scope", { decision: "approved", itemDecisions: [] }, users.operator),
+    store.reviewCollegeRecord("same-scope", { version: 2, decision: "approved", itemDecisions: [] }, users.operator),
     (error) => error.statusCode === 409 && /记录已被其他审核人更新/.test(error.message)
   );
-  assert.equal(calls.filter((call) => call === "rollback").length, 2);
+  await assert.rejects(
+    store.reviewCollegeRecord("same-scope", { version: 3, decision: "approved", itemDecisions: [] }, users.operator),
+    (error) => error.statusCode === 409 && /记录已被其他审核人更新/.test(error.message)
+  );
+  assert.equal(calls.filter((call) => call === "rollback").length, 3);
   assert.equal(calls.includes("commit"), false);
+});
+
+test("MySQL period and appeal operations enforce scope, workflow completeness, and audit visibility", async () => {
+  const calls = [];
+  const connection = {
+    async beginTransaction() { calls.push("begin"); },
+    async commit() { calls.push("commit"); },
+    async rollback() { calls.push("rollback"); },
+    release() { calls.push("release"); },
+    async execute(sql, params = []) {
+      calls.push({ sql, params });
+      if (/FROM quality_assessment_periods WHERE id = \? FOR UPDATE/.test(sql)) {
+        return [[{ id: "period-1", status: "open", rule_version: "2025-economics-management", notice: "" }]];
+      }
+      if (/FROM quality_assessment_records WHERE period_id = \? FOR UPDATE/.test(sql)) {
+        return [[{
+          id: "unfinished-record", period_id: "period-1", student_id: "student-1", class_id: "class-1",
+          school: "泰州学院", college: "经济与管理学院", status: "draft", version: 2,
+          module_scores: "{}", total_score: 0, calculation_snapshot: "{}", risk_flags: "[]"
+        }]];
+      }
+      if (/SELECT \* FROM quality_assessment_appeals WHERE id = \?$/.test(sql)) {
+        return [[{ id: "appeal-1", record_id: "other-record", appellant_id: "student-2", status: "submitted" }]];
+      }
+      if (/FROM quality_assessment_records WHERE id = \?(?: FOR UPDATE)?/.test(sql)) {
+        return [[{
+          id: "other-record", period_id: "period-1", student_id: "student-2", class_id: "class-2",
+          school: "常州大学", college: "计算机学院", status: "published", version: 4,
+          module_scores: "{}", total_score: 0, calculation_snapshot: "{}", risk_flags: "[]"
+        }]];
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    }
+  };
+  const pool = {
+    async getConnection() { return connection; },
+    async execute(sql, params = []) { calls.push({ sql, params }); return [[]]; }
+  };
+  const store = createMysqlQualityStore(pool);
+
+  await assert.rejects(store.createPeriod({ name: "普通管理员周期" }, users.operator), (error) => error.statusCode === 403);
+  await assert.rejects(store.publishPeriod("period-1", { workingDays: 3 }, users.operator), (error) => error.statusCode === 403);
+  await assert.rejects(store.archivePeriod("period-1", users.operator), (error) => error.statusCode === 403);
+  await assert.rejects(
+    store.publishPeriod("period-1", { workingDays: 3 }, users.superAdmin),
+    (error) => error.statusCode === 409 && /未完成的申报/.test(error.message)
+  );
+  await assert.rejects(
+    store.reviewAppeal("appeal-1", { decision: "rejected", opinion: "越权" }, users.operator),
+    (error) => error.statusCode === 403
+  );
+
+  await store.listAuditLogs({ targetId: "same-record" }, users.operator);
+  const auditCall = calls.find((call) => typeof call === "object" && /quality_assessment_audits INNER JOIN quality_assessment_records/.test(call.sql));
+  assert.match(auditCall.sql, /target_type = 'record'/);
+  assert.deepEqual(auditCall.params, [users.operator.school, users.operator.college, "same-record"]);
+});
+
+test("MySQL deadlocks become a recoverable conflict", async () => {
+  const connection = {
+    async beginTransaction() {},
+    async commit() {},
+    async rollback() {},
+    release() {},
+    async execute() {
+      const error = new Error("deadlock");
+      error.code = "ER_LOCK_DEADLOCK";
+      throw error;
+    }
+  };
+  const store = createMysqlQualityStore({ async getConnection() { return connection; } });
+  await assert.rejects(
+    store.saveDraft("record-1", { version: 1, items: [] }, users.student),
+    (error) => error.statusCode === 409 && /系统繁忙/.test(error.message)
+  );
 });
 
 test("runtime initialization applies the canonical quality schema indexes", async () => {

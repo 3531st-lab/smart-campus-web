@@ -107,6 +107,29 @@ function normalizePeriod(row) {
   };
 }
 
+function normalizeAppeal(row) {
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    recordId: row.record_id ?? row.recordId,
+    appellantId: row.appellant_id ?? row.appellantId,
+    reason: row.reason,
+    status: row.status,
+    activeKey: row.active_key ?? row.activeKey ?? null,
+    reviewerId: row.reviewer_id ?? row.reviewerId ?? null,
+    opinion: row.opinion ?? null,
+    reviewedAt: row.reviewed_at ?? row.reviewedAt ?? null,
+    createdAt: row.created_at ?? row.createdAt ?? null,
+    updatedAt: row.updated_at ?? row.updatedAt ?? null
+  };
+}
+
+function requireVersion(input, record) {
+  if (Number(input?.version) !== Number(record.version)) {
+    throw publicError("记录已被其他审核人更新，请刷新后重试", 409);
+  }
+}
+
 function createMemoryQualityStore(seed = {}) {
   const data = {
     periods: cloneValue(seed.periods || seed.qualityAssessmentPeriods || []),
@@ -120,6 +143,17 @@ function createMemoryQualityStore(seed = {}) {
 
   function requireOperator(user) {
     if (!["admin", "super_admin"].includes(user?.role)) throw publicError("仅管理员可以执行该操作", 403);
+  }
+
+  function requireGlobalPeriodOperator(user) {
+    if (user?.role !== "super_admin") throw publicError("仅超级管理员可以管理全局综测周期", 403);
+  }
+
+  function requireRecordScope(user, record, message = "无权处理其他学校或学院的记录") {
+    if (user?.role !== "super_admin" && (
+      String(user?.school || "") !== String(record.school || "")
+      || String(user?.college || "") !== String(record.college || "")
+    )) throw publicError(message, 403);
   }
 
   function recordById(recordId) {
@@ -207,7 +241,7 @@ function createMemoryQualityStore(seed = {}) {
   }
 
   async function createPeriod(input = {}, operator) {
-    requireOperator(operator);
+    requireGlobalPeriodOperator(operator);
     const period = {
       id: String(input.id || `quality-period-${crypto.randomUUID()}`),
       name: String(input.name || "综测周期").trim(),
@@ -293,6 +327,7 @@ function createMemoryQualityStore(seed = {}) {
     const record = recordById(recordId);
     requireClassReviewer(reviewer, record);
     if (String(record.studentId) === String(reviewer.id)) throw publicError("不能审核自己的申报", 403);
+    requireVersion(input, record);
     const nextStatus = input.decision === "approved" ? "college_review" : input.decision === "returned" ? "returned" : "";
     if (!nextStatus) throw publicError("审核决定无效");
     transition(record, nextStatus);
@@ -329,6 +364,7 @@ function createMemoryQualityStore(seed = {}) {
     const record = recordById(recordId);
     requireCollegeReviewer(reviewer, record);
     if (String(record.studentId) === String(reviewer.id)) throw publicError("不能审核自己的申报", 403);
+    requireVersion(input, record);
     const nextStatus = input.decision === "approved" ? "pending_publication" : input.decision === "returned" ? "returned" : "";
     if (!nextStatus) throw publicError("审核决定无效");
     transition(record, nextStatus);
@@ -347,12 +383,15 @@ function createMemoryQualityStore(seed = {}) {
   }
 
   async function publishPeriod(periodId, input = {}, operator) {
-    requireOperator(operator);
+    requireGlobalPeriodOperator(operator);
     const workingDays = publicationWorkingDays(input);
     const period = data.periods.find((entry) => String(entry.id) === String(periodId));
     if (!period) throw publicError("综测周期不存在", 404);
     if (period.status !== "open") throw publicError("当前周期不能开始公示", 409);
-    const records = data.records.filter((record) => String(record.periodId) === String(periodId) && record.status === "pending_publication");
+    const records = data.records.filter((record) => String(record.periodId) === String(periodId));
+    if (!records.length || records.some((record) => record.status !== "pending_publication")) {
+      throw publicError("周期内仍有未完成的申报，不能开始公示", 409);
+    }
     const publishedAt = new Date();
     const publicationEndsAt = addWorkingDays(publishedAt, workingDays);
     for (const record of records) {
@@ -371,7 +410,7 @@ function createMemoryQualityStore(seed = {}) {
   }
 
   async function archivePeriod(periodId, operator) {
-    requireOperator(operator);
+    requireGlobalPeriodOperator(operator);
     const period = data.periods.find((entry) => String(entry.id) === String(periodId));
     if (!period) throw publicError("综测周期不存在", 404);
     requirePublicationEnded(period);
@@ -421,13 +460,15 @@ function createMemoryQualityStore(seed = {}) {
     if (!appeal.reason) throw publicError("申诉理由不能为空");
     data.appeals.push(appeal);
     addAuditLog(user, "appeal_created", "record", record.id, { appealId: appeal.id });
-    return cloneValue(appeal);
+    return cloneValue(normalizeAppeal(appeal));
   }
 
   async function reviewAppeal(appealId, input = {}, reviewer) {
     requireOperator(reviewer);
     const appeal = data.appeals.find((entry) => String(entry.id) === String(appealId));
     if (!appeal) throw publicError("申诉不存在", 404);
+    const record = recordById(appeal.recordId);
+    requireRecordScope(reviewer, record, "无权处理其他学校或学院的申诉");
     if (!["submitted", "reviewing"].includes(appeal.status)) throw publicError("申诉已处理", 409);
     if (!["approved", "rejected"].includes(input.decision)) throw publicError("申诉决定无效");
     appeal.status = input.decision;
@@ -437,12 +478,20 @@ function createMemoryQualityStore(seed = {}) {
     appeal.reviewedAt = new Date().toISOString();
     appeal.updatedAt = appeal.reviewedAt;
     addAuditLog(reviewer, "appeal_reviewed", "record", appeal.recordId, { appealId: appeal.id, decision: input.decision });
-    return cloneValue(appeal);
+    return cloneValue(normalizeAppeal(appeal));
   }
 
   async function listAuditLogs(filters = {}, user) {
     requireOperator(user);
     return data.auditLogs
+      .filter((entry) => {
+        if (user.role === "super_admin") return true;
+        if (entry.targetType !== "record") return false;
+        const record = data.records.find((candidate) => String(candidate.id) === String(entry.targetId));
+        return record
+          && String(record.school || "") === String(user.school || "")
+          && String(record.college || "") === String(user.college || "");
+      })
       .filter((entry) => !filters.targetId || String(entry.targetId) === String(filters.targetId))
       .filter((entry) => !filters.action || entry.action === filters.action)
       .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
@@ -471,6 +520,17 @@ function createMemoryQualityStore(seed = {}) {
 function createMysqlQualityStore(pool) {
   function requireOperator(user) {
     if (!["admin", "super_admin"].includes(user?.role)) throw publicError("仅管理员可以执行该操作", 403);
+  }
+
+  function requireGlobalPeriodOperator(user) {
+    if (user?.role !== "super_admin") throw publicError("仅超级管理员可以管理全局综测周期", 403);
+  }
+
+  function requireRecordScope(user, record, message = "无权处理其他学校或学院的记录") {
+    if (user?.role !== "super_admin" && (
+      String(user?.school || "") !== String(record.school || "")
+      || String(user?.college || "") !== String(record.college || "")
+    )) throw publicError(message, 403);
   }
 
   async function listClassReviewAssignments(reviewer, connection = pool, classId = null, forUpdate = false) {
@@ -509,6 +569,9 @@ function createMysqlQualityStore(pool) {
       return result;
     } catch (error) {
       await connection.rollback();
+      if (["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"].includes(error?.code)) {
+        throw publicError("系统繁忙，请刷新后重试", 409);
+      }
       throw error;
     } finally {
       connection.release();
@@ -529,6 +592,16 @@ function createMysqlQualityStore(pool) {
     return period;
   }
 
+  async function findRecordWithPeriodForUpdate(recordId, connection) {
+    const discoveredRecord = await findRecord(recordId, connection);
+    const period = await findPeriod(discoveredRecord.periodId, connection, true);
+    const record = await findRecord(recordId, connection, true);
+    if (String(record.periodId) !== String(period.id)) {
+      throw publicError("综测申报所属周期已变更，请刷新后重试", 409);
+    }
+    return { record, period };
+  }
+
   async function addAuditLog(connection, operator, action, targetType, targetId, metadata = null) {
     await connection.execute(
       "INSERT INTO quality_assessment_audits (id, operator_id, action, target_type, target_id, metadata) VALUES (?, ?, ?, ?, ?, ?)",
@@ -537,7 +610,7 @@ function createMysqlQualityStore(pool) {
   }
 
   async function createPeriod(input = {}, operator) {
-    requireOperator(operator);
+    requireGlobalPeriodOperator(operator);
     const period = {
       id: String(input.id || `quality-period-${crypto.randomUUID()}`), name: String(input.name || "综测周期").trim(),
       status: input.status === "open" ? "open" : "draft", ruleVersion: String(input.ruleVersion || getQualityRuleVersion().id),
@@ -588,8 +661,7 @@ function createMysqlQualityStore(pool) {
 
   async function saveDraft(recordId, input = {}, user) {
     return transaction(async (connection) => {
-      const record = await findRecord(recordId, connection, true);
-      const period = await findPeriod(record.periodId, connection, true);
+      const { record, period } = await findRecordWithPeriodForUpdate(recordId, connection);
       requireOpenPeriod(period);
       if (String(record.studentId) !== String(user.id)) throw publicError("无权修改该综测申报", 403);
       if (!["draft", "returned"].includes(record.status)) throw publicError("当前状态不能保存草稿", 409);
@@ -618,24 +690,9 @@ function createMysqlQualityStore(pool) {
     });
   }
 
-  async function transitionRecord(recordId, expectedStatus, nextStatus, operator, action, extra = {}) {
-    return transaction(async (connection) => {
-      const record = await findRecord(recordId, connection, true);
-      if (record.status !== expectedStatus || !TRANSITIONS[record.status].includes(nextStatus)) throw publicError("当前状态不允许该操作", 409);
-      const [updated] = await connection.execute(
-        "UPDATE quality_assessment_records SET status = ?, submitted_at = COALESCE(?, submitted_at), archived_at = COALESCE(?, archived_at), version = version + 1 WHERE id = ? AND version = ?",
-        [nextStatus, extra.submittedAt || null, extra.archivedAt || null, record.id, record.version]
-      );
-      if (!updated.affectedRows) throw publicError("记录已被其他审核人更新，请刷新后重试", 409);
-      await addAuditLog(connection, operator, action, "record", record.id, extra.metadata || null);
-      return { ...record, status: nextStatus, version: record.version + 1, submittedAt: extra.submittedAt || record.submittedAt, archivedAt: extra.archivedAt || record.archivedAt };
-    });
-  }
-
   async function submitRecord(recordId, user) {
     return transaction(async (connection) => {
-      const record = await findRecord(recordId, connection, true);
-      const period = await findPeriod(record.periodId, connection, true);
+      const { record, period } = await findRecordWithPeriodForUpdate(recordId, connection);
       requireOpenPeriod(period);
       if (String(record.studentId) !== String(user.id)) throw publicError("无权提交该综测申报", 403);
       if (!TRANSITIONS[record.status]?.includes("class_review")) throw publicError("当前状态不能提交", 409);
@@ -667,9 +724,10 @@ function createMysqlQualityStore(pool) {
     const nextStatus = input.decision === "approved" ? "college_review" : input.decision === "returned" ? "returned" : "";
     if (!nextStatus) throw publicError("审核决定无效");
     return transaction(async (connection) => {
-      const record = await findRecord(recordId, connection, true);
+      const { record } = await findRecordWithPeriodForUpdate(recordId, connection);
       await requireClassReviewer(reviewer, record, connection, true);
       if (String(record.studentId) === String(reviewer.id)) throw publicError("不能审核自己的申报", 403);
+      requireVersion(input, record);
       if (!TRANSITIONS[record.status]?.includes(nextStatus)) throw publicError("当前状态不允许该操作", 409);
       const [updated] = await connection.execute("UPDATE quality_assessment_records SET status = ?, version = version + 1 WHERE id = ? AND version = ?", [nextStatus, record.id, record.version]);
       if (!updated.affectedRows) throw publicError("记录已被其他审核人更新，请刷新后重试", 409);
@@ -699,9 +757,10 @@ function createMysqlQualityStore(pool) {
     const nextStatus = input.decision === "approved" ? "pending_publication" : input.decision === "returned" ? "returned" : "";
     if (!nextStatus) throw publicError("审核决定无效");
     return transaction(async (connection) => {
-      const record = await findRecord(recordId, connection, true);
+      const { record } = await findRecordWithPeriodForUpdate(recordId, connection);
       requireCollegeReviewer(reviewer, record);
       if (String(record.studentId) === String(reviewer.id)) throw publicError("不能审核自己的申报", 403);
+      requireVersion(input, record);
       if (!TRANSITIONS[record.status]?.includes(nextStatus)) throw publicError("当前状态不允许该操作", 409);
       const [updated] = await connection.execute("UPDATE quality_assessment_records SET status = ?, version = version + 1 WHERE id = ? AND version = ?", [nextStatus, record.id, record.version]);
       if (!updated.affectedRows) throw publicError("记录已被其他审核人更新，请刷新后重试", 409);
@@ -712,25 +771,29 @@ function createMysqlQualityStore(pool) {
   }
 
   async function publishPeriod(periodId, input = {}, operator) {
-    requireOperator(operator);
+    requireGlobalPeriodOperator(operator);
     const workingDays = publicationWorkingDays(input);
     return transaction(async (connection) => {
       const period = await findPeriod(periodId, connection, true);
       if (period.status !== "open") throw publicError("当前周期不能开始公示", 409);
-      const [rows] = await connection.execute("SELECT * FROM quality_assessment_records WHERE period_id = ? AND status = 'pending_publication' FOR UPDATE", [periodId]);
+      const [rows] = await connection.execute("SELECT * FROM quality_assessment_records WHERE period_id = ? FOR UPDATE", [periodId]);
+      const records = rows.map(normalizeRecord);
+      if (!records.length || records.some((record) => record.status !== "pending_publication")) {
+        throw publicError("周期内仍有未完成的申报，不能开始公示", 409);
+      }
       const publishedAt = new Date();
       const publicationEndsAt = addWorkingDays(publishedAt, workingDays);
-      for (const raw of rows) {
-        const record = normalizeRecord(raw);
+      for (const record of records) {
         const [updated] = await connection.execute("UPDATE quality_assessment_records SET status = 'published', version = version + 1 WHERE id = ? AND version = ?", [record.id, record.version]);
         if (!updated.affectedRows) throw publicError("记录已被其他审核人更新，请刷新后重试", 409);
         await addAuditLog(connection, operator, "period_published", "record", record.id, { periodId, notice: String(input.notice || "") });
       }
-      await connection.execute(
+      const [updatedPeriod] = await connection.execute(
         "UPDATE quality_assessment_periods SET status = 'published', notice = ?, published_at = ?, publication_working_days = ?, publication_ends_at = ? WHERE id = ? AND status = 'open'",
         [String(input.notice || period.notice || ""), publishedAt, workingDays, publicationEndsAt, periodId]
       );
-      await addAuditLog(connection, operator, "period_published", "period", periodId, { publishedCount: rows.length });
+      if (!updatedPeriod.affectedRows) throw publicError("综测周期已被其他管理员更新，请刷新后重试", 409);
+      await addAuditLog(connection, operator, "period_published", "period", periodId, { publishedCount: records.length });
       return {
         ...period,
         status: "published",
@@ -738,13 +801,13 @@ function createMysqlQualityStore(pool) {
         publishedAt: publishedAt.toISOString(),
         publicationWorkingDays: workingDays,
         publicationEndsAt: publicationEndsAt.toISOString(),
-        publishedCount: rows.length
+        publishedCount: records.length
       };
     });
   }
 
   async function archivePeriod(periodId, operator) {
-    requireOperator(operator);
+    requireGlobalPeriodOperator(operator);
     return transaction(async (connection) => {
       const period = await findPeriod(periodId, connection, true);
       requirePublicationEnded(period);
@@ -773,9 +836,8 @@ function createMysqlQualityStore(pool) {
 
   async function createAppeal(input = {}, user) {
     return transaction(async (connection) => {
-      const record = await findRecord(input.recordId, connection, true);
+      const { record, period } = await findRecordWithPeriodForUpdate(input.recordId, connection);
       if (String(record.studentId) !== String(user.id)) throw publicError("无权发起该申诉", 403);
-      const period = await findPeriod(record.periodId, connection, true);
       if (record.status !== "published" || period.status !== "published" || !period.publicationEndsAt || new Date(period.publicationEndsAt) < new Date()) {
         throw publicError("当前状态不能发起申诉", 409);
       }
@@ -785,7 +847,7 @@ function createMysqlQualityStore(pool) {
       if (!appeal.reason) throw publicError("申诉理由不能为空");
       await connection.execute("INSERT INTO quality_assessment_appeals (id, record_id, appellant_id, reason, evidence, status, active_key) VALUES (?, ?, ?, ?, ?, ?, ?)", [appeal.id, appeal.recordId, appeal.appellantId, appeal.reason, JSON.stringify(appeal.evidence), appeal.status, appeal.activeKey]);
       await addAuditLog(connection, user, "appeal_created", "record", record.id, { appealId: appeal.id });
-      return appeal;
+      return normalizeAppeal(appeal);
     });
   }
 
@@ -793,13 +855,18 @@ function createMysqlQualityStore(pool) {
     requireOperator(reviewer);
     if (!["approved", "rejected"].includes(input.decision)) throw publicError("申诉决定无效");
     return transaction(async (connection) => {
+      const [discoveredRows] = await connection.execute("SELECT * FROM quality_assessment_appeals WHERE id = ?", [appealId]);
+      const discoveredAppeal = discoveredRows[0];
+      if (!discoveredAppeal) throw publicError("申诉不存在", 404);
+      const { record } = await findRecordWithPeriodForUpdate(discoveredAppeal.record_id, connection);
+      requireRecordScope(reviewer, record, "无权处理其他学校或学院的申诉");
       const [rows] = await connection.execute("SELECT * FROM quality_assessment_appeals WHERE id = ? FOR UPDATE", [appealId]);
       const appeal = rows[0];
-      if (!appeal) throw publicError("申诉不存在", 404);
+      if (!appeal || String(appeal.record_id) !== String(record.id)) throw publicError("申诉已被其他管理员更新，请刷新后重试", 409);
       if (!["submitted", "reviewing"].includes(appeal.status)) throw publicError("申诉已处理", 409);
       await connection.execute("UPDATE quality_assessment_appeals SET status = ?, reviewer_id = ?, opinion = ?, active_key = NULL, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?", [input.decision, reviewer.id, String(input.opinion || ""), appealId]);
       await addAuditLog(connection, reviewer, "appeal_reviewed", "record", appeal.record_id, { appealId, decision: input.decision });
-      return { id: String(appeal.id), recordId: appeal.record_id, appellantId: appeal.appellant_id, reason: appeal.reason, status: input.decision, reviewerId: String(reviewer.id), opinion: String(input.opinion || ""), activeKey: null };
+      return normalizeAppeal({ ...appeal, status: input.decision, reviewer_id: String(reviewer.id), opinion: String(input.opinion || ""), active_key: null });
     });
   }
 
@@ -807,9 +874,15 @@ function createMysqlQualityStore(pool) {
     requireOperator(user);
     const clauses = [];
     const params = [];
+    let from = "quality_assessment_audits";
+    if (user.role !== "super_admin") {
+      from += " INNER JOIN quality_assessment_records ON quality_assessment_audits.target_type = 'record' AND quality_assessment_records.id = quality_assessment_audits.target_id";
+      clauses.push("quality_assessment_records.school = ? AND quality_assessment_records.college = ?");
+      params.push(user.school || "", user.college || "");
+    }
     if (filters.targetId) { clauses.push("target_id = ?"); params.push(filters.targetId); }
     if (filters.action) { clauses.push("action = ?"); params.push(filters.action); }
-    const [rows] = await pool.execute(`SELECT * FROM quality_assessment_audits${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY created_at DESC`, params);
+    const [rows] = await pool.execute(`SELECT quality_assessment_audits.* FROM ${from}${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY quality_assessment_audits.created_at DESC`, params);
     return rows.map((row) => ({ id: String(row.id), operatorId: row.operator_id, action: row.action, targetType: row.target_type, targetId: row.target_id, metadata: jsonValue(row.metadata, null), createdAt: row.created_at }));
   }
 
