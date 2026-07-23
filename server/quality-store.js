@@ -21,8 +21,11 @@ let initialized = false;
 
 function qualitySchemaStatements() {
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
+  // The checked-in CREATE statements describe the current table shape. Legacy
+  // ALTER migrations are applied by `npm run db:init`, which inspects metadata
+  // first so the same release works with both MySQL and TiDB.
   return schema.split(";").map((statement) => statement.trim()).filter((statement) => (
-    /^(?:CREATE TABLE IF NOT EXISTS|ALTER TABLE) quality_(?:rule_versions|assessment_)/.test(statement)
+    /^CREATE TABLE IF NOT EXISTS quality_(?:rule_versions|assessment_)/.test(statement)
   ));
 }
 
