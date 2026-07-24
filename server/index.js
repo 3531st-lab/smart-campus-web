@@ -929,6 +929,13 @@ function classGroupingKey(student) {
   return student.classKey || UNASSIGNED_CLASS_KEY;
 }
 
+function isClassSchemaUnavailable(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "");
+  return ["ER_NO_SUCH_TABLE", "ER_BAD_TABLE_ERROR", "ER_BAD_FIELD_ERROR", "ER_NO_SUCH_COLUMN"].includes(code)
+    || /table .* doesn't exist|unknown table|unknown column|doesn't exist/i.test(message);
+}
+
 function classAdminFilters(url, { includeRole = true } = {}) {
   return {
     query: String(url.searchParams.get("query") || "").trim().slice(0, 120),
@@ -1000,10 +1007,11 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
       .sort(compareClassAdminIdentity);
     const pageRows = rows.slice(offset, offset + limit);
     const previous = offset > 0 ? rows[offset - 1] : null;
+    const first = pageRows[0] || null;
     return {
       students: pageRows,
       totalCount: rows.length,
-      continuedClassKey: previous && classGroupingKey(pageRows[0]) === classGroupingKey(previous) ? classGroupingKey(pageRows[0]) : null
+      continuedClassKey: previous && first && classGroupingKey(first) === classGroupingKey(previous) ? classGroupingKey(first) : null
     };
   }
 
@@ -1018,34 +1026,21 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
   if (["active", "disabled"].includes(filters.status)) { conditions.push("s.status = ?"); values.push(filters.status); }
   if (filters.school) { conditions.push("s.school = ?"); values.push(filters.school); }
   if (filters.college) { conditions.push("s.college = ?"); values.push(filters.college); }
-  if (filters.className) {
-    conditions.push("(COALESCE(cc.class_name, s.class_name) = ? OR EXISTS (SELECT 1 FROM class_assignments caf INNER JOIN campus_classes ccf ON ccf.id = caf.class_id WHERE caf.user_id = s.id AND caf.active = 1 AND ccf.class_name = ?))");
-    values.push(filters.className, filters.className);
-  }
+  if (filters.className) { conditions.push("s.class_name = ?"); values.push(filters.className); }
   if (filters.query) {
     const like = `%${filters.query}%`;
-    conditions.push("(s.name LIKE ? OR s.school LIKE ? OR s.college LIKE ? OR s.major LIKE ? OR COALESCE(cc.class_name, s.class_name) LIKE ? OR s.student_no LIKE ? OR s.phone LIKE ?)");
+    conditions.push("(s.name LIKE ? OR s.school LIKE ? OR s.college LIKE ? OR s.major LIKE ? OR s.class_name LIKE ? OR s.student_no LIKE ? OR s.phone LIKE ?)");
     values.push(like, like, like, like, like, like, like);
   }
-  const join = `
-    LEFT JOIN class_assignments ca ON ca.id = (
-      SELECT ca2.id FROM class_assignments ca2
-      WHERE ca2.user_id = s.id AND ca2.active = 1
-      ORDER BY CASE ca2.duty WHEN 'monitor' THEN 0 WHEN 'league_secretary' THEN 1 WHEN 'class_admin' THEN 2 WHEN 'head_teacher' THEN 3 WHEN 'subject_teacher' THEN 4 ELSE 5 END, ca2.class_id, ca2.id
-      LIMIT 1
-    )
-    LEFT JOIN campus_classes cc ON cc.id = ca.class_id
-  `;
   const where = `WHERE ${conditions.join(" AND ")}`;
-  const [countRows] = await getPool().execute(`SELECT COUNT(*) AS total FROM students s ${join} ${where}`, values);
+  const [countRows] = await getPool().execute(`SELECT COUNT(*) AS total FROM students s ${where}`, values);
   const start = Math.max(0, offset - 1);
   const fetchLimit = limit + (offset > 0 ? 1 : 0);
   const [rows] = await getPool().execute(`
-    SELECT s.*, ca.class_id, ca.duty, cc.class_key AS assignment_class_key, cc.class_name AS assignment_class_name
-    FROM students s ${join} ${where}
-    ORDER BY s.school, s.college, COALESCE(cc.class_name, s.class_name),
+    SELECT s.*
+    FROM students s ${where}
+    ORDER BY s.school, s.college, s.class_name,
       CASE s.role WHEN 'student' THEN 0 WHEN 'teacher' THEN 1 WHEN 'admin' THEN 2 WHEN 'super_admin' THEN 3 ELSE 4 END,
-      CASE ca.duty WHEN 'monitor' THEN 0 WHEN 'league_secretary' THEN 1 WHEN 'class_admin' THEN 2 WHEN 'head_teacher' THEN 3 WHEN 'subject_teacher' THEN 4 ELSE 5 END,
       s.name, s.student_no
     LIMIT ${fetchLimit} OFFSET ${start}
   `, values);
@@ -1053,26 +1048,43 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
   const pageUserIds = [...new Set(rows.map((row) => String(row.id)))];
   if (pageUserIds.length) {
     const placeholders = pageUserIds.map(() => "?").join(",");
-    [assignmentRows] = await getPool().execute(`
-      SELECT ca.id, ca.user_id, ca.class_id, ca.duty, cc.school, cc.college, cc.class_name
-      FROM class_assignments ca INNER JOIN campus_classes cc ON cc.id = ca.class_id
-      WHERE ca.active = 1 AND ca.user_id IN (${placeholders})
-      ORDER BY cc.school, cc.college, cc.class_name, ca.duty, ca.id
-    `, pageUserIds);
+    try {
+      [assignmentRows] = await getPool().execute(`
+        SELECT ca.id, ca.user_id, ca.class_id, ca.duty, cc.class_key, cc.school, cc.college, cc.class_name
+        FROM class_assignments ca INNER JOIN campus_classes cc ON cc.id = ca.class_id
+        WHERE ca.active = 1 AND ca.user_id IN (${placeholders})
+        ORDER BY cc.school, cc.college, cc.class_name,
+          CASE ca.duty WHEN 'monitor' THEN 0 WHEN 'league_secretary' THEN 1 WHEN 'class_admin' THEN 2 WHEN 'head_teacher' THEN 3 WHEN 'subject_teacher' THEN 4 ELSE 5 END,
+          ca.id
+      `, pageUserIds);
+    } catch (error) {
+      // Deployments created before class groups can still show identity records.
+      if (!isClassSchemaUnavailable(error)) throw error;
+    }
   }
-  const identities = rows.map((row) => classIdentityFields(normalizedAdminIdentity(row), row.class_id ? {
-    class_id: row.class_id,
-    duty: row.duty
-  } : null, row.class_id ? {
-    id: row.class_id,
-    class_name: row.assignment_class_name,
-    class_key: row.assignment_class_key
-  } : null, assignmentRows.filter((item) => String(item.user_id) === String(row.id)).map((item) => assignmentRowForAdmin(item, item))));
+  const assignmentsByUser = new Map();
+  for (const assignment of assignmentRows) {
+    const userId = String(assignment.user_id);
+    assignmentsByUser.set(userId, [...(assignmentsByUser.get(userId) || []), assignment]);
+  }
+  const identities = rows.map((row) => {
+    const assignments = assignmentsByUser.get(String(row.id)) || [];
+    const primary = assignments[0] || null;
+    return classIdentityFields(normalizedAdminIdentity(row), primary ? {
+      class_id: primary.class_id,
+      duty: primary.duty
+    } : null, primary ? {
+      id: primary.class_id,
+      class_name: primary.class_name,
+      class_key: primary.class_key
+    } : null, assignments.map((item) => assignmentRowForAdmin(item, item)));
+  });
   const previous = offset > 0 ? identities.shift() : null;
+  const first = identities[0] || null;
   return {
     students: identities,
     totalCount: Number(countRows[0]?.total || 0),
-    continuedClassKey: previous && classGroupingKey(identities[0]) === classGroupingKey(previous) ? classGroupingKey(identities[0]) : null
+    continuedClassKey: previous && first && classGroupingKey(first) === classGroupingKey(previous) ? classGroupingKey(first) : null
   };
 }
 
@@ -1102,17 +1114,36 @@ async function listAdminClasses(filters = {}) {
   if (filters.school) { conditions.push("cc.school = ?"); values.push(filters.school); }
   if (filters.college) { conditions.push("cc.college = ?"); values.push(filters.college); }
   if (filters.className) { conditions.push("cc.class_name = ?"); values.push(filters.className); }
-  const [rows] = await getPool().execute(`
-    SELECT cc.id, cc.school, cc.college, cc.class_name, cc.class_key, cc.group_id, cc.status,
-      SUM(CASE WHEN ca.active = 1 AND s.role = 'student' THEN 1 ELSE 0 END) AS student_count,
-      SUM(CASE WHEN ca.active = 1 AND s.role = 'teacher' THEN 1 ELSE 0 END) AS teacher_count
-    FROM campus_classes cc
-    LEFT JOIN class_assignments ca ON ca.class_id = cc.id AND ca.active = 1
-    LEFT JOIN students s ON s.id = ca.user_id
-    WHERE ${conditions.join(" AND ")}
-    GROUP BY cc.id, cc.school, cc.college, cc.class_name, cc.class_key, cc.group_id, cc.status
-    ORDER BY cc.school, cc.college, cc.class_name
-  `, values);
+  let rows;
+  try {
+    [rows] = await getPool().execute(`
+      SELECT cc.id, cc.school, cc.college, cc.class_name, cc.class_key, cc.group_id, cc.status,
+        SUM(CASE WHEN ca.active = 1 AND s.role = 'student' THEN 1 ELSE 0 END) AS student_count,
+        SUM(CASE WHEN ca.active = 1 AND s.role = 'teacher' THEN 1 ELSE 0 END) AS teacher_count
+      FROM campus_classes cc
+      LEFT JOIN class_assignments ca ON ca.class_id = cc.id AND ca.active = 1
+      LEFT JOIN students s ON s.id = ca.user_id
+      WHERE ${conditions.join(" AND ")}
+      GROUP BY cc.id, cc.school, cc.college, cc.class_name, cc.class_key, cc.group_id, cc.status
+      ORDER BY cc.school, cc.college, cc.class_name
+    `, values);
+  } catch (error) {
+    if (!isClassSchemaUnavailable(error)) throw error;
+    const fallbackValues = [];
+    const fallbackConditions = ["s.role <> 'guest'", "s.status = 'active'", "s.class_name <> ''"];
+    if (filters.school) { fallbackConditions.push("s.school = ?"); fallbackValues.push(filters.school); }
+    if (filters.college) { fallbackConditions.push("s.college = ?"); fallbackValues.push(filters.college); }
+    if (filters.className) { fallbackConditions.push("s.class_name = ?"); fallbackValues.push(filters.className); }
+    [rows] = await getPool().execute(`
+      SELECT MIN(s.id) AS id, s.school, s.college, s.class_name, '' AS class_key, NULL AS group_id, 'active' AS status,
+        SUM(CASE WHEN s.role = 'student' THEN 1 ELSE 0 END) AS student_count,
+        SUM(CASE WHEN s.role = 'teacher' THEN 1 ELSE 0 END) AS teacher_count
+      FROM students s
+      WHERE ${fallbackConditions.join(" AND ")}
+      GROUP BY s.school, s.college, s.class_name
+      ORDER BY s.school, s.college, s.class_name
+    `, fallbackValues);
+  }
   return rows.map((row) => ({
     id: String(row.id), school: row.school, college: row.college, className: row.class_name,
     classKey: row.class_key, groupId: row.group_id || null, status: row.status || "active",

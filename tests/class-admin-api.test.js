@@ -369,6 +369,11 @@ test("role counts honor class filters and unassigned continuation uses a sentine
   }
   const page = await jsonRequest("/api/admin/students?school=续页大学&role=teacher&page=2&pageSize=10");
   assert.equal(page.payload.continuedClassKey, "__unassigned__");
+
+  const emptyTrailingPage = await jsonRequest("/api/admin/students?school=续页大学&role=teacher&page=3&pageSize=10");
+  assert.equal(emptyTrailingPage.response.status, 200);
+  assert.deepEqual(emptyTrailingPage.payload.students, []);
+  assert.equal(emptyTrailingPage.payload.continuedClassKey, null);
 });
 
 test("identity UI exposes grouped class controls for desktop and mobile", () => {
