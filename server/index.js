@@ -19,6 +19,7 @@ const data = require("./data");
 const XLSX = require("xlsx");
 const timetableCore = require("../public/timetable-core-v155.js");
 const studentStore = require("./student-store");
+const permanentAdmins = require("./permanent-admins");
 const classStore = require("./class-store");
 const { mysqlConfigured, getPool } = require("./db");
 const { CLASS_DUTIES, classKey, classDutyRank, normalizeClassPart } = require("./class-domain");
@@ -873,7 +874,11 @@ function maskPhone(phone) {
 
 function adminStudent(student) {
   const { phone, syncError, ...safeStudent } = student;
-  return { ...safeStudent, phoneMasked: maskPhone(phone) };
+  return {
+    ...safeStudent,
+    phoneMasked: maskPhone(phone),
+    protectedIdentity: permanentAdmins.isPermanentSuperAdmin(student)
+  };
 }
 
 const STUDENT_CLASS_DUTIES = new Set(["member", "monitor", "league_secretary", "class_admin"]);
@@ -1773,6 +1778,55 @@ async function handleApi(req, res) {
       await studentStore.logAdminAction("upsert_student", student.studentNo, { operator: adminUser.studentNo, school: student.school, major: student.major, className: student.className });
       clearIdentitySchoolCache();
       sendJson(res, 200, { student: adminStudent(student), syncError: student.syncError || null });
+      return;
+    }
+
+    if (route === "DELETE /api/admin/students") {
+      if (!isSuperAdmin) {
+        sendError(res, 403, "仅总管理员可以删除用户身份");
+        return;
+      }
+      const body = await parseBody(req);
+      const target = body.userId
+        ? await studentStore.findById(String(body.userId))
+        : await studentStore.findByStudentNo({
+          school: String(body.school || ""),
+          studentNo: String(body.studentNo || "")
+        });
+      if (!target) {
+        sendError(res, 404, "未找到该用户身份");
+        return;
+      }
+      if (target.id === adminUser.id) {
+        sendError(res, 400, "不能删除当前登录的总管理员身份");
+        return;
+      }
+      if (permanentAdmins.isPermanentSuperAdmin(target)) {
+        sendError(res, 400, "系统固定总管理员身份不可删除");
+        return;
+      }
+      if (String(body.confirmation || "").trim() !== String(target.studentNo || "").trim()) {
+        sendError(res, 400, "请输入目标学号或工号完成删除确认");
+        return;
+      }
+      const result = await studentStore.deleteStudent({ id: target.id });
+      if (!result.deleted) {
+        sendError(res, 404, "用户身份已不存在");
+        return;
+      }
+      await studentStore.logAdminAction("delete_student_identity", target.studentNo, {
+        operator: adminUser.studentNo,
+        targetId: target.id,
+        targetRole: target.role,
+        school: target.school,
+        removedRelations: result.removedRelations
+      });
+      clearIdentitySchoolCache();
+      sendJson(res, 200, {
+        deleted: true,
+        userId: target.id,
+        removedRelations: result.removedRelations
+      });
       return;
     }
 

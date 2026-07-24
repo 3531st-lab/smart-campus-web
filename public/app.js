@@ -6921,6 +6921,12 @@ const routes = {
         const groupingKey = student.classKey || "__unassigned__";
         const heading = groupingKey !== lastKey ? `<tr class="class-group-heading"><td colspan="10"><div><strong>${escapeHtml(student.className ? `${student.school} · ${student.college} · ${student.className}` : "班级资料不完整")}</strong><span>${classCounts.get(student.classKey) ?? "-"} 人${index === 0 && continuedKey === groupingKey ? " · 接上页" : ""}</span></div></td></tr>` : "";
         lastKey = groupingKey;
+        const deletionProtected = student.protectedIdentity || student.id === state.user?.id;
+        const deleteAction = canManageRoles
+          ? deletionProtected
+            ? `<span class="badge" title="系统固定身份或当前登录账号不可删除">受保护</span>`
+            : `<button class="ghost-btn danger student-delete-btn" type="button" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}" data-name="${escapeHtml(student.name)}">删除身份</button>`
+          : "";
         return `${heading}<tr class="student-account-row">
           <td><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.college || "未填写学院")}</small></td>
           <td>${escapeHtml(student.school)}<small>${escapeHtml(student.major)}</small></td>
@@ -6931,7 +6937,7 @@ const routes = {
           <td>${canManageRoles ? `<select class="student-role-select" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}"><option value="student" ${student.role === "student" ? "selected" : ""}>学生</option><option value="teacher" ${student.role === "teacher" ? "selected" : ""}>老师</option><option value="admin" ${student.role === "admin" ? "selected" : ""}>普通管理员</option><option value="super_admin" ${student.role === "super_admin" ? "selected" : ""}>总管理员</option></select>` : `<strong>${accountRoleLabel(student.role)}</strong>`}</td>
           <td><span class="badge ${student.status === "active" ? "success" : ""}">${student.status === "active" ? "正常" : "停用"}</span></td>
           <td><span class="badge ${student.hasPassword ? "success" : ""}">${student.hasPassword ? "已设置" : "待手机号设置"}</span></td>
-          <td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}</td>
+          <td class="student-account-actions"><button class="ghost-btn student-password-reset-btn" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}">重置密码</button>${student.role === "super_admin" ? "" : `<button class="ghost-btn student-status-btn" data-user-id="${escapeHtml(student.id)}" data-school="${escapeHtml(student.school)}" data-student-no="${escapeHtml(student.studentNo)}" data-next-status="${student.status === "active" ? "disabled" : "active"}">${student.status === "active" ? "停用" : "启用"}</button>`}${deleteAction}</td>
         </tr>`;
       }).join("");
     }
@@ -7082,6 +7088,7 @@ const routes = {
           bindStudentStatusButtons();
           bindStudentRoleSelects();
           bindStudentPasswordResetButtons();
+          bindStudentDeleteButtons();
           bindClassAssignmentControls();
         }
         function updateAccountListMeta(result) {
@@ -7318,6 +7325,40 @@ const routes = {
           });
         }
         bindStudentPasswordResetButtons();
+        function bindStudentDeleteButtons() {
+          document.querySelectorAll(".student-delete-btn").forEach((button) => {
+            if (button.dataset.bound === "true") return;
+            button.dataset.bound = "true";
+            button.addEventListener("click", async () => {
+              const confirmation = window.prompt(
+                `将永久删除“${button.dataset.name}”的登录身份及班级、课表、预约等关联资料。此操作不可撤销。\n\n请输入学号或工号 ${button.dataset.studentNo} 确认删除：`
+              );
+              if (confirmation === null) return;
+              if (confirmation.trim() !== button.dataset.studentNo) {
+                toast("学号或工号不匹配，已取消删除");
+                return;
+              }
+              button.disabled = true;
+              try {
+                await adminApi("/api/admin/students", {
+                  method: "DELETE",
+                  body: JSON.stringify({
+                    userId: button.dataset.userId,
+                    school: button.dataset.school,
+                    studentNo: button.dataset.studentNo,
+                    confirmation
+                  })
+                });
+                toast("用户身份已删除");
+                await loadFilteredStudents({ page: 1 });
+              } catch (error) {
+                toast(error.message);
+                button.disabled = false;
+              }
+            });
+          });
+        }
+        bindStudentDeleteButtons();
         function bindStudentRoleSelects() {
           document.querySelectorAll(".student-role-select").forEach((select) => {
             if (select.dataset.bound === "true") return;

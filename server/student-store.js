@@ -975,6 +975,102 @@ async function setStudentRole(identityInput, role) {
   return { updated: true, syncError: await synchronizeClassAssignment({ ...target, role }) };
 }
 
+function removeMemoryRows(rows, predicate) {
+  if (!Array.isArray(rows)) return 0;
+  let removed = 0;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (!predicate(rows[index])) continue;
+    rows.splice(index, 1);
+    removed += 1;
+  }
+  return removed;
+}
+
+async function executeOptionalDelete(connection, sql, params) {
+  try {
+    const [result] = await connection.execute(sql, params);
+    return Number(result.affectedRows || 0);
+  } catch (error) {
+    if (error?.code === "ER_NO_SUCH_TABLE") return 0;
+    throw error;
+  }
+}
+
+async function deleteStudent(identityInput) {
+  const target = await findByStudentNo(identityInput);
+  if (!target) return { deleted: false, removedRelations: 0 };
+  if (permanentAdmins.isPermanentSuperAdmin(target)) {
+    const error = new Error("系统固定总管理员身份不可删除");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!mysqlConfigured) {
+    const recordIds = new Set(
+      (data.qualityAssessmentRecords || [])
+        .filter((record) => record.studentId === target.id)
+        .map((record) => record.id)
+    );
+    let removedRelations = 0;
+    removedRelations += removeMemoryRows(data.classAssignments, (row) => row.userId === target.id);
+    removedRelations += removeMemoryRows(data.chatMembers, (row) => row.userId === target.id);
+    removedRelations += removeMemoryRows(data.chatJoinRequests, (row) => row.applicantId === target.id || row.reviewerId === target.id);
+    removedRelations += removeMemoryRows(data.chatInvites, (row) => row.inviterId === target.id || row.inviteeId === target.id);
+    removedRelations += removeMemoryRows(data.chatInviteTokens, (row) => row.creatorId === target.id);
+    removedRelations += removeMemoryRows(data.chatReadCursors, (row) => row.userId === target.id);
+    removedRelations += removeMemoryRows(data.chatAppeals, (row) => row.appellantId === target.id || row.reviewerId === target.id);
+    removedRelations += removeMemoryRows(data.classSyncErrors, (row) => row.userId === target.id);
+    removedRelations += removeMemoryRows(data.reservations, (row) => row.userId === target.id);
+    removedRelations += removeMemoryRows(data.qualityAssessmentEvidence, (row) => recordIds.has(row.recordId));
+    removedRelations += removeMemoryRows(data.qualityAssessmentItems, (row) => recordIds.has(row.recordId));
+    removedRelations += removeMemoryRows(data.qualityAssessmentReviews, (row) => recordIds.has(row.recordId));
+    removedRelations += removeMemoryRows(data.qualityAssessmentAppeals, (row) => recordIds.has(row.recordId));
+    removedRelations += removeMemoryRows(data.qualityAssessmentRecords, (row) => row.studentId === target.id);
+    removedRelations += removeMemoryRows(data.legalConsents, (row) => row.userId === target.id);
+    const deleted = removeMemoryRows(data.users, (row) => row.id === target.id) > 0;
+    return { deleted, removedRelations };
+  }
+
+  await initialize();
+  const connection = await getPool().getConnection();
+  let removedRelations = 0;
+  try {
+    await connection.beginTransaction();
+    const identityDeletes = [
+      ["DELETE FROM chat_read_cursors WHERE user_id = ?", [target.id]],
+      ["DELETE FROM chat_sticker_favorites WHERE user_id = ?", [target.id]],
+      ["DELETE FROM chat_join_requests WHERE applicant_id = ?", [target.id]],
+      ["DELETE FROM chat_invites WHERE inviter_id = ? OR invitee_id = ?", [target.id, target.id]],
+      ["DELETE FROM chat_invite_tokens WHERE creator_id = ?", [target.id]],
+      ["DELETE FROM chat_members WHERE user_id = ?", [target.id]],
+      ["DELETE FROM class_assignments WHERE user_id = ?", [target.id]],
+      ["DELETE FROM class_sync_errors WHERE user_id = ?", [target.id]],
+      ["DELETE FROM notification_receipts WHERE user_id = ?", [target.id]],
+      ["DELETE FROM legal_consents WHERE user_id = ?", [target.id]],
+      ["DELETE FROM user_timetable_courses WHERE owner_key = ?", [target.id]],
+      ["DELETE FROM user_timetable_preferences WHERE owner_key = ?", [target.id]],
+      ["DELETE FROM lab_reservations WHERE user_id = ?", [target.id]],
+      ["DELETE FROM quality_assessment_evidence WHERE record_id IN (SELECT id FROM quality_assessment_records WHERE student_id = ?)", [target.id]],
+      ["DELETE FROM quality_assessment_items WHERE record_id IN (SELECT id FROM quality_assessment_records WHERE student_id = ?)", [target.id]],
+      ["DELETE FROM quality_assessment_reviews WHERE record_id IN (SELECT id FROM quality_assessment_records WHERE student_id = ?)", [target.id]],
+      ["DELETE FROM quality_assessment_appeals WHERE record_id IN (SELECT id FROM quality_assessment_records WHERE student_id = ?)", [target.id]],
+      ["DELETE FROM quality_assessment_records WHERE student_id = ?", [target.id]]
+    ];
+    for (const [sql, params] of identityDeletes) {
+      removedRelations += await executeOptionalDelete(connection, sql, params);
+    }
+    await executeOptionalDelete(connection, "UPDATE chat_groups SET owner_id = NULL WHERE owner_id = ?", [target.id]);
+    const [result] = await connection.execute("DELETE FROM students WHERE id = ?", [target.id]);
+    await connection.commit();
+    return { deleted: Number(result.affectedRows || 0) > 0, removedRelations };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function findByStudentNo(identityInput) {
   const identity = normalizeStudentNoIdentity(identityInput);
   if (!identity.id && !identity.studentNo) return null;
@@ -1120,6 +1216,7 @@ module.exports = {
   bulkUpsertStudents,
   setStudentStatus,
   setStudentRole,
+  deleteStudent,
   findByStudentNo,
   setPassword,
   clearPassword,

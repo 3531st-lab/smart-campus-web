@@ -402,3 +402,70 @@ test("identity UI exposes grouped class controls for desktop and mobile", () => 
   assert.match(styles, /\.class-group-heading/);
   assert.match(styles, /@media \(max-width: 560px\)[\s\S]*\.student-class-filters/);
 });
+
+test("only a super administrator can permanently delete an identity", async () => {
+  const target = {
+    id: "class-api-delete-target",
+    name: "Delete Target",
+    school: "Delete Test University",
+    college: "Test College",
+    major: "Test Major",
+    className: "Test Class",
+    studentNo: "DELETE-001",
+    phone: "13900009999",
+    status: "active",
+    role: "student",
+    verified: true
+  };
+  data.users.push(target);
+  data.classAssignments.push({
+    id: "delete-assignment",
+    classId: digitalClass.id,
+    userId: target.id,
+    duty: "member",
+    source: "test",
+    active: true
+  });
+  try {
+    const forbidden = await jsonRequest("/api/admin/students", {
+      userId: "class-api-admin",
+      method: "DELETE",
+      body: { userId: target.id, confirmation: target.studentNo }
+    });
+    assert.equal(forbidden.response.status, 403);
+    assert.equal(data.users.some((user) => user.id === target.id), true);
+
+    const wrongConfirmation = await jsonRequest("/api/admin/students", {
+      userId: "u-1001",
+      method: "DELETE",
+      body: { userId: target.id, confirmation: "WRONG" }
+    });
+    assert.equal(wrongConfirmation.response.status, 400);
+
+    const deleted = await jsonRequest("/api/admin/students", {
+      userId: "u-1001",
+      method: "DELETE",
+      body: { userId: target.id, confirmation: target.studentNo }
+    });
+    assert.equal(deleted.response.status, 200);
+    assert.equal(deleted.payload.deleted, true);
+    assert.equal(data.users.some((user) => user.id === target.id), false);
+    assert.equal(data.classAssignments.some((row) => row.userId === target.id), false);
+  } finally {
+    const userIndex = data.users.findIndex((user) => user.id === target.id);
+    if (userIndex >= 0) data.users.splice(userIndex, 1);
+    for (let index = data.classAssignments.length - 1; index >= 0; index -= 1) {
+      if (data.classAssignments[index].userId === target.id) data.classAssignments.splice(index, 1);
+    }
+  }
+});
+
+test("a super administrator cannot delete the current signed-in identity", async () => {
+  const result = await jsonRequest("/api/admin/students", {
+    userId: "u-1001",
+    method: "DELETE",
+    body: { userId: "u-1001", confirmation: "CLASS-SUPER-ADMIN" }
+  });
+  assert.equal(result.response.status, 400);
+  assert.equal(data.users.some((user) => user.id === "u-1001"), true);
+});
