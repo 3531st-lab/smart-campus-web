@@ -1088,6 +1088,50 @@ async function listClassAdminStudents(filters, { limit, offset, visibleRoles = [
   };
 }
 
+async function countClassAdminStudentsByRole(filters, { roles }) {
+  const allowedRoles = [...new Set((roles || []).filter(Boolean))];
+  const counts = Object.fromEntries(allowedRoles.map((role) => [role, 0]));
+  if (!allowedRoles.length) return counts;
+
+  if (!mysqlConfigured) {
+    for (const user of data.users) {
+      if (user.role === "guest" || !allowedRoles.includes(user.role)) continue;
+      const identity = normalizedAdminIdentity(user);
+      const { assignment, campusClass, classAssignments } = memoryClassAssignment(identity.id);
+      const student = classIdentityFields(identity, assignment, campusClass, classAssignments);
+      if (!matchesClassAdminFilters(student, { ...filters, role: "" }, allowedRoles)) continue;
+      counts[user.role] += 1;
+    }
+    return counts;
+  }
+
+  await studentStore.initialize();
+  const values = [...allowedRoles];
+  const conditions = [
+    "s.role <> 'guest'",
+    `s.role IN (${allowedRoles.map(() => "?").join(",")})`
+  ];
+  if (["active", "disabled"].includes(filters.status)) { conditions.push("s.status = ?"); values.push(filters.status); }
+  if (filters.school) { conditions.push("s.school = ?"); values.push(filters.school); }
+  if (filters.college) { conditions.push("s.college = ?"); values.push(filters.college); }
+  if (filters.className) { conditions.push("s.class_name = ?"); values.push(filters.className); }
+  if (filters.query) {
+    const like = `%${filters.query}%`;
+    conditions.push("(s.name LIKE ? OR s.school LIKE ? OR s.college LIKE ? OR s.major LIKE ? OR s.class_name LIKE ? OR s.student_no LIKE ? OR s.phone LIKE ?)");
+    values.push(like, like, like, like, like, like, like);
+  }
+  const [rows] = await getPool().execute(`
+    SELECT s.role, COUNT(*) AS total
+    FROM students s
+    WHERE ${conditions.join(" AND ")}
+    GROUP BY s.role
+  `, values);
+  for (const row of rows) {
+    if (Object.hasOwn(counts, row.role)) counts[row.role] = Number(row.total || 0);
+  }
+  return counts;
+}
+
 async function listAdminClasses(filters = {}) {
   if (!mysqlConfigured) {
     return data.campusClasses
@@ -1686,17 +1730,16 @@ async function handleApi(req, res) {
       const visibleRoles = isSuperAdmin ? [] : ["student", "teacher"];
       filters.role = roleFilter;
       const rolesToCount = isSuperAdmin ? ["student", "teacher", "admin", "super_admin"] : ["student", "teacher"];
-      const [studentPage, roleCountPages] = await Promise.all([
+      const [studentPage, roleCounts] = await Promise.all([
         listClassAdminStudents(filters, {
           limit: pageSize,
           offset: (page - 1) * pageSize,
           visibleRoles
         }),
-        Promise.all(rolesToCount.map((role) => listClassAdminStudents({ ...filters, role }, { limit: 1, offset: 0, visibleRoles })))
+        countClassAdminStudentsByRole(filters, { roles: rolesToCount })
       ]);
       const { students, totalCount, continuedClassKey } = studentPage;
       const visibleStudents = isSuperAdmin ? students : students.filter((student) => ["student", "teacher"].includes(student.role));
-      const roleCounts = Object.fromEntries(rolesToCount.map((role, index) => [role, roleCountPages[index].totalCount]));
       const accountCount = Object.values(roleCounts).reduce((sum, count) => sum + Number(count || 0), 0);
       sendJson(res, 200, {
         students: visibleStudents.map(adminStudent),

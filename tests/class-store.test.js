@@ -407,7 +407,7 @@ test("runtime migration and MySQL admin assignment use the class lock order", ()
   assert.match(adminSource, /assigned_by/);
 });
 
-test("student reads remain available when startup identity maintenance fails", async () => {
+test("production student reads do not run startup identity maintenance", async () => {
   const environmentKeys = [
     "CAMPUS_USER_NAME",
     "CAMPUS_USER_SCHOOL",
@@ -443,6 +443,7 @@ test("student reads remain available when startup identity maintenance fails", a
     status: "active",
     verified: 1
   };
+  let maintenanceWriteCount = 0;
   const fakeDb = {
     async query(sql) {
       if (/SELECT id, name, school, major, student_no FROM students/.test(sql)) return [[]];
@@ -451,9 +452,8 @@ test("student reads remain available when startup identity maintenance fails", a
     async execute(sql) {
       if (/SELECT \* FROM students WHERE school = \? AND student_no = \? LIMIT 1/.test(sql)) return [[]];
       if (/INSERT INTO students/.test(sql)) {
-        const error = new Error("simulated startup maintenance write failure");
-        error.code = "ER_STARTUP_MAINTENANCE";
-        throw error;
+        maintenanceWriteCount += 1;
+        return [{ affectedRows: 1 }];
       }
       if (/SELECT \* FROM students .*ORDER BY/.test(sql)) return [[listedStudent]];
       return [{ affectedRows: 0 }];
@@ -473,6 +473,7 @@ test("student reads remain available when startup identity maintenance fails", a
     const students = await isolatedStore.listStudents({ limit: 1 });
     assert.equal(students.length, 1);
     assert.equal(students[0].studentNo, "AVAILABLE-001");
+    assert.equal(maintenanceWriteCount, 0);
   } finally {
     environmentKeys.forEach((key) => {
       if (previousEnvironment[key] === undefined) delete process.env[key];

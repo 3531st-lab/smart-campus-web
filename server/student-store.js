@@ -69,8 +69,9 @@ function normalizeStudent(row) {
 async function initialize({ forceSchema = false } = {}) {
   if (!mysqlConfigured || (initialized && !forceSchema)) return;
   if (!autoMigrateSchema && !forceSchema) {
+    // Serverless requests must stay read-only during cold start. Schema changes,
+    // seed updates and class backfills belong to the explicit db:init command.
     initialized = true;
-    await runStartupMaintenance();
     return;
   }
   const db = getPool();

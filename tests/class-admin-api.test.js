@@ -376,6 +376,13 @@ test("role counts honor class filters and unassigned continuation uses a sentine
   assert.equal(emptyTrailingPage.payload.continuedClassKey, null);
 });
 
+test("mysql role counts use one grouped query instead of repeated student listings", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "server", "index.js"), "utf8");
+  assert.match(source, /async function countClassAdminStudentsByRole/);
+  assert.match(source, /GROUP BY s\.role/);
+  assert.doesNotMatch(source, /rolesToCount\.map\(\(role\) => listClassAdminStudents/);
+});
+
 test("identity UI exposes grouped class controls for desktop and mobile", () => {
   const root = path.join(__dirname, "..");
   const app = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
