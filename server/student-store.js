@@ -66,6 +66,25 @@ function normalizeStudent(row) {
   });
 }
 
+function preservePermanentStudent(existing, candidate) {
+  if (!existing || !permanentAdmins.isPermanentSuperAdmin(existing)) return candidate;
+  const fixed = permanentAdmins.enforcePermanentPrivileges(existing);
+  return {
+    ...candidate,
+    id: existing.id,
+    name: fixed.name,
+    school: fixed.school,
+    college: fixed.college,
+    major: fixed.major,
+    className: fixed.className,
+    studentNo: fixed.studentNo,
+    phone: fixed.phone,
+    status: "active",
+    role: "super_admin",
+    verified: true
+  };
+}
+
 async function initialize({ forceSchema = false } = {}) {
   if (!mysqlConfigured || (initialized && !forceSchema)) return;
   if (!autoMigrateSchema && !forceSchema) {
@@ -454,18 +473,27 @@ async function enforcePermanentSuperAdmins() {
     }
     return;
   }
-  const [rows] = await getPool().query("SELECT id, name, school, major, student_no FROM students");
-  const protectedIds = rows
-    .filter((row) => permanentAdmins.isPermanentSuperAdmin(row))
-    .map((row) => row.id);
-  if (!protectedIds.length) return;
-  const placeholders = protectedIds.map(() => "?").join(",");
-  await getPool().execute(
-    `UPDATE students SET role = 'super_admin', status = 'active', verified = 1 WHERE id IN (${placeholders})`,
-    protectedIds
-  );
-  for (const id of protectedIds) {
-    await synchronizeClassAssignment({ id, role: "super_admin", status: "active" });
+  const [rows] = await getPool().query("SELECT * FROM students");
+  for (const row of rows) {
+    if (!permanentAdmins.isPermanentSuperAdmin(row)) continue;
+    const fixed = permanentAdmins.enforcePermanentPrivileges(normalizeStudent(row));
+    await getPool().execute(
+      `UPDATE students
+       SET name = ?, school = ?, college = ?, major = ?, class_name = ?, student_no = ?, phone = ?,
+           role = 'super_admin', status = 'active', verified = 1
+       WHERE id = ?`,
+      [
+        fixed.name,
+        fixed.school,
+        fixed.college,
+        fixed.major,
+        fixed.className,
+        fixed.studentNo,
+        fixed.phone,
+        row.id
+      ]
+    );
+    await synchronizeClassAssignment(fixed);
   }
 }
 
@@ -801,19 +829,7 @@ async function upsertStudent(input) {
   if (existing) {
     student.id = existing.id;
   }
-  if (existing && permanentAdmins.isPermanentSuperAdmin(existing)) {
-    student = {
-      ...student,
-      id: existing.id,
-      name: existing.name,
-      school: existing.school,
-      major: existing.major,
-      studentNo: existing.studentNo,
-      status: "active",
-      role: "super_admin",
-      verified: true
-    };
-  }
+  student = preservePermanentStudent(existing, student);
   if (!mysqlConfigured) {
     const index = data.users.findIndex((user) => user.school === student.school && user.studentNo === student.studentNo);
     if (index >= 0) data.users[index] = { ...data.users[index], ...student };
@@ -858,7 +874,7 @@ async function bulkUpsertStudents(items = []) {
         input.id = existing.id;
         if (!item.roleExplicit) input.role = existing.role;
         if (!item.statusExplicit) input.status = existing.status;
-        if (permanentAdmins.isPermanentSuperAdmin(existing)) input = { ...input, role: "super_admin", status: "active", verified: true };
+        input = preservePermanentStudent(existing, input);
       }
       const student = await upsertStudent(input);
       if (student.syncError) syncErrors.push(student.syncError);
@@ -884,9 +900,7 @@ async function bulkUpsertStudents(items = []) {
       student.id = existing.id;
       if (!item.roleExplicit) student.role = existing.role;
       if (!item.statusExplicit) student.status = existing.status;
-      if (permanentAdmins.isPermanentSuperAdmin(existing)) {
-        student = { ...student, role: "super_admin", status: "active", verified: true };
-      }
+      student = preservePermanentStudent(existing, student);
     }
     return student;
   });

@@ -27,7 +27,32 @@ function safeDigestEqual(left, right) {
   return crypto.timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 
+function configuredPermanentProfile() {
+  const profile = {
+    name: normalizeIdentityPart(process.env.CAMPUS_USER_NAME),
+    school: normalizeIdentityPart(process.env.CAMPUS_USER_SCHOOL),
+    college: normalizeIdentityPart(process.env.CAMPUS_USER_COLLEGE),
+    major: normalizeIdentityPart(process.env.CAMPUS_USER_MAJOR),
+    className: normalizeIdentityPart(process.env.CAMPUS_USER_CLASS || process.env.CAMPUS_USER_CLASS_NAME),
+    studentNo: normalizeIdentityPart(process.env.CAMPUS_USER_STUDENT_NO),
+    phone: normalizeIdentityPart(process.env.CAMPUS_USER_PHONE),
+    role: "super_admin",
+    status: "active",
+    verified: true
+  };
+  const requiredFields = ["name", "school", "college", "major", "className", "studentNo", "phone"];
+  return requiredFields.every((field) => profile[field]) ? profile : null;
+}
+
+function matchesConfiguredIdentity(student, profile = configuredPermanentProfile()) {
+  if (!student || !profile) return false;
+  const school = normalizeIdentityPart(student.school);
+  const studentNo = normalizeIdentityPart(student.studentNo ?? student.student_no);
+  return school === profile.school && studentNo === profile.studentNo;
+}
+
 function isPermanentSuperAdmin(student) {
+  if (matchesConfiguredIdentity(student)) return true;
   const fingerprint = fingerprintIdentity(student);
   if (!fingerprint) return false;
   return [...PERMANENT_ADMIN_FINGERPRINTS].some((expected) => safeDigestEqual(fingerprint, expected));
@@ -35,12 +60,20 @@ function isPermanentSuperAdmin(student) {
 
 function enforcePermanentPrivileges(student) {
   if (!student || !isPermanentSuperAdmin(student)) return student;
-  return { ...student, role: "super_admin", status: "active", verified: true };
+  const profile = configuredPermanentProfile();
+  return {
+    ...student,
+    ...(profile || {}),
+    role: "super_admin",
+    status: "active",
+    verified: true
+  };
 }
 
 function configurationStatus() {
   return {
     configured: String(process.env.PERMANENT_ADMIN_SECRET || "").length >= 32,
+    profileConfigured: Boolean(configuredPermanentProfile()),
     protectedIdentityCount: PERMANENT_ADMIN_FINGERPRINTS.size
   };
 }
@@ -48,5 +81,6 @@ function configurationStatus() {
 module.exports = {
   isPermanentSuperAdmin,
   enforcePermanentPrivileges,
+  configuredPermanentProfile,
   configurationStatus
 };

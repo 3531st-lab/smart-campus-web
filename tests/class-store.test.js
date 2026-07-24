@@ -394,6 +394,72 @@ test("permanent-super-admin enforcement synchronizes assignment cleanup", async 
   }
 });
 
+test("permanent super admin profile cannot be overwritten by account updates", async () => {
+  const originalIsPermanent = permanentAdmins.isPermanentSuperAdmin;
+  const originalEnforce = permanentAdmins.enforcePermanentPrivileges;
+  const fixedProfile = {
+    id: "fixed-admin-profile",
+    name: "Fixed Admin",
+    school: "Fixed University",
+    college: "Fixed College",
+    major: "Fixed Major",
+    className: "Fixed Class",
+    studentNo: "FIXED-ADMIN-001",
+    phone: "13800001004",
+    status: "active",
+    role: "super_admin",
+    verified: true
+  };
+  data.users.push({ ...fixedProfile });
+  permanentAdmins.isPermanentSuperAdmin = (student) => student?.id === fixedProfile.id;
+  permanentAdmins.enforcePermanentPrivileges = (student) => student?.id === fixedProfile.id
+    ? { ...student, ...fixedProfile }
+    : student;
+
+  try {
+    const updated = await studentStore.upsertStudent({
+      ...fixedProfile,
+      name: "Changed Name",
+      college: "Changed College",
+      className: "Changed Class",
+      phone: "13800001999",
+      status: "disabled",
+      role: "student"
+    });
+    assert.deepEqual(
+      {
+        name: updated.name,
+        school: updated.school,
+        college: updated.college,
+        major: updated.major,
+        className: updated.className,
+        studentNo: updated.studentNo,
+        phone: updated.phone,
+        status: updated.status,
+        role: updated.role,
+        verified: updated.verified
+      },
+      {
+        name: fixedProfile.name,
+        school: fixedProfile.school,
+        college: fixedProfile.college,
+        major: fixedProfile.major,
+        className: fixedProfile.className,
+        studentNo: fixedProfile.studentNo,
+        phone: fixedProfile.phone,
+        status: "active",
+        role: "super_admin",
+        verified: true
+      }
+    );
+  } finally {
+    permanentAdmins.isPermanentSuperAdmin = originalIsPermanent;
+    permanentAdmins.enforcePermanentPrivileges = originalEnforce;
+    const userIndex = data.users.findIndex((user) => user.id === fixedProfile.id);
+    if (userIndex >= 0) data.users.splice(userIndex, 1);
+  }
+});
+
 test("runtime migration and MySQL admin assignment use the class lock order", () => {
   const studentSource = fs.readFileSync(path.join(__dirname, "..", "server", "student-store.js"), "utf8");
   const classSource = fs.readFileSync(path.join(__dirname, "..", "server", "class-store.js"), "utf8");
@@ -446,7 +512,7 @@ test("production student reads do not run startup identity maintenance", async (
   let maintenanceWriteCount = 0;
   const fakeDb = {
     async query(sql) {
-      if (/SELECT id, name, school, major, student_no FROM students/.test(sql)) return [[]];
+      if (/SELECT \* FROM students/.test(sql)) return [[]];
       return [{ affectedRows: 0 }];
     },
     async execute(sql) {
@@ -486,7 +552,7 @@ test("forced runtime migration backfills existing identities into mandatory clas
   let syncCount = 0;
   const fakeDb = {
     async query(sql) {
-      if (/SELECT id, name, school, major, student_no FROM students/.test(sql)) return [[]];
+      if (/SELECT \* FROM students/.test(sql)) return [[]];
       return [{ affectedRows: 0 }];
     },
     async execute() {
@@ -577,7 +643,7 @@ test("MySQL sync error records durable failure honestly and keeps account write 
   const fakeDb = {
     async query(sql) {
       calls.push({ sql, params: [] });
-      if (/SELECT id, name, school, major, student_no FROM students/.test(sql)) return [[]];
+      if (/SELECT \* FROM students/.test(sql)) return [[]];
       return [{ affectedRows: 0 }];
     },
     async execute(sql, params = []) {
